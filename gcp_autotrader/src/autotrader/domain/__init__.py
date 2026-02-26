@@ -1,0 +1,2 @@
+"""Pure strategy domain logic."""
+

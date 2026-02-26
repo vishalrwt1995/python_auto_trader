@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+import json
+import uuid
+
+import typer
+
+from autotrader.container import get_container, get_settings
+from autotrader.services.log_sink import LogSink
+
+app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+
+def _print(obj):
+    typer.echo(json.dumps(obj, indent=2, default=str))
+
+
+@app.command()
+def health() -> None:
+    c = get_container()
+    out = {"ok": True, "project": c.settings.gcp.project_id, "region": c.settings.gcp.region, "paperTrade": c.settings.runtime.paper_trade}
+    _print(out)
+
+
+@app.command("bootstrap-sheets")
+def bootstrap_sheets() -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    _print({"ok": True, "spreadsheetId": c.settings.gcp.spreadsheet_id})
+
+
+@app.command("universe-sync")
+def universe_sync(limit: int = typer.Option(0)) -> None:
+    c = get_container()
+    sink = LogSink(c.sheets)
+    sink.action("Universe", "sync", "START", "", {"limit": limit})
+    c.sheets.ensure_core_sheets()
+    rows = c.universe_service().sync_universe_from_groww_instruments(limit=limit)
+    sink.action("Universe", "sync", "DONE", "universe synced", {"rows": rows})
+    sink.flush_all()
+    _print({"rows": rows})
+
+
+@app.command("raw-universe-refresh")
+def raw_universe_refresh() -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sink.action("Universe", "raw_universe_refresh", "START")
+    out = c.universe_service().refresh_raw_universe_from_upstox()
+    sink.action("Universe", "raw_universe_refresh", "DONE", "upstox raw universe snapshot stored", out)
+    sink.flush_all()
+    _print(out)
+
+
+@app.command("universe-build")
+def universe_build(limit: int = typer.Option(0), replace: bool = typer.Option(False)) -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sink.action("Universe", "build_from_raw", "START", "", {"limit": limit, "replace": replace})
+    out = c.universe_service().build_trading_universe_from_upstox_raw(limit=limit, replace=replace)
+    sink.action("Universe", "build_from_raw", "DONE", "trading universe built/appended", out)
+    sink.flush_all()
+    _print(out)
+
+
+@app.command("upstox-token-request")
+def upstox_token_request() -> None:
+    c = get_container()
+    out = c.upstox.request_access_token_v3()
+    _print(out)
+
+
+@app.command("premarket-precompute")
+def premarket_precompute(
+    target_size: int = typer.Option(300),
+    api_cap: int = typer.Option(120),
+    lookback_days: int = typer.Option(700),
+    min_bars: int = typer.Option(320),
+    fresh_hours: int = typer.Option(12),
+    cache_only: bool = typer.Option(False),
+    require_fresh_cache: bool = typer.Option(False),
+    require_full_coverage: bool = typer.Option(False),
+    require_today_scored: bool = typer.Option(False),
+    min_watchlist_score: int = typer.Option(1),
+) -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    regime = c.regime_service().get_market_regime()
+    sink.action("Universe", "premarket_precompute", "START", "", {"targetSize": target_size})
+    score_out = c.universe_service().score_universe_batch(
+        regime,
+        api_cap=api_cap,
+        lookback_days=lookback_days,
+        min_bars=min_bars,
+        fresh_hours=max(0, fresh_hours),
+        sheet_write_batch_size=200,
+        cache_only=cache_only,
+        require_fresh_cache=require_fresh_cache,
+    )
+    wl_out = c.universe_service().build_watchlist(
+        regime,
+        target_size=target_size,
+        min_score=max(1, min_watchlist_score),
+        require_today_scored=require_today_scored,
+        require_full_coverage=require_full_coverage,
+    )
+    sink.action("Universe", "premarket_precompute", "DONE", "watchlist ready", {"score": score_out, "watchlist": wl_out})
+    sink.flush_all()
+    _print({"regime": regime.__dict__, "score": score_out, "watchlist": wl_out})
+
+
+@app.command("score-cache-prefetch")
+def score_cache_prefetch(
+    api_cap: int = typer.Option(300),
+    lookback_days: int = typer.Option(700),
+    min_bars: int = typer.Option(320),
+) -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sink.action("Universe", "score_cache_prefetch", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
+    out = c.universe_service().prefetch_score_cache_batch(api_cap=max(0, api_cap), lookback_days=lookback_days, min_bars=min_bars)
+    sink.action("Universe", "score_cache_prefetch", "DONE", "score cache prefetch complete", out)
+    sink.flush_all()
+    _print(out)
+
+
+@app.command("score-cache-backfill-full")
+def score_cache_backfill_full(
+    api_cap: int = typer.Option(600),
+    lookback_days: int = typer.Option(9500),
+    min_bars: int = typer.Option(320),
+) -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sink.action("Universe", "score_cache_backfill_full", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
+    out = c.universe_service().prefetch_score_cache_batch(api_cap=max(0, api_cap), lookback_days=max(3650, lookback_days), min_bars=min_bars)
+    sink.action("Universe", "score_cache_backfill_full", "DONE", "full score-cache backfill batch complete", out)
+    sink.flush_all()
+    _print(out)
+
+
+@app.command("score-cache-update-close")
+def score_cache_update_close(
+    api_cap: int = typer.Option(600),
+    lookback_days: int = typer.Option(700),
+    min_bars: int = typer.Option(320),
+) -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sink.action("Universe", "score_cache_update_close", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
+    out = c.universe_service().prefetch_score_cache_batch(api_cap=max(0, api_cap), lookback_days=lookback_days, min_bars=min_bars)
+    sink.action("Universe", "score_cache_update_close", "DONE", "daily score-cache update batch complete", out)
+    sink.flush_all()
+    _print(out)
+
+
+@app.command("scan-once")
+def scan_once(
+    force: bool = typer.Option(False),
+    allow_live_orders: bool = typer.Option(False, help="Unsafe unless paper mode is disabled and broker mapping validated."),
+) -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    out = c.trading_service().run_scan_once(allow_live_orders=allow_live_orders, force=force)
+    _print(out)
+
+
+@app.command("reset-runtime")
+def reset_runtime() -> None:
+    c = get_container()
+    cleared = c.state.delete_runtime_prefix(("runtime:", "entry:", "exit:", "fired:", "pending_"))
+    _print({"cleared": cleared})
+
+
+@app.command("version")
+def version() -> None:
+    _print({"version": "0.1.0", "build": uuid.uuid4().hex[:8]})
+
+
+if __name__ == "__main__":
+    get_settings()
+    app()

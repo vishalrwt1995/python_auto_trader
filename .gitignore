@@ -1,0 +1,23 @@
+.DS_Store
+
+# Local exports / artifacts
+*.xlsx
+*.xls
+*.csv
+*.pdf
+
+# Local backups / temp files
+backups/
+*.bak
+*.bak_*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local runtime/config
+.env
+.env.*
+gcp_autotrader/logs/

@@ -1,0 +1,839 @@
+AUTO TRADER - ALGORITHM GUIDE
+Universe Selection, Score Calculation, and Watchlist Building
+Production Flow (Python + GCP)
+Prepared for PM / Product Strategy Understanding
+
+Document Goal
+-------------
+This document explains the core algorithm and flow for:
+1) Universe selection (which stocks enter the system)
+2) History / daily candle readiness (what data is needed)
+3) Score calculation (how each stock gets a score)
+4) Watchlist building (how top stocks are chosen each day)
+
+Focus:
+- Core computation logic and business meaning
+- What each abbreviation in the sheet means
+- How to interpret score values as a product manager
+- What to enhance next to make the algorithm more intelligent
+
+This document reflects the current production flow you finalized.
+
+
+SECTION 1 - CURRENT DAILY FLOW (HIGH-LEVEL)
+-------------------------------------------
+Timezone: IST (Asia/Kolkata), weekdays only
+
+03:35 AM  - Upstox token request (manual approval needed in current auth model)
+04:00 AM  - Bootstrap sheets (repair headers/core tabs)
+06:15 AM  - Universe refresh + append new symbols + start backfill for new symbols
+07:05 AM  - Latest official daily candle update retry 1
+07:25 AM  - Latest official daily candle update retry 2
+07:45 AM  - Latest official daily candle update retry 3
+08:05 AM  - Latest official daily candle update retry 4
+08:30 AM  - Score refresh (daily-candle-based score for all scoreable rows)
+09:16 AM  - Watchlist refresh (live regime + watchlist, today-scored rows only)
+
+Current watchlist policy:
+- require_full_coverage = false
+- require_today_scored  = true
+
+Meaning:
+- Watchlist does not wait for 100% universe coverage
+- But it only uses rows scored today
+
+
+SECTION 2 - WHAT THE SYSTEM IS OPTIMIZING FOR
+---------------------------------------------
+Business objective:
+- Generate a high-quality daily watchlist of technically strong, tradeable stocks
+- Use official daily candles for scoring
+- Use live market regime near market open for context and product selection
+
+What "intelligent" means in this version:
+- Structured technical ranking (trend + momentum + breakout + volume + penalties)
+- Clear explainability in sheet (`Sc Calc` and `Last Note`)
+- Controlled handling of missing/insufficient/stale data
+- Stable daily workflow with retries and logs
+
+What this version is NOT yet doing:
+- Fundamentals
+- News/sentiment
+- Event awareness (earnings/corporate actions)
+- Outcome-based adaptive weighting
+- Portfolio optimization beyond simple MIS/CNC diversification
+
+
+SECTION 3 - KEY SHEETS AND WHAT THEY MEAN
+-----------------------------------------
+1) "🧾 Universe Instruments"
+- Master list of all eligible stocks considered by the system
+- Stores score outputs, last scan timestamp, notes, and score breakdown
+
+2) "History Candle 1D"
+- Visible progress/index of cached 1D candle readiness per instrument
+- Shows bar count, last candle date, status, and source notes
+
+3) "📋 Watchlist"
+- Final selected list for trading day preparation
+
+4) "🧩 Project Log"
+- Primary runtime and job debugging log
+
+Important:
+- Canonical history index tab is "History Candle 1D" (plain name)
+- Runtime logs are centralized in "🧩 Project Log"
+
+
+SECTION 4 - UNIVERSE SELECTION ALGORITHM (HOW STOCKS ENTER)
+-----------------------------------------------------------
+Source of truth:
+- Upstox instruments complete snapshot (BOD raw universe JSON.gz)
+
+Universe pipeline job:
+- raw universe refresh -> append new eligible rows -> start backfill for new rows
+
+4.1 Input Source
+----------------
+The system fetches Upstox "complete instruments" snapshot and stores it in GCS:
+- versioned path (by run date)
+- latest path (current snapshot)
+- metadata (provider, date, item count, source URL)
+
+4.2 Eligibility Rules (Exact Logic)
+-----------------------------------
+For each raw instrument row, the system extracts:
+- segment
+- exchange
+- trading symbol
+- instrument_key
+- instrument_type
+- security_type
+- isin
+- name
+
+A row is eligible only if all of the following pass:
+
+1. symbol exists
+2. instrument_key exists
+3. segment is one of:
+   - NSE_EQ
+   - BSE_EQ
+4. exchange is one of:
+   - NSE
+   - BSE
+5. instrument_type (if provided) is:
+   - EQ
+   - EQUITY
+6. is_enabled is true
+7. NOT delisted
+8. NOT suspended
+
+In simple PM language:
+- Only active, equity cash stocks on NSE/BSE are considered
+- Derivatives, indices, funds, disabled/delisted/suspended rows are excluded
+
+4.3 De-duplication Logic
+------------------------
+Deduplication key:
+- Prefer ISIN if available
+- Else use symbol
+
+If duplicate appears across exchanges (NSE/BSE):
+- NSE is preferred over BSE
+
+Why this matters:
+- Prevents duplicate company rows
+- Keeps the main tradable NSE listing where possible
+
+4.4 Universe Row Defaults on Append
+-----------------------------------
+When a new eligible stock is appended to "🧾 Universe Instruments", defaults are:
+- Segment = CASH
+- Allowed Product = BOTH
+- Strategy = AUTO
+- Sector = UNKNOWN
+- Beta = 1.0
+- Enabled = Y
+- Priority = 0
+- Score/RSI/VolRatio = 0
+- Last scan fields empty
+- Provider = UPSTOX
+- Instrument Key / Source Segment / Security Type populated
+
+4.5 Append-Only Design (Current)
+--------------------------------
+Universe build runs in append mode (replace=false):
+- Existing universe rows are preserved
+- Only new symbols are added
+
+Why this is good:
+- Stable row identities and history continuity
+- Existing scores/history are not reset
+
+4.6 New-Instrument Backfill Kickoff (Patched Behavior)
+-----------------------------------------------------
+After appending new rows, the same 06:15 job starts one backfill pass.
+
+Important patch:
+- Newly appended symbols are prioritized first in the kickoff backfill pass
+- This prevents them from being delayed behind API caps (`backfill_api_cap`)
+
+PM meaning:
+- If new symbols are added today, they start entering the data pipeline immediately
+
+
+SECTION 5 - HISTORY / CANDLE DATA READINESS ALGORITHM
+-----------------------------------------------------
+The score uses daily candles (1D).
+The system maintains a 1D cache per instrument in GCS and tracks readiness in
+"History Candle 1D".
+
+5.1 Two Different Processes
+---------------------------
+A) Full history backfill (on-demand / initial setup)
+- Builds long history for each stock
+- Used mainly when universe is first built or when many new symbols are added
+- Not run continuously anymore
+
+B) Latest 1D candle update (daily morning retries)
+- Fetches only latest official daily candle updates after Upstox publishes them
+- Runs multiple times between 07:05 and 08:05 IST
+
+5.2 Why Morning Retries Exist
+-----------------------------
+Upstox may not publish the latest official daily candle for every stock exactly
+at 07:00 IST.
+
+So the system retries at:
+- 07:05
+- 07:25
+- 07:45
+- 08:05
+
+This increases freshness before the 08:30 scoring job.
+
+5.3 No Provisional Intraday Daily Candle (Current Policy)
+---------------------------------------------------------
+You chose to keep the system simpler and stricter:
+- Do NOT build provisional daily candles from intraday data
+- Use only official Upstox daily 1D candles
+
+This improves consistency/auditability, with a tradeoff:
+- Some rows may remain stale if provider is late
+
+5.4 History Readiness Threshold
+-------------------------------
+Current policy threshold:
+- min_bars = 320 (for score eligibility)
+
+Note:
+- Indicator computation itself can work with fewer bars (~80 minimum),
+  but production scoring policy uses 320 bars for quality consistency.
+
+5.5 History Statuses (History Candle 1D)
+---------------------------------------
+FRESH_READY
+  Latest expected daily candle exists and row has enough bars (>= min_bars)
+
+INSUFFICIENT_HISTORY_FINAL
+  Official data exists, but total bars are below 320
+  Valid terminal state for that stock (not a bug)
+
+STALE_SKIPPED
+  Latest expected daily candle was not available after retries
+  Patched behavior: morning close-update retries now re-attempt same-day stale
+  rows across the 07:05-08:05 retry window
+
+5.6 What "prefillComplete" Means in Job Output
+----------------------------------------------
+prefillComplete = true means every row is accounted for as either:
+- fresh ready, or
+- terminal insufficient-history, or
+- terminal stale skipped
+
+It does NOT mean every row is fresh-scoreable.
+
+PM meaning:
+- "Processing of the universe is complete for this run"
+- not "all symbols are fresh and scoreable"
+
+
+SECTION 6 - SCORE CALCULATION ALGORITHM (UNIVERSE SCORE)
+--------------------------------------------------------
+Job: score-refresh (08:30 AM)
+
+Current score-refresh settings:
+- cache_only = true
+- require_fresh_cache = true
+- fresh_hours = 0 (forces scoring run for the day)
+
+6.1 What the Score Represents
+-----------------------------
+The Universe score is a technical ranking score (0-100) for daily watchlist
+selection.
+
+It answers:
+"How technically attractive is this stock right now (daily timeframe)?"
+
+It is NOT:
+- a trade entry/exit signal by itself
+- a valuation/fundamental score
+- a live intraday momentum score
+
+6.2 Score Prerequisites (Per Instrument)
+----------------------------------------
+A row is scored only if:
+1. Enabled = Y
+2. It has enough bars (>= 320)
+3. Latest daily candle is current (fresh) when require_fresh_cache=true
+4. Indicators can be computed
+
+If not, the row is marked with Skip=* in Last Note and a short code in Sc Calc.
+
+6.3 Indicator Inputs Used by the Score
+--------------------------------------
+From the latest daily candle history, the system computes:
+- EMA fast / medium / slow
+- EMA20 / EMA50
+- RSI
+- MACD (line/signal/histogram + cross state)
+- Supertrend (for direction logic used elsewhere)
+- VWAP
+- OBV
+- ATR
+- Bollinger Bands
+- Stochastic
+- Volume ratio (current volume / avg recent volume)
+- Breakout / near-breakout / distance from 52-week high
+- Candle patterns (doji, bullish engulfing, bearish engulfing, bear candle)
+
+6.4 Universe Score Formula (Core)
+---------------------------------
+The score is built as:
+
+Score = clamp(E + P + R + M + B + V + O + N + U, 0, 100)
+
+Where:
+- E, P, R, M, B, V, O are positive feature contributions
+- N is penalty (negative)
+- U is manual priority bonus
+
+6.5 Exact Score Components (Meaning + Current Weights)
+------------------------------------------------------
+E = EMA Trend Structure
+- +20 if strong EMA stack (fast > med > slow)
+- +10 if weaker but still bullish structure (EMA20 > EMA50)
+
+Meaning (PM):
+- Rewards clean bullish trend structure
+
+P = Price Position
+- +5 if close > EMA20
+- +5 if close > EMA50
+
+Meaning:
+- Rewards stocks trading above key medium trend averages
+
+R = RSI (Momentum Quality)
+- +15 if RSI in 50 to 65 (healthy strength zone)
+- +8  if RSI in 40 to <50 (improving / moderate strength)
+- +5  if RSI in >65 to 75 (strong but closer to stretch)
+
+Meaning:
+- Prefers healthy momentum, not too weak and not too overheated
+
+M = MACD
+- +5 if MACD histogram > 0
+- +5 if MACD crossed == BUY
+
+Meaning:
+- Rewards positive momentum and fresh momentum turns
+
+B = Breakout / 52W Context
+- +10 if near_breakout
+- +15 if breakout
+- else +8 if within 10% of 52-week high
+
+Meaning:
+- Rewards leadership and relative strength (stocks near highs)
+
+V = Volume Confirmation
+- +15 if volume ratio >= 1.5
+- +10 if volume ratio >= 1.2
+- +5 if volume ratio >= 1.0
+
+Meaning:
+- Rewards moves supported by participation (volume)
+
+O = OBV Confirmation
+- +5 if OBV is rising
+
+Meaning:
+- Confirms accumulation / volume trend support
+
+N = Penalties (Negative)
+- -15 if RSI > 80 (overbought/stretch)
+- -15 if RSI < 35 (very weak)
+- -5 if doji candle
+- -5 if bearish candle
+- -10 if >30% below 52-week high
+
+Meaning:
+- Penalizes weak/uncertain/late/low-quality setups
+
+U = User Priority Bonus (Manual PM Override)
+- +0 to +5 from Universe "Priority" column
+- Current workbook default is 0 for all rows
+
+Meaning:
+- PM can intentionally lift preferred names without overriding the full logic
+
+6.6 Final Score Rules
+---------------------
+- Priority bonus added after raw technical score
+- Score is rounded and clamped to 0..100
+- Many scores can be zero; that is valid and often desirable
+
+Why zero can be good:
+- The algorithm is rejecting weak setups
+- It improves watchlist signal quality
+
+6.7 What "Score = 0" Usually Means
+----------------------------------
+There are two types of zero rows:
+
+A) Valid scored zero (not a bug)
+- Last Note starts with "Score=0|..."
+- Technical positives were weak and/or penalties dominated
+
+B) Skip zero
+- Last Note starts with "Skip=..."
+- Row was not scoreable (insufficient history / stale cache / indicator none)
+
+In your workbook (5):
+- Total score=0 rows: 1046
+- Valid scored zero rows: 760
+- Skip rows (insufficient history): 286
+
+
+SECTION 7 - SHEET OUTPUTS FROM SCORING (HOW TO READ THEM)
+---------------------------------------------------------
+Scoring writes to "🧾 Universe Instruments" columns:
+- Score
+- RSI
+- Vol Ratio
+- Last Scanned
+- Last Product
+- Last Strategy
+- Last Note
+- Sc Calc
+
+7.1 Sc Calc (Column Z) - Short Breakdown Format
+-----------------------------------------------
+Format:
+E..|P..|R..|M..|B..|V..|O..|N..|U..|S..
+
+Examples:
+High quality:
+E20|P10|R15|M5|B25|V15|O5|N0|U0|S95
+
+Low but valid:
+E0|P0|R8|M5|B0|V0|O5|N-10|U0|S8
+
+Skip format examples:
+IH:171/320   (insufficient history)
+STL:2026-02-25 (stale cache)
+IND0:2026-02-25 (indicator unavailable)
+
+7.2 Last Note (Column R) - Human-Readable Scoring Note
+------------------------------------------------------
+Typical scored row:
+Score=95|Reg=TREND|Bias=NEUTRAL|RSI=62.4|VR=7.83|LCD=2026-02-25|
+Src=gcs_score_cache_1d_partial_history|Prov=N
+
+Field meanings:
+- Score = final universe score
+- Reg   = market regime at score time
+- Bias  = market bias (from Nifty change)
+- RSI   = latest RSI used
+- VR    = volume ratio
+- LCD   = last candle date used
+- Src   = data source/cache source used
+- Prov  = provisional candle used? (current flow should be N)
+
+7.3 Source (Src) Values You Commonly See
+----------------------------------------
+gcs_score_cache_1d
+  Normal cached daily candles, current and scoreable
+
+gcs_score_cache_1d_partial_history
+  Latest candle is current and bars >= 320, but long lookback cache is not fully
+  complete for the requested historical horizon. Still scoreable.
+
+gcs_score_cache_1d_insufficient_history_final
+  Official data exists but bars < 320; valid skip
+
+
+SECTION 8 - MARKET REGIME ALGORITHM (USED IN SCORE NOTES + WATCHLIST)
+---------------------------------------------------------------------
+Even though the numeric universe score is daily-candle technical, the jobs also
+compute market regime for context and watchlist behavior.
+
+8.1 Current Regime Data Sources
+-------------------------------
+- Nifty quote    : Upstox (live/latest)
+- India VIX      : Upstox (Yahoo fallback)
+- PCR            : Upstox option-chain (fallback neutral)
+- FII/DII        : fallback placeholder (neutral)
+
+8.2 Regime Outputs
+------------------
+Bias:
+- BULLISH / BEARISH / NEUTRAL
+  based mainly on Nifty % move vs threshold
+
+Regime:
+- TREND / RANGE / AVOID
+  based on VIX, Nifty movement, and PCR consistency
+
+8.3 Default Thresholds (Current Settings)
+-----------------------------------------
+- nifty_trend_pct = 0.3
+- vix_trend_max   = 15
+- vix_safe_max    = 20
+- pcr_bull_min    = 0.8
+- pcr_bear_max    = 1.2
+
+Simple interpretation:
+- TREND = supportive conditions
+- RANGE = mixed/choppy conditions
+- AVOID = high risk / unstable conditions
+
+Important dependency:
+- Score job and watchlist job fetch regime first
+- If Upstox token is expired and not approved, these jobs can fail
+
+
+SECTION 9 - PRODUCT AND STRATEGY RESOLUTION (PER ROW)
+-----------------------------------------------------
+9.1 Product Resolution (CNC vs MIS)
+-----------------------------------
+Current logic (simplified):
+1. If Allowed Product is fixed (MIS or CNC), use that
+2. Else if regime is RANGE -> prefer MIS
+3. Else if regime is AVOID -> prefer CNC
+4. Else if beta >= 1.25 and score >= 60 -> MIS
+5. Else -> CNC
+
+In your current workbook (5):
+- Beta is 1.0 for all rows
+- Allowed Product is BOTH for all rows
+So most rows currently resolve to CNC
+
+9.2 Strategy Resolution
+-----------------------
+If Strategy is not AUTO, use the fixed strategy from Universe.
+If AUTO:
+- if MACD crossed BUY/SELL -> EMA_CROSS
+- elif RSI in 45..65 -> RSI_EMA
+- else -> ALL
+
+This impacts labels and downstream interpretation, not the score formula itself.
+
+
+SECTION 10 - WATCHLIST BUILDING ALGORITHM (09:16 AM)
+----------------------------------------------------
+Job: watchlist-refresh
+
+Purpose:
+- Build the final morning watchlist using live market regime + today's scores
+
+Current scheduler settings:
+- target_size = 300
+- require_full_coverage = false
+- require_today_scored = true
+- min_watchlist_score = 1
+
+10.1 Coverage Gates (Current)
+-----------------------------
+Because require_full_coverage=false:
+- Watchlist is NOT blocked if some universe rows are skipped or stale
+
+Because require_today_scored=true:
+- Only rows scored today are eligible
+
+This is the exact behavior you requested.
+
+10.2 Candidate Pool Filter (Per Universe Row)
+---------------------------------------------
+A row is eligible for watchlist pool only if:
+1. Last Note does not start with "Skip="
+2. Score is finite and > 0
+3. (Because require_today_scored=true) Last Scanned date is today
+4. Score >= min_watchlist_score (default 1)
+
+Then it collects:
+- symbol / exchange / segment
+- resolved product (CNC/MIS)
+- strategy
+- sector
+- beta
+- score
+- note (Last Note)
+
+10.3 Diversified Selection Logic
+--------------------------------
+After sorting by:
+- higher score first
+- higher beta next
+- symbol (stable tie-break)
+
+The selector tries to fill:
+- ~50% MIS target
+- ~50% CNC target
+
+Process:
+1. First pass: respect MIS/CNC targets
+2. Second pass: relax target limits if needed
+3. Final fill: complete remaining slots from ordered list
+
+This gives a practical mix while preserving top-score priority.
+
+10.4 Watchlist Output
+---------------------
+Selected rows are written to "📋 Watchlist" with:
+- symbol
+- exchange / segment
+- product
+- strategy
+- sector
+- beta
+- enabled flag
+- note (usually the Last Note with score/regime context)
+
+
+SECTION 11 - WHAT YOUR CURRENT WORKBOOK (5) TELLS US
+----------------------------------------------------
+Analyzed file:
+/Users/vishalrawat/Downloads/Groww_AutoTrader_Python_GCP (5).xlsx
+
+11.1 Universe Summary
+---------------------
+- Total enabled rows: 2422
+- Scored rows: 2136
+- Insufficient history skips: 286
+- Zero-score rows (all): 1046
+- Valid scored zeros (not skips): 760
+
+11.2 Score Distribution (2422 Rows)
+-----------------------------------
+- 00-09 : 1318
+- 10-19 : 248
+- 20-29 : 171
+- 30-39 : 120
+- 40-49 : 171
+- 50-59 : 195
+- 60-69 : 106
+- 70-79 : 59
+- 80-89 : 28
+- 90-99 : 6
+
+PM interpretation:
+- The algorithm is selective and penalty-heavy
+- Many names are intentionally weak/low-ranked
+- Only a small set receives very high scores (90+)
+
+11.3 Source Mix (Score Data Quality View)
+-----------------------------------------
+- gcs_score_cache_1d                     : 1211
+- gcs_score_cache_1d_partial_history     : 925
+- insufficient_history_final             : 286
+
+Meaning:
+- Most scoreable rows are using proper cached daily data
+- A large subset is "partial_history" but still scoreable and current
+- 286 rows are valid skips due not enough bars
+
+11.4 Example High-Score Stocks (from Workbook 5)
+------------------------------------------------
+MAKEINDIA (Score 95)
+- E20|P10|R15|M5|B25|V15|O5|N0|U0|S95
+
+SUNDARMFIN (Score 95)
+- E20|P10|R15|M10|B25|V10|O5|N0|U0|S95
+
+Meaning:
+- Strong trend structure + near/breakout context + volume confirmation
+
+11.5 Example Valid Zero Scores (not bugs)
+-----------------------------------------
+21STCENMGM
+- E0|P0|R0|M0|B0|V5|O0|N-30|U0|S0
+
+AARTIDRUGS
+- E0|P0|R8|M5|B0|V0|O5|N-20|U0|S0
+
+Meaning:
+- Some positives exist, but penalties dominate and score clamps to 0
+
+
+SECTION 12 - PM CONTROL KNOBS (WHAT YOU CAN DEFINE)
+---------------------------------------------------
+These are the most useful fields in "🧾 Universe Instruments" for product control:
+
+1) Enabled (Y/N)
+- Exclude unwanted or operationally poor names immediately
+
+2) Priority (0..5)
+- Adds U bonus in score (`Sc Calc` shows U)
+- Use for strategic names or PM focus lists
+
+3) Allowed Product (MIS / CNC / BOTH)
+- Forces or constrains product selection
+- Useful for risk control and execution behavior
+
+4) Strategy (AUTO or fixed)
+- Keeps AUTO for most names
+- Fix only if you want special handling for a subset
+
+5) Sector
+- Currently all UNKNOWN in your workbook
+- Filling sector improves future diversification and analytics
+
+6) Beta
+- Currently all 1.0 in your workbook
+- Populating beta improves risk-aware product logic (MIS/CNC)
+
+
+SECTION 13 - HOW TO THINK ABOUT SCORES AS A PRODUCT MANAGER
+-----------------------------------------------------------
+Simple interpretation bands (practical):
+
+80-100 : Very strong technical setup
+60-79  : Good setup / strong watchlist candidates
+40-59  : Medium quality / selective candidates
+1-39   : Weak / early / low conviction
+0      : Reject for now (or heavily penalized)
+Skip=* : Not scoreable under current policy (mostly insufficient history)
+
+Important PM insight:
+- A low score is not "bad data"; it is the algorithm saying "not attractive now"
+- Improving output quality is more about better ranking and better inputs than
+  forcing more names to high scores
+
+
+SECTION 14 - WHAT MAKES THIS ALGORITHM "INTELLIGENT" TODAY
+----------------------------------------------------------
+Current strengths:
+- Multi-factor technical ranking (not single-indicator)
+- Breakout + trend + momentum + volume + penalty balance
+- Explainable scoring via `Sc Calc` and `Last Note`
+- Robust handling of incomplete and stale data
+- Watchlist can proceed without full universe blocking
+- Today-only score requirement for watchlist improves freshness
+
+
+SECTION 15 - WHAT WILL MAKE IT MORE INTELLIGENT NEXT (ROADMAP)
+--------------------------------------------------------------
+Highest value improvements (recommended order):
+
+Phase 1 - Data Quality / PM Controls
+1. Fill Sector for all stocks
+2. Fill Beta for all stocks (or compute it)
+3. Define Priority policy (when to set 1..5)
+4. Liquidity screening / liquidity penalties
+
+Phase 2 - Ranking Intelligence
+1. Sector-relative strength (stock vs sector benchmark)
+2. Volatility-normalized momentum
+3. Trend persistence / score stability smoothing
+4. Better breakout quality (follow-through vs weak breakout)
+5. Relative volume quality (not just one-day spike)
+
+Phase 3 - Execution/Regime Robustness
+1. Score fallback when Upstox token is missing (neutral regime fallback)
+2. Alerts on token failure / stale data / low score coverage
+3. Metrics dashboard (durations, fetches, coverage, skips, watchlist quality)
+4. Outcome-based weight tuning (feedback from actual trade results)
+
+Phase 4 - Advanced Intelligence
+1. Multi-timeframe scoring (Daily + 60m)
+2. Event risk layer (earnings/corporate actions)
+3. Portfolio-aware watchlist optimization
+4. Regime-specific score weights (TREND vs RANGE)
+
+
+SECTION 16 - KNOWN LIMITATIONS (CURRENT, ACCEPTED)
+--------------------------------------------------
+1. Upstox token approval is still manual daily in the current auth model
+2. Score is technical-only (no fundamentals/news layer yet)
+3. PCR can fallback depending on Upstox option-chain auth/entitlements
+4. FII/DII is placeholder fallback
+5. Sector/Beta/Priority inputs are present but mostly unused in current sheet
+
+
+SECTION 17 - GLOSSARY (QUICK PM REFERENCE)
+------------------------------------------
+Universe
+  Full stock list that the system is allowed to consider
+
+Backfill
+  Downloading historical daily candles so a stock becomes scoreable
+
+Latest 1D update
+  Fetching the most recent official daily candle
+
+Fresh cache
+  Cached candles include the expected latest daily candle date
+
+Stale cache
+  Cached candles do not have the expected latest daily candle date
+
+LCD
+  Last Candle Date used for scoring
+
+VR
+  Volume Ratio = current volume / average volume
+
+EMA
+  Exponential Moving Average (trend indicator)
+
+MACD
+  Momentum indicator based on moving averages
+
+RSI
+  Relative Strength Index (momentum/strength)
+
+OBV
+  On-Balance Volume (volume trend confirmation)
+
+Regime
+  Market condition label (TREND / RANGE / AVOID)
+
+Bias
+  Market directional lean (BULLISH / BEARISH / NEUTRAL)
+
+
+SECTION 18 - FINAL PM SUMMARY (ONE PAGE)
+----------------------------------------
+Every day the algorithm:
+1. Refreshes the stock universe and appends new eligible equities
+2. Backfills new symbols so they can join the scoring system
+3. Retries official 1D daily candle updates after 7 AM
+4. Scores all fresh scoreable stocks using a transparent technical formula
+5. Builds a 09:16 AM watchlist using live market regime and today's scores only
+
+What the score means:
+- It is a technical attractiveness rank, not a trade guarantee
+- High score means strong trend + momentum + breakout + volume confirmation
+- Low/zero score usually means weak structure or strong penalties
+
+What improves output quality most:
+- Better input metadata (Sector, Beta, Priority)
+- Liquidity/risk-aware filters
+- Outcome-based score tuning
+- Regime-aware weighting over time
+
+End of document.
+
