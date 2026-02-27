@@ -10,7 +10,7 @@ from typing import Any
 
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
-from autotrader.adapters.upstox_client import UpstoxClient
+from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.models import RegimeSnapshot, UniverseRow
 from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
@@ -80,6 +80,18 @@ class UniverseService:
         c = str(code or "").strip().upper()[:10] or "SKIP"
         d = str(detail or "").strip()[:24]
         return f"{c}:{d}" if d else c
+
+    @staticmethod
+    def _is_invalid_instrument_key_error(exc: Exception) -> bool:
+        msg = str(exc or "").lower()
+        return "udapi100011" in msg or "invalid instrument key" in msg
+
+    @staticmethod
+    def _error_text_short(exc: Exception, max_len: int = 220) -> str:
+        msg = str(exc or "").replace("\n", " ").strip()
+        if len(msg) <= max_len:
+            return msg
+        return msg[: max(0, max_len - 3)].rstrip() + "..."
 
     def _read_score_cache_index_snapshot(self) -> dict[tuple[str, str, str], dict[str, str]]:
         out: dict[tuple[str, str, str], dict[str, str]] = {}
@@ -208,6 +220,21 @@ class UniverseService:
             return True
         return prev_src in {"upstox_api_incremental", "gcs_score_cache_1d_stale_fetch_empty"}
 
+    def _prefetch_should_skip_invalid_key_retry(
+        self,
+        prev_row: dict[str, str] | None,
+        candles: list[list[object]],
+    ) -> bool:
+        if not prev_row:
+            return False
+        if (prev_row.get("status") or "").upper() != "INVALID_KEY_SKIPPED":
+            return False
+        current_last = self._last_candle_text(candles)
+        prev_last = (prev_row.get("last_candle_time") or "").strip()
+        if not current_last and not prev_last:
+            return True
+        return bool(current_last) and current_last == prev_last
+
     def _score_cache_index_row(
         self,
         u: UniverseRow,
@@ -219,6 +246,7 @@ class UniverseService:
         min_bars: int,
         expected_lcd: str,
         updated_at: str,
+        last_error: str = "",
     ) -> list[object]:
         last_ts = self._last_candle_ts(candles)
         last_candle = last_ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if last_ts is not None else ""
@@ -231,6 +259,9 @@ class UniverseService:
         elif source == "gcs_score_cache_1d_stale_terminal":
             status = "STALE_SKIPPED"
             terminal = "STALE_CACHE"
+        elif source == "invalid_instrument_key_terminal":
+            status = "INVALID_KEY_SKIPPED"
+            terminal = "INVALID_INSTRUMENT_KEY"
         elif bars == 0:
             status = "MISSING"
         elif bars < min_bars:
@@ -240,7 +271,7 @@ class UniverseService:
         else:
             status = "STALE_READY"
 
-        last_error = ""
+        derived_last_error = ""
         if source in {
             "api_cap_blocked",
             "gcs_score_cache_1d_stale_api_cap_blocked",
@@ -248,8 +279,11 @@ class UniverseService:
             "cache_only_missing",
             "missing_instrument_key",
             "empty",
+            "invalid_instrument_key_terminal",
         }:
-            last_error = source
+            derived_last_error = source
+        if last_error:
+            derived_last_error = last_error
 
         file_name = path.rsplit("/", 1)[-1]
         isin = self._parse_pipe_kv(u.notes).get("isin", "")
@@ -268,7 +302,7 @@ class UniverseService:
             updated_at,
             status,
             api_calls,
-            last_error,
+            derived_last_error,
             file_name,
             isin,
             notes,
@@ -650,6 +684,7 @@ class UniverseService:
         fresh = 0
         terminal_insufficient = 0
         terminal_stale = 0
+        terminal_invalid_key = 0
         provisional_ready = 0
         pending = 0
         updated = 0
@@ -670,6 +705,7 @@ class UniverseService:
             before_fresh = before_ready and self._daily_cache_is_current(cached)
             prev_row = prev_index.get((u.symbol, u.exchange, u.segment))
             before_provisional = before_fresh and self._is_provisional_source((prev_row or {}).get("src", ""))
+            row_last_error = ""
             if before_fresh and not before_provisional:
                 ready += 1
                 fresh += 1
@@ -683,6 +719,7 @@ class UniverseService:
                         min_bars=min_bars,
                         expected_lcd=expected,
                         updated_at=updated_at,
+                        last_error=row_last_error,
                     )
                 )
                 continue
@@ -691,6 +728,10 @@ class UniverseService:
             if 0 < len(cached) < min_bars and self._daily_cache_is_current(cached):
                 candles, source, api_calls = cached, "gcs_score_cache_1d_insufficient_history_final", 0
             elif (
+                self._prefetch_should_skip_invalid_key_retry(prev_row, cached)
+            ):
+                candles, source, api_calls = cached, "invalid_instrument_key_terminal", 0
+            elif (
                 before_ready
                 and not allow_provisional_intraday
                 and not retry_stale_terminal_today
@@ -698,19 +739,33 @@ class UniverseService:
             ):
                 candles, source, api_calls = cached, "gcs_score_cache_1d_stale_terminal", 0
             else:
-                candles, source, api_calls = self._daily_score_candles(
-                    u.symbol,
-                    u.exchange,
-                    u.segment,
-                    u.instrument_key,
-                    lookback_days,
-                    min_bars,
-                    allow_api=(fetches < api_cap),
-                    cache_only=False,
-                    allow_provisional_intraday=allow_provisional_intraday,
-                    expected_lcd=expected,
-                    refresh_provisional_current=before_provisional,
-                )
+                try:
+                    candles, source, api_calls = self._daily_score_candles(
+                        u.symbol,
+                        u.exchange,
+                        u.segment,
+                        u.instrument_key,
+                        lookback_days,
+                        min_bars,
+                        allow_api=(fetches < api_cap),
+                        cache_only=False,
+                        allow_provisional_intraday=allow_provisional_intraday,
+                        expected_lcd=expected,
+                        refresh_provisional_current=before_provisional,
+                    )
+                except UpstoxApiError as exc:
+                    if not self._is_invalid_instrument_key_error(exc):
+                        raise
+                    candles, source, api_calls = cached, "invalid_instrument_key_terminal", 1
+                    row_last_error = self._error_text_short(exc)
+                    logger.warning(
+                        "prefetch_score_cache_batch skip invalid instrument key symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
+                        u.symbol,
+                        u.exchange,
+                        u.segment,
+                        u.instrument_key,
+                        row_last_error,
+                    )
             fetches += api_calls
             after_ready = len(candles) >= min_bars
             after_fresh = after_ready and self._daily_cache_is_current(candles)
@@ -738,6 +793,8 @@ class UniverseService:
                 terminal_insufficient += 1
             elif source == "gcs_score_cache_1d_stale_terminal":
                 terminal_stale += 1
+            elif source == "invalid_instrument_key_terminal":
+                terminal_invalid_key += 1
             if source in {"api_cap_blocked", "gcs_score_cache_1d_stale_api_cap_blocked"} and fetches >= api_cap:
                 # Continue scanning to count readiness but don't force more API beyond cap.
                 pass
@@ -752,6 +809,7 @@ class UniverseService:
                     min_bars=min_bars,
                     expected_lcd=expected,
                     updated_at=updated_at,
+                    last_error=row_last_error,
                 )
             )
 
@@ -759,7 +817,7 @@ class UniverseService:
         self.sheets.replace_score_cache_1d_index(score_cache_index_rows)
 
         total = len(rows)
-        complete = min(total, fresh + terminal_insufficient + terminal_stale)
+        complete = min(total, fresh + terminal_insufficient + terminal_stale + terminal_invalid_key)
         pending = max(0, total - complete)
         out = {
             "scanned": scanned,
@@ -771,6 +829,7 @@ class UniverseService:
             "provisionalReady": provisional_ready,
             "terminalInsufficientHistory": terminal_insufficient,
             "terminalStaleSkipped": terminal_stale,
+            "terminalInvalidInstrumentKey": terminal_invalid_key,
             "prefillDone": complete,
             "prefillComplete": pending == 0,
             "prefillCoveragePct": round((complete * 100.0 / total), 2) if total else 0.0,
@@ -781,8 +840,8 @@ class UniverseService:
             "expectedLatestDailyCandleDate": expected,
         }
         logger.info(
-            "prefetch_score_cache_batch complete scanned=%s fetches=%s updated=%s retriedNoChange=%s freshReady=%s terminalIH=%s terminalStale=%s prefillDone=%s/%s pending=%s expectedLCD=%s",
-            scanned, fetches, updated, retried_no_change, fresh, terminal_insufficient, terminal_stale, complete, total, pending, expected,
+            "prefetch_score_cache_batch complete scanned=%s fetches=%s updated=%s retriedNoChange=%s freshReady=%s terminalIH=%s terminalStale=%s terminalInvalidKey=%s prefillDone=%s/%s pending=%s expectedLCD=%s",
+            scanned, fetches, updated, retried_no_change, fresh, terminal_insufficient, terminal_stale, terminal_invalid_key, complete, total, pending, expected,
         )
         return out
 
@@ -824,7 +883,7 @@ class UniverseService:
         scored = 0
         scanned = 0
         fetches = 0
-        skip_counts = {"freshWindow": 0, "insufficientHistory": 0, "staleCache": 0, "indicatorNone": 0}
+        skip_counts = {"freshWindow": 0, "insufficientHistory": 0, "staleCache": 0, "indicatorNone": 0, "invalidInstrumentKey": 0}
         scored_zero = 0
         now = now_ist()
         expected_lcd = self._expected_latest_daily_candle_date(now).strftime("%Y-%m-%d")
@@ -844,16 +903,53 @@ class UniverseService:
                         skip_counts["freshWindow"] += 1
                         continue
 
-            candles, source, api_calls = self._daily_score_candles(
-                u.symbol,
-                u.exchange,
-                u.segment,
-                u.instrument_key,
-                lookback_days,
-                min_bars,
-                allow_api=(fetches < api_cap),
-                cache_only=cache_only,
-            )
+            try:
+                candles, source, api_calls = self._daily_score_candles(
+                    u.symbol,
+                    u.exchange,
+                    u.segment,
+                    u.instrument_key,
+                    lookback_days,
+                    min_bars,
+                    allow_api=(fetches < api_cap),
+                    cache_only=cache_only,
+                )
+            except UpstoxApiError as exc:
+                if not self._is_invalid_instrument_key_error(exc):
+                    raise
+                skip_counts["invalidInstrumentKey"] += 1
+                api_calls = 1
+                source = "invalid_instrument_key_terminal"
+                candles = self.gcs.read_candles(self.gcs.score_cache_1d_path(u.symbol, u.exchange, u.segment))
+                short_err = self._error_text_short(exc, max_len=96)
+                updates.append(
+                    (
+                        u.row_number,
+                        [
+                            u.score if math.isfinite(u.score) else 0,
+                            u.last_rsi if math.isfinite(u.last_rsi) else 0,
+                            u.last_vol_ratio if math.isfinite(u.last_vol_ratio) else 0,
+                            now_ist_str(),
+                            u.last_product or "",
+                            u.last_strategy or "",
+                            f"Skip=INVALID_INSTRUMENT_KEY|Bars={len(candles)}|Src={source}|Err={short_err}",
+                            self._score_calc_skip_short("INVKEY", u.instrument_key),
+                        ],
+                    )
+                )
+                logger.warning(
+                    "score_universe_batch skip invalid instrument key symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
+                    u.symbol,
+                    u.exchange,
+                    u.segment,
+                    u.instrument_key,
+                    short_err,
+                )
+                if len(updates) >= max(1, int(sheet_write_batch_size)):
+                    self.sheets.update_universe_score_columns(updates)
+                    updates.clear()
+                fetches += api_calls
+                continue
             fetches += api_calls
             if len(candles) < min_bars:
                 last_candle_ts = self._last_candle_ts(candles)
