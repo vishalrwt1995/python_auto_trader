@@ -10,6 +10,7 @@ from typing import Any
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.groww_client import GrowwClient
+from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.risk import calc_position_size
@@ -34,6 +35,7 @@ class TradingService:
     state: FirestoreStateStore
     gcs: GoogleCloudStorageStore
     groww: GrowwClient
+    upstox: UpstoxClient
     regime_service: MarketRegimeService
     order_service: OrderService
     log_sink: LogSink
@@ -66,10 +68,38 @@ class TradingService:
             "wrapped": wrapped,
         }
 
-    def _fetch_candles(self, symbol: str, exchange: str, segment: str, timeframe: str = "15m", lookback_days: int = 8) -> list[list[Any]]:
+    def _fetch_candles(
+        self,
+        symbol: str,
+        exchange: str,
+        segment: str,
+        *,
+        instrument_key: str = "",
+        timeframe: str = "15m",
+        lookback_days: int = 8,
+    ) -> list[list[Any]]:
         path = self.gcs.candle_cache_path(symbol, exchange, segment, timeframe)
         cached = self.gcs.read_candles(path)
         need = 80
+
+        # Upstox-first path for scanner runtime candles (current intraday session).
+        # We always attempt this first to keep scanner aligned with the active data provider.
+        tf = str(timeframe or "").strip().lower()
+        if instrument_key and tf in {"15m", "15min", "15minute"}:
+            try:
+                api = self.upstox.get_intraday_candles_v3(instrument_key, unit="minutes", interval=15)
+                if api:
+                    cached = self.gcs.merge_candles(path, api)
+            except Exception:
+                logger.warning(
+                    "scanner_upstox_intraday_fetch_failed symbol=%s exchange=%s segment=%s instrument_key=%s",
+                    symbol,
+                    exchange,
+                    segment,
+                    instrument_key,
+                    exc_info=True,
+                )
+
         if len(cached) >= need:
             return cached[-need:]
 
@@ -77,7 +107,19 @@ class TradingService:
         start = end - timedelta(days=lookback_days)
         from_str = start.strftime("%Y-%m-%d %H:%M:%S")
         to_str = end.strftime("%Y-%m-%d %H:%M:%S")
-        api = self.groww.get_candles_range(symbol, exchange, segment, timeframe, from_str, to_str)
+
+        # Groww fallback preserves backward compatibility and gives deeper historical intraday bars when available.
+        api: list[list[Any]] = []
+        try:
+            api = self.groww.get_candles_range(symbol, exchange, segment, timeframe, from_str, to_str)
+        except Exception:
+            logger.warning(
+                "scanner_groww_candle_fallback_failed symbol=%s exchange=%s segment=%s",
+                symbol,
+                exchange,
+                segment,
+                exc_info=True,
+            )
         if api:
             merged = self.gcs.merge_candles(path, api)
             return merged[-max(need, 120):]
@@ -112,15 +154,54 @@ class TradingService:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")
                 return {"skipped": "watchlist_empty"}
 
+            symbol_set = {str(w.symbol).strip().upper() for w in subset if str(w.symbol).strip()}
+            key_by_symbol: dict[str, str] = {}
+            if symbol_set:
+                try:
+                    for u in self.sheets.read_universe_rows():
+                        sym = str(u.symbol or "").strip().upper()
+                        if not sym or sym not in symbol_set:
+                            continue
+                        ik = str(u.instrument_key or "").strip()
+                        if ik and sym not in key_by_symbol:
+                            key_by_symbol[sym] = ik
+                except Exception:
+                    logger.warning("scanner_instrument_key_map_build_failed", exc_info=True)
+
             scan_rows: list[list[Any]] = []
             signal_rows: list[list[Any]] = []
             qualified = 0
 
             for w in subset:
-                candles = self._fetch_candles(w.symbol, w.exchange, w.segment, "15m", 8)
+                instrument_key = key_by_symbol.get(str(w.symbol).strip().upper(), "")
+                candles = self._fetch_candles(
+                    w.symbol,
+                    w.exchange,
+                    w.segment,
+                    instrument_key=instrument_key,
+                    timeframe="15m",
+                    lookback_days=8,
+                )
                 ind = compute_indicators(candles, self.settings.strategy)
                 if ind is None:
                     self.log_sink.decision("SCAN", w.symbol, "SKIP", "insufficient_candles", {"candles": len(candles)})
+                    scan_rows.append([
+                        w.symbol,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "HOLD",
+                        0,
+                        "SKIP|INSUFFICIENT_CANDLES",
+                        0,
+                        0,
+                        0,
+                        "MIXED",
+                        0,
+                        "NA",
+                        "NA",
+                    ])
                     continue
                 direction = determine_direction(ind, regime)
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy)
@@ -148,7 +229,8 @@ class TradingService:
                     "UP" if ind.supertrend.dir == 1 else "DOWN",
                 ])
 
-                if direction != "HOLD" and meta.score >= self.settings.strategy.min_signal_score and (force or is_entry_window_open_ist()):
+                # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
+                if direction != "HOLD" and meta.score >= self.settings.strategy.min_signal_score and is_entry_window_open_ist():
                     qualified += 1
                     reason = f"Score={meta.score} RSI={ind.rsi.curr:.1f} VolR={ind.volume.ratio:.2f} Reg={regime.bias}"
                     self.log_sink.decision("SIGNAL", w.symbol, direction, "entry_qualified", {"score": meta.score, "reason": reason})

@@ -463,8 +463,27 @@ class UpstoxClient:
         interval: int = 15,
     ) -> list[list[Any]]:
         ik = self._enc_instrument_key(instrument_key)
-        endpoint = f"historical-candle/intra-day/{ik}/{unit}/{int(interval)}"
-        data = self._request("GET", endpoint, auth=True, version="v3", content_type=None)
+        # Upstox v3 path expects interval first, then unit: .../{interval}/{unit}
+        # Keep a compatibility fallback for older assumptions to avoid hard failures.
+        base = "historical-candle/intra-day"
+        norm_unit = str(unit or "minutes").strip().lower()
+        if norm_unit == "minute":
+            norm_unit = "minutes"
+        attempts = [
+            f"{base}/{ik}/{int(interval)}/{norm_unit}",
+            f"{base}/{ik}/{norm_unit}/{int(interval)}",
+        ]
+        data: Any = {}
+        last_exc: Exception | None = None
+        for endpoint in attempts:
+            try:
+                data = self._request("GET", endpoint, auth=True, version="v3", content_type=None)
+                break
+            except Exception as exc:
+                last_exc = exc
+                data = {}
+        if not data and last_exc is not None:
+            raise last_exc
         candles = []
         if isinstance(data, dict):
             candles = data.get("candles") or []

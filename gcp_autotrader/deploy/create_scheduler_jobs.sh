@@ -66,6 +66,11 @@ create_job "autotrader-score-0830" "30 8 * * 1-5" "$MORNING_SCORE_URI" "{}" "30m
 WATCHLIST_URI="$SERVICE_URL/jobs/watchlist-refresh?target_size=300&require_full_coverage=false&require_today_scored=true&min_watchlist_score=1"
 create_job "autotrader-watchlist-refresh-0916" "16 9 * * 1-5" "$WATCHLIST_URI"
 
+# Live scanner loop (strict market hours only: 09:20..15:30 IST, weekdays).
+SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=false"
+create_job "autotrader-scan-market-5m" "20-55/5 9-14 * * 1-5" "$SCAN_URI"
+create_job "autotrader-scan-market-1530" "0-30/5 15 * * 1-5" "$SCAN_URI"
+
 # Full 1D backfill remains available via the same endpoint for manual/on-demand use.
 
 # Cleanup old schedule from previous versions (best-effort)
@@ -166,12 +171,16 @@ gcloud scheduler jobs delete "autotrader-watchlist-refresh-0921" \
   --location "$REGION" \
   --quiet || true
 
-# Scanner jobs are intentionally not created in this phase (watchlist pipeline validation only).
+# Cleanup old scanner schedules from previous versions (best-effort).
 gcloud scheduler jobs delete "autotrader-scan-market-1" \
   --project "$PROJECT_ID" \
   --location "$REGION" \
   --quiet || true
 gcloud scheduler jobs delete "autotrader-scan-market-2" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+gcloud scheduler jobs delete "autotrader-scan-market-1535" \
   --project "$PROJECT_ID" \
   --location "$REGION" \
   --quiet || true

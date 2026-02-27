@@ -103,6 +103,7 @@ class AppContainer:
             state=self.state,
             gcs=self.gcs,
             groww=self.groww,
+            upstox=self.upstox,
             regime_service=self.regime_service(),
             order_service=self.order_service(),
             log_sink=self.log_sink(),
