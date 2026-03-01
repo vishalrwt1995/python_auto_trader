@@ -1,0 +1,563 @@
+from __future__ import annotations
+
+import pytest
+
+from autotrader.adapters.gcs_store import GoogleCloudStorageStore
+from autotrader.adapters.sheets_repository import SHEET_LAYOUTS, SheetNames
+from autotrader.services.universe_service import UniverseService
+from autotrader.services.universe_v2 import (
+    ModeThresholds,
+    CanonicalListing,
+    TradabilityStats,
+    UniverseControls,
+    assign_turnover_rank_and_bucket,
+    canonical_id_from_fields,
+    choose_primary_listing,
+    classify_eligibility,
+    compute_tradability_stats,
+)
+from autotrader.settings import StrategySettings
+from tests.fixtures_universe_v2 import (
+    synthetic_candles_constant_tr,
+    synthetic_candles_fixed_gap,
+    synthetic_candles_linear_volume,
+    synthetic_instrument_snapshot,
+)
+
+
+def _controls(mode: str = "BALANCED") -> UniverseControls:
+    return UniverseControls(
+        mode=mode,
+        min_bars_hard=90,
+        min_price_hard=20.0,
+        max_gap_risk_hard=0.10,
+        max_atr_pct_hard=0.20,
+        stale_days_max=5,
+        mode_thresholds={
+            "CONSERVATIVE": ModeThresholds(
+                swing_topn_turnover_60d=500,
+                intraday_topn_turnover_60d=250,
+                min_bars_swing=252,
+                min_bars_intraday=320,
+                min_price_mode=50.0,
+                max_atr_pct_swing=0.08,
+                max_atr_pct_intraday=0.06,
+                max_gap_risk_mode=0.04,
+            ),
+            "BALANCED": ModeThresholds(
+                swing_topn_turnover_60d=1000,
+                intraday_topn_turnover_60d=500,
+                min_bars_swing=180,
+                min_bars_intraday=252,
+                min_price_mode=30.0,
+                max_atr_pct_swing=0.12,
+                max_atr_pct_intraday=0.09,
+                max_gap_risk_mode=0.06,
+            ),
+            "AGGRESSIVE": ModeThresholds(
+                swing_topn_turnover_60d=1500,
+                intraday_topn_turnover_60d=800,
+                min_bars_swing=120,
+                min_bars_intraday=180,
+                min_price_mode=20.0,
+                max_atr_pct_swing=0.16,
+                max_atr_pct_intraday=0.12,
+                max_gap_risk_mode=0.08,
+            ),
+        },
+    )
+
+
+def test_canonical_dedupe_prefers_nse_primary():
+    rows = []
+    for r in synthetic_instrument_snapshot():
+        canonical = canonical_id_from_fields(str(r.get("isin") or ""), str(r.get("exchange") or ""), str(r.get("trading_symbol") or ""))
+        rows.append(
+            {
+                "canonical_id": canonical,
+                "symbol": str(r.get("trading_symbol")),
+                "exchange": str(r.get("exchange")),
+                "instrument_key": str(r.get("instrument_key")),
+                "source_segment": str(r.get("segment")),
+                "security_type": str(r.get("security_type")),
+                "isin": str(r.get("isin")),
+                "name": str(r.get("name")),
+            }
+        )
+
+    abc_rows = [r for r in rows if r["canonical_id"] == "INE000A01001"]
+    listing = choose_primary_listing(abc_rows)
+    assert listing is not None
+    assert listing.primary_exchange == "NSE"
+    assert listing.primary_instrument_key == "NSE_EQ|ABC"
+    assert listing.secondary_exchange == "BSE"
+    assert listing.secondary_instrument_key == "BSE_EQ|ABC"
+
+
+def test_turnover_median_60d_computation():
+    candles = synthetic_candles_linear_volume(n=120, close=100.0)
+    stats = compute_tradability_stats(candles)
+    assert stats.bars_1d == 120
+    assert stats.price_last == 100.0
+    # Last 60 volumes are 61..120; median is 90.5 and turnover uses close*volume.
+    assert stats.turnover_med_60d == pytest.approx(9050.0, rel=1e-6)
+
+
+def test_atr_pct_14d_computation():
+    candles = synthetic_candles_constant_tr(n=40, close=100.0)
+    stats = compute_tradability_stats(candles)
+    assert stats.atr_14 == pytest.approx(2.0, rel=1e-6)
+    assert stats.atr_pct_14d == pytest.approx(0.02, rel=1e-6)
+
+
+def test_gap_risk_60d_computation():
+    candles = synthetic_candles_fixed_gap(n=80, close=100.0, gap=0.01)
+    stats = compute_tradability_stats(candles)
+    assert stats.gap_risk_60d == pytest.approx(0.01, rel=1e-6)
+
+
+def test_eligibility_mode_switch_changes_outcome():
+    stats = TradabilityStats(
+        bars_1d=260,
+        price_last=120.0,
+        turnover_med_60d=1_000_000.0,
+        atr_14=8.0,
+        atr_pct_14d=0.065,
+        gap_risk_60d=0.03,
+        turnover_rank_60d=700,
+        liquidity_bucket="B",
+    )
+    balanced = classify_eligibility(stats=stats, data_quality_flag="FRESH", stale_days=0, controls=_controls("BALANCED"))
+    aggressive = classify_eligibility(stats=stats, data_quality_flag="FRESH", stale_days=0, controls=_controls("AGGRESSIVE"))
+    conservative = classify_eligibility(stats=stats, data_quality_flag="FRESH", stale_days=0, controls=_controls("CONSERVATIVE"))
+
+    assert conservative.eligible_swing is False
+    assert conservative.disable_reason == "SWING_TOPN_FAIL"
+    assert balanced.eligible_swing is True and balanced.eligible_intraday is False
+    assert balanced.disable_reason == "INTRADAY_TOPN_FAIL"
+    assert aggressive.eligible_swing is True and aggressive.eligible_intraday is True
+
+
+def test_eligibility_hard_failures_are_deterministic():
+    stats = TradabilityStats(
+        bars_1d=300,
+        price_last=10.0,
+        turnover_med_60d=500_000.0,
+        atr_14=5.0,
+        atr_pct_14d=0.05,
+        gap_risk_60d=0.02,
+        turnover_rank_60d=50,
+        liquidity_bucket="A",
+    )
+    out = classify_eligibility(stats=stats, data_quality_flag="FRESH", stale_days=0, controls=_controls("BALANCED"))
+    assert out.eligible_swing is False and out.eligible_intraday is False
+    assert out.disable_reason == "PRICE_LT_MIN_HARD"
+
+
+def test_raw_snapshot_fallback_does_not_write_latest_on_empty_decode():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        def __init__(self):
+            self.writes: list[tuple[str, bytes | str]] = []
+
+        @staticmethod
+        def upstox_raw_universe_versioned_path(run_date: str, run_stamp: str | None = None) -> str:  # pragma: no cover - signature parity
+            return "raw/versioned.gz"
+
+        @staticmethod
+        def upstox_raw_universe_latest_path() -> str:
+            return "raw/latest.gz"
+
+        @staticmethod
+        def upstox_raw_universe_latest_meta_path() -> str:
+            return "raw/meta.json"
+
+        def write_bytes(self, path: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            self.writes.append((path, data))
+
+        def write_json(self, path: str, data: object) -> None:
+            self.writes.append((path, str(data)))
+
+    class FakeUpstox:
+        class settings:
+            instruments_complete_url = "https://example.invalid/complete.json.gz"
+
+        @staticmethod
+        def fetch_instruments_complete_gz() -> bytes:
+            return b"{}"
+
+        @staticmethod
+        def decode_instruments_gz_json(blob: bytes) -> list[dict[str, object]]:
+            return []
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    with pytest.raises(RuntimeError):
+        svc.refresh_raw_universe_from_upstox()
+    assert svc.gcs.writes == []
+
+
+def test_stale_candle_handling_marks_row_stale():
+    headers = SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
+    combined_headers = headers + [
+        "Canonical ID",
+        "Primary Exchange",
+        "Secondary Exchange",
+        "Secondary Instrument Key",
+    ]
+
+    class FakeSheets:
+        def __init__(self):
+            self.index_rows: list[list[object]] = []
+            row = [""] * len(combined_headers)
+            row[1] = "ABC"
+            row[2] = "NSE"
+            row[3] = "CASH"
+            row[8] = "Y"
+            row[10] = "isin=INE000A01001"
+            row[22] = "NSE_EQ|ABC"
+            row[26] = "INE000A01001"
+            self.universe_rows = [row]
+
+        def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
+            all_headers = combined_headers + [h for h in required_headers if h not in combined_headers]
+            return {h: i for i, h in enumerate(all_headers, start=1)}
+
+        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
+            return [list(r) for r in self.universe_rows]
+
+        def replace_score_cache_1d_index(self, rows: list[list[object]], *, chunk_size: int = 500) -> None:
+            self.index_rows = rows
+
+    class FakeGcs:
+        def __init__(self):
+            self.path = GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key("NSE_EQ|ABC", "NSE", "CASH")
+            self.cache = {
+                self.path: [["2024-12-31T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]],
+            }
+
+        @staticmethod
+        def score_cache_1d_path(symbol: str, exchange: str, segment: str) -> str:
+            return GoogleCloudStorageStore.score_cache_1d_path(symbol, exchange, segment)
+
+        @staticmethod
+        def score_cache_1d_path_by_instrument_key(instrument_key: str, exchange: str, segment: str) -> str:
+            return GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key(instrument_key, exchange, segment)
+
+        def read_candles(self, path: str) -> list[list[object]]:
+            return list(self.cache.get(path, []))
+
+        def write_candles(self, path: str, candles: list[list[object]]) -> None:
+            self.cache[path] = [list(c) for c in candles]
+
+        def merge_candles(self, path: str, candles: list[list[object]]) -> list[list[object]]:
+            existing = self.cache.get(path, [])
+            by_ts = {str(c[0]): list(c) for c in existing}
+            for c in candles:
+                by_ts[str(c[0])] = list(c)
+            merged = [by_ts[k] for k in sorted(by_ts.keys())]
+            self.cache[path] = merged
+            return merged
+
+    class FakeUpstox:
+        pass
+
+    sheets = FakeSheets()
+    svc = UniverseService(sheets, FakeGcs(), FakeUpstox(), StrategySettings())
+    out = svc._update_universe_v2_cache_and_stats(api_cap=0, run_full_backfill=False)
+    q = out["qualityByCanonical"]["INE000A01001"]
+    assert q["data_quality_flag"] == "STALE"
+    assert out["summary"]["stale"] == 1
+    assert sheets.index_rows and sheets.index_rows[0][7] == "STALE_READY"
+
+
+def test_universe_v2_cache_recompute_can_skip_history_index_write():
+    headers = SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
+    combined_headers = headers + [
+        "Canonical ID",
+        "Primary Exchange",
+        "Secondary Exchange",
+        "Secondary Instrument Key",
+    ]
+
+    class FakeSheets:
+        def __init__(self):
+            self.index_rows: list[list[object]] = []
+            row = [""] * len(combined_headers)
+            row[1] = "ABC"
+            row[2] = "NSE"
+            row[3] = "CASH"
+            row[8] = "Y"
+            row[10] = "isin=INE000A01001"
+            row[22] = "NSE_EQ|ABC"
+            row[26] = "INE000A01001"
+            self.universe_rows = [row]
+
+        def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
+            all_headers = combined_headers + [h for h in required_headers if h not in combined_headers]
+            return {h: i for i, h in enumerate(all_headers, start=1)}
+
+        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
+            return [list(r) for r in self.universe_rows]
+
+        def replace_score_cache_1d_index(self, rows: list[list[object]], *, chunk_size: int = 500) -> None:
+            self.index_rows = rows
+
+    class FakeGcs:
+        def __init__(self):
+            self.path = GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key("NSE_EQ|ABC", "NSE", "CASH")
+            self.cache = {
+                self.path: [["2024-12-31T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]],
+            }
+
+        @staticmethod
+        def score_cache_1d_path(symbol: str, exchange: str, segment: str) -> str:
+            return GoogleCloudStorageStore.score_cache_1d_path(symbol, exchange, segment)
+
+        @staticmethod
+        def score_cache_1d_path_by_instrument_key(instrument_key: str, exchange: str, segment: str) -> str:
+            return GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key(instrument_key, exchange, segment)
+
+        def read_candles(self, path: str) -> list[list[object]]:
+            return list(self.cache.get(path, []))
+
+        def write_candles(self, path: str, candles: list[list[object]]) -> None:
+            self.cache[path] = [list(c) for c in candles]
+
+        def merge_candles(self, path: str, candles: list[list[object]]) -> list[list[object]]:
+            existing = self.cache.get(path, [])
+            by_ts = {str(c[0]): list(c) for c in existing}
+            for c in candles:
+                by_ts[str(c[0])] = list(c)
+            merged = [by_ts[k] for k in sorted(by_ts.keys())]
+            self.cache[path] = merged
+            return merged
+
+    class FakeUpstox:
+        pass
+
+    sheets = FakeSheets()
+    svc = UniverseService(sheets, FakeGcs(), FakeUpstox(), StrategySettings())
+    out = svc._update_universe_v2_cache_and_stats(api_cap=0, run_full_backfill=False, write_history_index=False)
+    assert out["summary"]["stale"] == 1
+    assert sheets.index_rows == []
+
+
+def test_prefetch_stale_retry_terminalizes_api_cap_blocked_source():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    candles = [["2026-02-27T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
+    prev_row = {
+        "status": "STALE_READY",
+        "expectedlcd": "2026-02-28",
+        "last_candle_time": "2026-02-27 00:00:00",
+        "src": "gcs_score_cache_1d_stale_api_cap_blocked",
+    }
+    assert svc._prefetch_should_skip_stale_retry(prev_row, candles, expected_lcd="2026-02-28") is True
+
+
+def test_prefetch_missing_retry_terminalizes_api_cap_blocked_source():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    candles: list[list[object]] = []
+    prev_row = {
+        "status": "MISSING",
+        "expectedlcd": "2026-02-28",
+        "last_candle_time": "",
+        "src": "api_cap_blocked",
+    }
+    assert svc._prefetch_should_skip_missing_retry(prev_row, candles, expected_lcd="2026-02-28") is True
+
+
+def test_universe_v2_fetch_scope_limits_api_to_target_symbols():
+    headers = SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
+    combined_headers = headers + [
+        "Canonical ID",
+        "Primary Exchange",
+        "Secondary Exchange",
+        "Secondary Instrument Key",
+    ]
+
+    class FakeSheets:
+        def __init__(self):
+            self.index_rows: list[list[object]] = []
+            rows: list[list[str]] = []
+            for sym, isin, ik in [
+                ("AAA", "INE000A01001", "NSE_EQ|AAA"),
+                ("BBB", "INE000B01002", "NSE_EQ|BBB"),
+            ]:
+                row = [""] * len(combined_headers)
+                row[1] = sym
+                row[2] = "NSE"
+                row[3] = "CASH"
+                row[8] = "Y"
+                row[10] = f"isin={isin}"
+                row[22] = ik
+                row[26] = isin
+                rows.append(row)
+            self.universe_rows = rows
+
+        def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
+            all_headers = combined_headers + [h for h in required_headers if h not in combined_headers]
+            return {h: i for i, h in enumerate(all_headers, start=1)}
+
+        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
+            return [list(r) for r in self.universe_rows]
+
+        def replace_score_cache_1d_index(self, rows: list[list[object]], *, chunk_size: int = 500) -> None:
+            self.index_rows = rows
+
+    class FakeGcs:
+        def __init__(self):
+            p_aaa = GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key("NSE_EQ|AAA", "NSE", "CASH")
+            p_bbb = GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key("NSE_EQ|BBB", "NSE", "CASH")
+            stale = [["2024-12-31T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
+            self.cache = {
+                p_aaa: [list(stale[0])],
+                p_bbb: [list(stale[0])],
+            }
+
+        @staticmethod
+        def score_cache_1d_path(symbol: str, exchange: str, segment: str) -> str:
+            return GoogleCloudStorageStore.score_cache_1d_path(symbol, exchange, segment)
+
+        @staticmethod
+        def score_cache_1d_path_by_instrument_key(instrument_key: str, exchange: str, segment: str) -> str:
+            return GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key(instrument_key, exchange, segment)
+
+        def read_candles(self, path: str) -> list[list[object]]:
+            return list(self.cache.get(path, []))
+
+        def write_candles(self, path: str, candles: list[list[object]]) -> None:
+            self.cache[path] = [list(c) for c in candles]
+
+        def merge_candles(self, path: str, candles: list[list[object]]) -> list[list[object]]:
+            existing = self.cache.get(path, [])
+            by_ts = {str(c[0]): list(c) for c in existing}
+            for c in candles:
+                by_ts[str(c[0])] = list(c)
+            merged = [by_ts[k] for k in sorted(by_ts.keys())]
+            self.cache[path] = merged
+            return merged
+
+    class FakeUpstox:
+        pass
+
+    sheets = FakeSheets()
+    svc = UniverseService(sheets, FakeGcs(), FakeUpstox(), StrategySettings())
+    calls: list[tuple[str, str]] = []
+
+    svc._fetch_daily_candles_incremental = lambda key, cached, lookback_days: calls.append(("inc", key)) or []  # type: ignore[method-assign]
+    svc._fetch_daily_candles_windowed_between = lambda key, start, end: calls.append(("win", key)) or []  # type: ignore[method-assign]
+    svc._fetch_daily_candles_backfill_older = lambda key, cached, lookback_days: calls.append(("old", key)) or []  # type: ignore[method-assign]
+
+    out = svc._update_universe_v2_cache_and_stats(
+        api_cap=10,
+        run_full_backfill=True,
+        fetch_only_symbols=["AAA"],
+    )
+    assert calls
+    assert all("NSE_EQ|AAA" in key for _, key in calls)
+    assert out["summary"]["fetchScopeSymbols"] == 1
+
+
+def test_turnover_rank_assignment_bucket_quartiles():
+    stats_by_symbol = {
+        "A": TradabilityStats(turnover_med_60d=400.0),
+        "B": TradabilityStats(turnover_med_60d=300.0),
+        "C": TradabilityStats(turnover_med_60d=200.0),
+        "D": TradabilityStats(turnover_med_60d=100.0),
+    }
+    assign_turnover_rank_and_bucket(stats_by_symbol)
+    assert stats_by_symbol["A"].turnover_rank_60d == 1 and stats_by_symbol["A"].liquidity_bucket == "A"
+    assert stats_by_symbol["B"].turnover_rank_60d == 2 and stats_by_symbol["B"].liquidity_bucket == "B"
+    assert stats_by_symbol["C"].turnover_rank_60d == 3 and stats_by_symbol["C"].liquidity_bucket == "C"
+    assert stats_by_symbol["D"].turnover_rank_60d == 4 and stats_by_symbol["D"].liquidity_bucket == "D"
+
+
+def test_instrument_key_cache_path_prevents_symbol_collision():
+    p1 = GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key("NSE_EQ|INE732I01013", "NSE", "CASH")
+    p2 = GoogleCloudStorageStore.score_cache_1d_path_by_instrument_key("NSE_EQ|INE732I01021", "NSE", "CASH")
+    assert p1 != p2
+
+
+def test_disabled_row_is_hard_disqualified():
+    stats = TradabilityStats(
+        bars_1d=300,
+        price_last=120.0,
+        turnover_med_60d=2_000_000.0,
+        atr_14=4.0,
+        atr_pct_14d=0.03,
+        gap_risk_60d=0.02,
+        turnover_rank_60d=10,
+        liquidity_bucket="A",
+    )
+    out = classify_eligibility(
+        stats=stats,
+        data_quality_flag="FRESH",
+        stale_days=0,
+        controls=_controls("BALANCED"),
+        enabled=False,
+    )
+    assert out.eligible_swing is False and out.eligible_intraday is False
+    assert out.disable_reason == "ROW_DISABLED"
+
+
+def test_symbol_exchange_conflict_resolution_prefers_existing_instrument_key():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc._probe_instrument_key_liveness = lambda key: (2, "live")  # type: ignore[method-assign]
+    masters = [
+        CanonicalListing(
+            canonical_id="INE000A01001",
+            symbol="ANGELONE",
+            primary_exchange="NSE",
+            primary_instrument_key="NSE_EQ|INE732I01013",
+            primary_source_segment="NSE_EQ",
+            security_type="SM",
+            isin="INE732I01013",
+            name="ANGELONE LTD",
+        ),
+        CanonicalListing(
+            canonical_id="INE000A01002",
+            symbol="ANGELONE",
+            primary_exchange="NSE",
+            primary_instrument_key="NSE_EQ|INE732I01021",
+            primary_source_segment="NSE_EQ",
+            security_type="SM",
+            isin="INE732I01021",
+            name="ANGELONE LTD",
+        ),
+    ]
+    deduped, conflicts = svc._dedupe_master_by_symbol_exchange(
+        masters,
+        preferred_by_symbol_exchange={("ANGELONE", "NSE"): "NSE_EQ|INE732I01021"},
+    )
+    assert conflicts == 1
+    assert len(deduped) == 1
+    assert deduped[0].primary_instrument_key == "NSE_EQ|INE732I01021"

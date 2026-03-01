@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime, timedelta
 from typing import Any
@@ -14,6 +16,18 @@ from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.models import RegimeSnapshot, UniverseRow
 from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
+from autotrader.services.universe_v2 import (
+    UNIVERSE_V2_HEADERS,
+    CanonicalListing,
+    ModeThresholds,
+    TradabilityStats,
+    UniverseControls,
+    assign_turnover_rank_and_bucket,
+    canonical_id_from_fields,
+    choose_primary_listing,
+    classify_eligibility,
+    compute_tradability_stats,
+)
 from autotrader.settings import StrategySettings
 from autotrader.time_utils import IST, now_ist, now_ist_str, parse_any_ts, today_ist
 
@@ -29,6 +43,39 @@ class UniversePipelineResult:
 
 
 class UniverseService:
+    UNIVERSE_V2_CONFIG_DEFAULTS: dict[str, str] = {
+        "UNIVERSE_MODE": "BALANCED",
+        "UNIVERSE_MIN_BARS_HARD": "90",
+        "UNIVERSE_MIN_PRICE_HARD": "20",
+        "UNIVERSE_MAX_GAP_RISK_HARD": "0.10",
+        "UNIVERSE_MAX_ATR_PCT_HARD": "0.20",
+        "UNIVERSE_STALE_DAYS_MAX": "5",
+        "UNIVERSE_CONSERVATIVE_SWING_TOPN_TURNOVER_60D": "500",
+        "UNIVERSE_CONSERVATIVE_INTRADAY_TOPN_TURNOVER_60D": "250",
+        "UNIVERSE_CONSERVATIVE_MIN_BARS_SWING": "252",
+        "UNIVERSE_CONSERVATIVE_MIN_BARS_INTRADAY": "320",
+        "UNIVERSE_CONSERVATIVE_MIN_PRICE_MODE": "50",
+        "UNIVERSE_CONSERVATIVE_MAX_ATR_PCT_SWING": "0.08",
+        "UNIVERSE_CONSERVATIVE_MAX_ATR_PCT_INTRADAY": "0.06",
+        "UNIVERSE_CONSERVATIVE_MAX_GAP_RISK_MODE": "0.04",
+        "UNIVERSE_BALANCED_SWING_TOPN_TURNOVER_60D": "1000",
+        "UNIVERSE_BALANCED_INTRADAY_TOPN_TURNOVER_60D": "500",
+        "UNIVERSE_BALANCED_MIN_BARS_SWING": "180",
+        "UNIVERSE_BALANCED_MIN_BARS_INTRADAY": "252",
+        "UNIVERSE_BALANCED_MIN_PRICE_MODE": "30",
+        "UNIVERSE_BALANCED_MAX_ATR_PCT_SWING": "0.12",
+        "UNIVERSE_BALANCED_MAX_ATR_PCT_INTRADAY": "0.09",
+        "UNIVERSE_BALANCED_MAX_GAP_RISK_MODE": "0.06",
+        "UNIVERSE_AGGRESSIVE_SWING_TOPN_TURNOVER_60D": "1500",
+        "UNIVERSE_AGGRESSIVE_INTRADAY_TOPN_TURNOVER_60D": "800",
+        "UNIVERSE_AGGRESSIVE_MIN_BARS_SWING": "120",
+        "UNIVERSE_AGGRESSIVE_MIN_BARS_INTRADAY": "180",
+        "UNIVERSE_AGGRESSIVE_MIN_PRICE_MODE": "20",
+        "UNIVERSE_AGGRESSIVE_MAX_ATR_PCT_SWING": "0.16",
+        "UNIVERSE_AGGRESSIVE_MAX_ATR_PCT_INTRADAY": "0.12",
+        "UNIVERSE_AGGRESSIVE_MAX_GAP_RISK_MODE": "0.08",
+    }
+
     def __init__(
         self,
         sheets: GoogleSheetsRepository,
@@ -40,6 +87,108 @@ class UniverseService:
         self.gcs = gcs
         self.upstox = upstox
         self.cfg = cfg
+
+    @staticmethod
+    def _cfg_int(cfg: dict[str, str], key: str, default: int) -> int:
+        try:
+            return int(str(cfg.get(key, default)).strip())
+        except Exception:
+            return default
+
+    @staticmethod
+    def _cfg_float(cfg: dict[str, str], key: str, default: float) -> float:
+        try:
+            return float(str(cfg.get(key, default)).strip())
+        except Exception:
+            return default
+
+    @staticmethod
+    def _history_horizon_start_ist() -> datetime:
+        return datetime(2000, 1, 1, tzinfo=IST)
+
+    @staticmethod
+    def _extract_isin_from_notes(notes: str) -> str:
+        kv = UniverseService._parse_pipe_kv(notes)
+        return str(kv.get("isin", "")).strip().upper()
+
+    def _expected_last_completed_daily_date(self, now: datetime | None = None) -> date_cls:
+        now_i = (now or now_ist()).astimezone(IST)
+        d = now_i.date() - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+
+    def _build_universe_v2_controls(self) -> UniverseControls:
+        self.sheets.ensure_config_defaults(self.UNIVERSE_V2_CONFIG_DEFAULTS)
+        cfg_map = self.sheets.read_config_label_map()
+        merged = dict(self.UNIVERSE_V2_CONFIG_DEFAULTS)
+        merged.update({k: str(v) for k, v in cfg_map.items()})
+        mode = str(merged.get("UNIVERSE_MODE", "BALANCED")).strip().upper()
+        if mode not in {"CONSERVATIVE", "BALANCED", "AGGRESSIVE"}:
+            mode = "BALANCED"
+
+        def _mode(name: str, defaults: ModeThresholds) -> ModeThresholds:
+            p = f"UNIVERSE_{name}_"
+            return ModeThresholds(
+                swing_topn_turnover_60d=self._cfg_int(merged, f"{p}SWING_TOPN_TURNOVER_60D", defaults.swing_topn_turnover_60d),
+                intraday_topn_turnover_60d=self._cfg_int(merged, f"{p}INTRADAY_TOPN_TURNOVER_60D", defaults.intraday_topn_turnover_60d),
+                min_bars_swing=self._cfg_int(merged, f"{p}MIN_BARS_SWING", defaults.min_bars_swing),
+                min_bars_intraday=self._cfg_int(merged, f"{p}MIN_BARS_INTRADAY", defaults.min_bars_intraday),
+                min_price_mode=self._cfg_float(merged, f"{p}MIN_PRICE_MODE", defaults.min_price_mode),
+                max_atr_pct_swing=self._cfg_float(merged, f"{p}MAX_ATR_PCT_SWING", defaults.max_atr_pct_swing),
+                max_atr_pct_intraday=self._cfg_float(merged, f"{p}MAX_ATR_PCT_INTRADAY", defaults.max_atr_pct_intraday),
+                max_gap_risk_mode=self._cfg_float(merged, f"{p}MAX_GAP_RISK_MODE", defaults.max_gap_risk_mode),
+            )
+
+        return UniverseControls(
+            mode=mode,
+            min_bars_hard=self._cfg_int(merged, "UNIVERSE_MIN_BARS_HARD", 90),
+            min_price_hard=self._cfg_float(merged, "UNIVERSE_MIN_PRICE_HARD", 20.0),
+            max_gap_risk_hard=self._cfg_float(merged, "UNIVERSE_MAX_GAP_RISK_HARD", 0.10),
+            max_atr_pct_hard=self._cfg_float(merged, "UNIVERSE_MAX_ATR_PCT_HARD", 0.20),
+            stale_days_max=self._cfg_int(merged, "UNIVERSE_STALE_DAYS_MAX", 5),
+            mode_thresholds={
+                "CONSERVATIVE": _mode(
+                    "CONSERVATIVE",
+                    ModeThresholds(
+                        swing_topn_turnover_60d=500,
+                        intraday_topn_turnover_60d=250,
+                        min_bars_swing=252,
+                        min_bars_intraday=320,
+                        min_price_mode=50.0,
+                        max_atr_pct_swing=0.08,
+                        max_atr_pct_intraday=0.06,
+                        max_gap_risk_mode=0.04,
+                    ),
+                ),
+                "BALANCED": _mode(
+                    "BALANCED",
+                    ModeThresholds(
+                        swing_topn_turnover_60d=1000,
+                        intraday_topn_turnover_60d=500,
+                        min_bars_swing=180,
+                        min_bars_intraday=252,
+                        min_price_mode=30.0,
+                        max_atr_pct_swing=0.12,
+                        max_atr_pct_intraday=0.09,
+                        max_gap_risk_mode=0.06,
+                    ),
+                ),
+                "AGGRESSIVE": _mode(
+                    "AGGRESSIVE",
+                    ModeThresholds(
+                        swing_topn_turnover_60d=1500,
+                        intraday_topn_turnover_60d=800,
+                        min_bars_swing=120,
+                        min_bars_intraday=180,
+                        min_price_mode=20.0,
+                        max_atr_pct_swing=0.16,
+                        max_atr_pct_intraday=0.12,
+                        max_gap_risk_mode=0.08,
+                    ),
+                ),
+            },
+        )
 
     @staticmethod
     def _flag_any(v: Any, default: bool = True) -> bool:
@@ -92,6 +241,98 @@ class UniverseService:
         if len(msg) <= max_len:
             return msg
         return msg[: max(0, max_len - 3)].rstrip() + "..."
+
+    def _score_cache_paths(self, symbol: str, exchange: str, segment: str, instrument_key: str) -> tuple[str, str]:
+        legacy_path = self.gcs.score_cache_1d_path(symbol, exchange, segment)
+        if not instrument_key:
+            return legacy_path, legacy_path
+        ik_path = self.gcs.score_cache_1d_path_by_instrument_key(instrument_key, exchange, segment)
+        return ik_path, legacy_path
+
+    def _read_score_cache_with_migration(
+        self,
+        symbol: str,
+        exchange: str,
+        segment: str,
+        instrument_key: str,
+    ) -> tuple[str, list[list[object]]]:
+        path, legacy_path = self._score_cache_paths(symbol, exchange, segment, instrument_key)
+        candles = self.gcs.read_candles(path)
+        if not candles and path != legacy_path:
+            legacy = self.gcs.read_candles(legacy_path)
+            if legacy:
+                self.gcs.write_candles(path, legacy)
+                candles = legacy
+        return path, candles
+
+    def _probe_instrument_key_liveness(self, instrument_key: str) -> tuple[int, str]:
+        """Return (score, note) for selecting symbol-conflict winners.
+
+        score:
+        - 2 => key appears live (request succeeded)
+        - 1 => unknown/transient error (keep candidate viable)
+        - 0 => invalid key
+        """
+        if not instrument_key:
+            return 0, "missing_key"
+        try:
+            to_date = now_ist().strftime("%Y-%m-%d")
+            from_date = (now_ist() - timedelta(days=10)).strftime("%Y-%m-%d")
+            # Lightweight validity probe only for symbol conflicts.
+            self.upstox.get_historical_candles_v3_days(instrument_key, to_date=to_date, from_date=from_date, interval_days=1)
+            return 2, "live_or_accessible"
+        except UpstoxApiError as exc:
+            if self._is_invalid_instrument_key_error(exc):
+                return 0, "invalid_key"
+            return 1, "transient_error"
+        except Exception:
+            return 1, "transient_error"
+
+    def _dedupe_master_by_symbol_exchange(
+        self,
+        masters: list[CanonicalListing],
+        *,
+        preferred_by_symbol_exchange: dict[tuple[str, str], str],
+    ) -> tuple[list[CanonicalListing], int]:
+        grouped: dict[tuple[str, str], list[CanonicalListing]] = {}
+        for m in masters:
+            key = (str(m.symbol).upper(), str(m.primary_exchange).upper())
+            grouped.setdefault(key, []).append(m)
+
+        deduped: list[CanonicalListing] = []
+        conflicts = 0
+        probe_cache: dict[str, tuple[int, str]] = {}
+        for key, arr in grouped.items():
+            if len(arr) == 1:
+                deduped.append(arr[0])
+                continue
+            conflicts += 1
+            preferred_key = preferred_by_symbol_exchange.get(key, "").strip().upper()
+            best: CanonicalListing | None = None
+            best_score = -10_000
+            for c in arr:
+                ik = str(c.primary_instrument_key or "").strip().upper()
+                if ik not in probe_cache:
+                    probe_cache[ik] = self._probe_instrument_key_liveness(ik)
+                live_score, _ = probe_cache[ik]
+                score = 0
+                if preferred_key and ik == preferred_key:
+                    score += 1000
+                score += live_score * 100
+                # Prefer real ISIN canonicals over synthetic markers.
+                if "::DUPROW::" not in str(c.canonical_id):
+                    score += 20
+                if str(c.isin or "").strip():
+                    score += 10
+                # Deterministic tie-break.
+                score += len(str(c.primary_instrument_key or ""))
+                if score > best_score:
+                    best_score = score
+                    best = c
+            if best is not None:
+                deduped.append(best)
+        deduped.sort(key=lambda m: (str(m.symbol), str(m.primary_exchange)))
+        return deduped, conflicts
 
     def _read_score_cache_index_snapshot(self) -> dict[tuple[str, str, str], dict[str, str]]:
         out: dict[tuple[str, str, str], dict[str, str]] = {}
@@ -218,7 +459,17 @@ class UniverseService:
         prev_src = (prev_row.get("src") or "").strip().lower()
         if prev_status == "STALE_SKIPPED":
             return True
-        return prev_src in {"upstox_api_incremental", "gcs_score_cache_1d_stale_fetch_empty"}
+        # Terminalize on second pass for known no-progress sources so batch jobs do not loop forever:
+        # - stale fetch returned empty
+        # - api cap prevented fetch in prior pass
+        # - prior symbol-level API failure left cache stale for this expected date
+        return prev_src in {
+            "upstox_api_incremental",
+            "gcs_score_cache_1d_stale_fetch_empty",
+            "gcs_score_cache_1d_stale_api_cap_blocked",
+            "upstox_api_error",
+            "prefetch_unexpected_error",
+        }
 
     def _prefetch_should_skip_invalid_key_retry(
         self,
@@ -235,6 +486,37 @@ class UniverseService:
             return True
         return bool(current_last) and current_last == prev_last
 
+    def _prefetch_should_skip_missing_retry(
+        self,
+        prev_row: dict[str, str] | None,
+        candles: list[list[object]],
+        *,
+        expected_lcd: str,
+    ) -> bool:
+        if not prev_row:
+            return False
+        prev_status = (prev_row.get("status") or "").upper()
+        if prev_status not in {"MISSING", "MISSING_SKIPPED"}:
+            return False
+        prev_expected = (prev_row.get("expectedlcd") or "").strip()
+        if prev_expected and prev_expected != expected_lcd:
+            return False
+        current_last = self._last_candle_text(candles)
+        prev_last = (prev_row.get("last_candle_time") or "").strip()
+        if current_last != prev_last:
+            return False
+        prev_src = (prev_row.get("src") or "").strip().lower()
+        if prev_status == "MISSING_SKIPPED":
+            return True
+        return prev_src in {
+            "empty",
+            "cache_only_missing",
+            "missing_instrument_key",
+            "api_cap_blocked",
+            "upstox_api_error",
+            "prefetch_unexpected_error",
+        }
+
     def _score_cache_index_row(
         self,
         u: UniverseRow,
@@ -248,7 +530,9 @@ class UniverseService:
         updated_at: str,
         last_error: str = "",
     ) -> list[object]:
+        first_ts = self._first_candle_ts(candles)
         last_ts = self._last_candle_ts(candles)
+        first_candle_date = first_ts.astimezone(IST).date().isoformat() if first_ts is not None else ""
         last_candle = last_ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if last_ts is not None else ""
         bars = len(candles)
         is_current = self._daily_cache_is_current(candles) if bars else False
@@ -262,6 +546,9 @@ class UniverseService:
         elif source == "invalid_instrument_key_terminal":
             status = "INVALID_KEY_SKIPPED"
             terminal = "INVALID_INSTRUMENT_KEY"
+        elif source == "gcs_score_cache_1d_missing_terminal":
+            status = "MISSING_SKIPPED"
+            terminal = "MISSING_CACHE"
         elif bars == 0:
             status = "MISSING"
         elif bars < min_bars:
@@ -280,6 +567,9 @@ class UniverseService:
             "missing_instrument_key",
             "empty",
             "invalid_instrument_key_terminal",
+            "gcs_score_cache_1d_missing_terminal",
+            "upstox_api_error",
+            "prefetch_unexpected_error",
         }:
             derived_last_error = source
         if last_error:
@@ -307,25 +597,34 @@ class UniverseService:
             isin,
             notes,
             path,
+            first_candle_date,
         ]
 
     def refresh_raw_universe_from_upstox(self) -> dict[str, object]:
         blob = self.upstox.fetch_instruments_complete_gz()
         rows = self.upstox.decode_instruments_gz_json(blob)
+        if not rows:
+            raise RuntimeError("Upstox raw universe decode produced 0 rows; latest pointer unchanged")
         run_date = today_ist()
-        ver_path = self.gcs.upstox_raw_universe_versioned_path(run_date)
+        run_stamp = now_ist().strftime("%Y%m%dT%H%M%S")
+        ver_path = self.gcs.upstox_raw_universe_versioned_path(run_date, run_stamp=run_stamp)
         latest_path = self.gcs.upstox_raw_universe_latest_path()
         meta_path = self.gcs.upstox_raw_universe_latest_meta_path()
+        signature = hashlib.sha256(blob).hexdigest()
         self.gcs.write_bytes(ver_path, blob, content_type="application/gzip")
         self.gcs.write_bytes(latest_path, blob, content_type="application/gzip")
         meta = {
             "provider": "UPSTOX",
             "runDate": run_date,
             "fetchedAt": now_ist_str(),
+            "runStamp": run_stamp,
             "path": ver_path,
             "latestPath": latest_path,
             "itemCount": len(rows),
+            "rowCount": len(rows),
+            "signature": signature,
             "sourceUrl": self.upstox.settings.instruments_complete_url,
+            "snapshotVersion": "",
         }
         self.gcs.write_json(meta_path, meta)
         logger.info("raw_universe_refresh complete runDate=%s itemCount=%s", run_date, len(rows))
@@ -339,12 +638,64 @@ class UniverseService:
         rows = self.upstox.decode_instruments_gz_json(blob)
         return rows, (meta if isinstance(meta, dict) else {})
 
-    def build_trading_universe_from_upstox_raw(self, limit: int = 0, *, replace: bool = False) -> dict[str, int | str]:
+    def build_trading_universe_from_upstox_raw(self, limit: int = 0, *, replace: bool = False) -> dict[str, Any]:
         raw_rows, meta = self._load_latest_upstox_raw_universe()
-        existing_count, existing_symbols = (0, set()) if replace else self.sheets.read_universe_row_count_and_symbols()
+        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
+        col_canonical = int(header_map.get("Canonical ID", 27))
+        col_primary_exchange = int(header_map.get("Primary Exchange", 28))
+        col_secondary_exchange = int(header_map.get("Secondary Exchange", 29))
+        col_secondary_key = int(header_map.get("Secondary Instrument Key", 30))
+        col_symbol = int(header_map.get("Symbol", 2))
+        col_exchange = int(header_map.get("Exchange", 3))
+        col_enabled = int(header_map.get("Enabled", 9))
+        col_notes = int(header_map.get("Notes", 11))
+        col_provider = int(header_map.get("Data Provider", 22))
+        col_instrument_key = int(header_map.get("Instrument Key", 23))
+        col_source_segment = int(header_map.get("Source Segment", 24))
+        col_security_type = int(header_map.get("Security Type", 25))
+        min_cols = max(26, max(header_map.values()) if header_map else 26)
 
-        dedup: dict[str, dict[str, object]] = {}
-        pref_exchange: dict[str, str] = {}
+        existing_rows = [] if replace else self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        for row in existing_rows:
+            if len(row) < min_cols:
+                row.extend([""] * (min_cols - len(row)))
+
+        existing_by_canonical: dict[str, int] = {}
+        preferred_by_symbol_exchange: dict[tuple[str, str], str] = {}
+        existing_symbols_count = 0
+        duplicate_existing_canonical = 0
+        for i, row in enumerate(existing_rows):
+            sym = row[col_symbol - 1].strip().upper() if len(row) >= col_symbol else ""
+            if not sym:
+                continue
+            existing_symbols_count += 1
+            exch = row[col_exchange - 1].strip().upper() if len(row) >= col_exchange else "NSE"
+            notes = row[col_notes - 1] if len(row) >= col_notes else ""
+            canonical = row[col_canonical - 1].strip().upper() if len(row) >= col_canonical else ""
+            if canonical.startswith("DUPLICATE::"):
+                # Heal old duplicate markers from previous versions.
+                parts = canonical.split("::")
+                if len(parts) >= 2 and parts[1].strip():
+                    canonical = parts[1].strip().upper()
+            if not canonical:
+                canonical = canonical_id_from_fields(self._extract_isin_from_notes(notes), exch, sym)
+            row[col_canonical - 1] = canonical
+            if canonical in existing_by_canonical:
+                duplicate_existing_canonical += 1
+                # Keep sheet rows (no deletion), but explicitly disable duplicate canonical rows.
+                row[col_enabled - 1] = "N"
+                row[col_canonical - 1] = f"{canonical}::DUPROW::{i + 4}"
+                note_text = row[col_notes - 1].strip() if len(row) >= col_notes else ""
+                dedupe_note = f"duplicate_canonical={canonical}|primary_row={existing_by_canonical[canonical] + 4}"
+                if dedupe_note not in note_text:
+                    row[col_notes - 1] = f"{note_text}|{dedupe_note}".strip("|")
+                continue
+            existing_by_canonical[canonical] = i
+            ik = row[col_instrument_key - 1].strip().upper() if len(row) >= col_instrument_key else ""
+            if ik and str(row[col_enabled - 1]).strip().upper() == "Y":
+                preferred_by_symbol_exchange.setdefault((sym, exch), ik)
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
         seen_rows = 0
         eligible_rows = 0
         for raw in raw_rows:
@@ -383,77 +734,136 @@ class UniverseService:
                 continue
 
             eligible_rows += 1
-            key = isin or symbol
-            cand = {
-                "symbol": symbol,
-                "exchange": exchange,
-                "segment": "CASH",
-                "instrument_key": instrument_key,
-                "source_segment": seg,
-                "security_type": security_type or "UNKNOWN",
-                "isin": isin,
-                "name": name,
-                "raw_json": raw,
-            }
-            if key not in dedup:
-                dedup[key] = cand
-                pref_exchange[key] = exchange
-            else:
-                if pref_exchange.get(key) != "NSE" and exchange == "NSE":
-                    dedup[key] = cand
-                    pref_exchange[key] = exchange
+            canonical = canonical_id_from_fields(isin, exchange, symbol)
+            grouped.setdefault(canonical, []).append(
+                {
+                    "canonical_id": canonical,
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "segment": "CASH",
+                    "instrument_key": instrument_key,
+                    "source_segment": seg,
+                    "security_type": security_type or "UNKNOWN",
+                    "isin": isin,
+                    "name": name,
+                    "raw_json": raw,
+                }
+            )
 
-        out_rows: list[list[object]] = []
-        next_idx = existing_count + 1
-        for d in sorted(dedup.values(), key=lambda r: (str(r["symbol"]), str(r["exchange"]))):
-            sym = str(d["symbol"])
-            if sym in existing_symbols:
+        masters: list[CanonicalListing] = []
+        raw_json_by_canonical: dict[str, dict[str, Any]] = {}
+        for canonical, rows_for_key in grouped.items():
+            listing = choose_primary_listing(rows_for_key)
+            if listing is None:
                 continue
-            notes = f"isin={d['isin']}|name={d['name']}|source=upstox_bod"
-            out_rows.append([
-                next_idx,
-                d["symbol"],
-                d["exchange"],
-                "CASH",
-                "BOTH",
-                "AUTO",
-                "UNKNOWN",
-                1.0,
-                "Y",
-                0,
-                notes,
-                0,
-                0,
-                0,
-                "",
-                "",
-                "",
-                "",
-                json.dumps(d["raw_json"], ensure_ascii=False, separators=(",", ":")),
-                "",
-                "",
-                "UPSTOX",
-                d["instrument_key"],
-                d["source_segment"],
-                d["security_type"],
-                "",
-            ])
+            masters.append(listing)
+            primary_row = next((r for r in rows_for_key if str(r.get("exchange", "")).upper() == str(listing.primary_exchange).upper()), rows_for_key[0])
+            raw_json_by_canonical[canonical] = dict(primary_row.get("raw_json") or {})
+        masters.sort(key=lambda m: (str(m.symbol), str(m.primary_exchange)))
+        masters, symbol_conflicts_resolved = self._dedupe_master_by_symbol_exchange(
+            masters,
+            preferred_by_symbol_exchange=preferred_by_symbol_exchange,
+        )
+
+        updated_existing = 0
+        appended_rows: list[list[Any]] = []
+        appended_symbols: list[str] = []
+        next_idx = existing_symbols_count + 1
+        for m in masters:
+            canonical = str(m.canonical_id).strip().upper()
+            existing_idx = existing_by_canonical.get(canonical)
+            if existing_idx is not None:
+                row = existing_rows[existing_idx]
+                prev = list(row)
+                row[col_symbol - 1] = str(m.symbol).upper()
+                row[col_exchange - 1] = str(m.primary_exchange).upper()
+                row[col_provider - 1] = "UPSTOX"
+                row[col_instrument_key - 1] = str(m.primary_instrument_key)
+                row[col_source_segment - 1] = str(m.primary_source_segment).upper()
+                row[col_security_type - 1] = str(m.security_type).upper() or "UNKNOWN"
+                row[col_canonical - 1] = canonical
+                row[col_primary_exchange - 1] = str(m.primary_exchange).upper()
+                row[col_secondary_exchange - 1] = str(m.secondary_exchange).upper()
+                row[col_secondary_key - 1] = str(m.secondary_instrument_key)
+                if row[col_notes - 1].strip() == "":
+                    row[col_notes - 1] = f"isin={m.isin}|name={m.name}|source=upstox_bod"
+                if row != prev:
+                    updated_existing += 1
+                continue
+
+            raw_json = raw_json_by_canonical.get(canonical) or {}
+            row = [""] * min_cols
+            row[0] = next_idx
+            row[col_symbol - 1] = str(m.symbol).upper()
+            row[col_exchange - 1] = str(m.primary_exchange).upper()
+            row[3] = "CASH"
+            row[4] = "BOTH"
+            row[5] = "AUTO"
+            row[6] = "UNKNOWN"
+            row[7] = 1.0
+            row[8] = "Y"
+            row[9] = 0
+            row[col_notes - 1] = f"isin={m.isin}|name={m.name}|source=upstox_bod"
+            row[11] = 0
+            row[12] = 0
+            row[13] = 0
+            row[14] = ""
+            row[15] = ""
+            row[16] = ""
+            row[17] = ""
+            row[18] = json.dumps(raw_json, ensure_ascii=False, separators=(",", ":"))
+            row[19] = ""
+            row[20] = ""
+            row[col_provider - 1] = "UPSTOX"
+            row[col_instrument_key - 1] = str(m.primary_instrument_key)
+            row[col_source_segment - 1] = str(m.primary_source_segment).upper()
+            row[col_security_type - 1] = str(m.security_type).upper() or "UNKNOWN"
+            row[25] = ""
+            row[col_canonical - 1] = canonical
+            row[col_primary_exchange - 1] = str(m.primary_exchange).upper()
+            row[col_secondary_exchange - 1] = str(m.secondary_exchange).upper()
+            row[col_secondary_key - 1] = str(m.secondary_instrument_key)
+            appended_rows.append(row)
+            appended_symbols.append(str(m.symbol).upper())
+            existing_by_canonical[canonical] = len(existing_rows) + len(appended_rows) - 1
             next_idx += 1
+
         if replace:
-            self.sheets.replace_universe_rows(out_rows)
+            rows_for_replace = []
+            seq = 1
+            for r in appended_rows:
+                r[0] = seq
+                seq += 1
+                rows_for_replace.append(r)
+            self.sheets.replace_universe_rows(rows_for_replace)
+            total_rows = len(rows_for_replace)
+            appended = len(rows_for_replace)
+            updated_existing = 0
         else:
-            self.sheets.append_universe_rows(out_rows)
+            if existing_rows:
+                last_col = self.sheets.col_to_a1(min_cols)
+                write_rows = [row[:min_cols] for row in existing_rows]
+                self.sheets.update_values(f"'{SheetNames.UNIVERSE}'!A4:{last_col}{3 + len(write_rows)}", write_rows)
+            if appended_rows:
+                self.sheets.append_universe_rows([row[:min_cols] for row in appended_rows])
+            total_rows = existing_symbols_count + len(appended_rows)
+            appended = len(appended_rows)
+
         out = {
-            "rows": len(out_rows) if replace else (existing_count + len(out_rows)),
-            "appended": len(out_rows),
+            "rows": total_rows,
+            "appended": appended,
+            "appendedSymbols": [] if replace else appended_symbols,
+            "updatedCanonical": updated_existing,
             "replaced": 1 if replace else 0,
             "rawSeen": seen_rows,
             "rawEligible": eligible_rows,
             "rawSnapshotDate": str(meta.get("runDate") or ""),
+            "duplicateCanonicalInExisting": duplicate_existing_canonical,
+            "symbolConflictsResolved": symbol_conflicts_resolved,
         }
         logger.info(
-            "universe_build_from_raw complete appended=%s totalRows=%s replace=%s rawSeen=%s rawEligible=%s snapshotDate=%s",
-            out["appended"], out["rows"], bool(replace), seen_rows, eligible_rows, out["rawSnapshotDate"],
+            "universe_build_from_raw complete appended=%s updatedCanonical=%s totalRows=%s replace=%s rawSeen=%s rawEligible=%s snapshotDate=%s duplicateCanonicalExisting=%s symbolConflictsResolved=%s",
+            out["appended"], out["updatedCanonical"], out["rows"], bool(replace), seen_rows, eligible_rows, out["rawSnapshotDate"], duplicate_existing_canonical, symbol_conflicts_resolved,
         )
         return out
 
@@ -463,6 +873,579 @@ class UniverseService:
             self.refresh_raw_universe_from_upstox()
         out = self.build_trading_universe_from_upstox_raw(limit=limit, replace=False)
         return int(out.get("rows", 0))
+
+    def _history_index_row_v2(
+        self,
+        *,
+        symbol: str,
+        exchange: str,
+        segment: str,
+        enabled: str,
+        candles: list[list[object]],
+        path: str,
+        status: str,
+        api_calls: int,
+        last_error: str,
+        expected_lcd: str,
+        source: str,
+    ) -> list[object]:
+        first_ts = self._first_candle_ts(candles)
+        last_ts = self._last_candle_ts(candles)
+        bars = len(candles)
+        first_candle_date = first_ts.astimezone(IST).date().isoformat() if first_ts else ""
+        last_candle = last_ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if last_ts else ""
+        file_name = path.rsplit("/", 1)[-1]
+        notes = f"Src={source}|ExpectedLCD={expected_lcd}|Current={'Y' if status == 'FRESH_READY' else 'N'}"
+        return [
+            symbol,
+            exchange,
+            segment,
+            "Y" if str(enabled).strip().upper() == "Y" else "N",
+            bars,
+            last_candle,
+            now_ist_str(),
+            status,
+            int(api_calls),
+            str(last_error or ""),
+            file_name,
+            "",
+            notes,
+            path,
+            first_candle_date,
+        ]
+
+    def _update_universe_v2_cache_and_stats(
+        self,
+        *,
+        api_cap: int = 600,
+        run_full_backfill: bool = True,
+        priority_symbols: list[str] | None = None,
+        fetch_only_symbols: list[str] | None = None,
+        write_history_index: bool = True,
+    ) -> dict[str, Any]:
+        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
+        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        min_cols = max(26, max(header_map.values()) if header_map else 26)
+        for r in rows:
+            if len(r) < min_cols:
+                r.extend([""] * (min_cols - len(r)))
+
+        col_symbol = int(header_map.get("Symbol", 2))
+        col_exchange = int(header_map.get("Exchange", 3))
+        col_segment = int(header_map.get("Segment", 4))
+        col_enabled = int(header_map.get("Enabled", 9))
+        col_notes = int(header_map.get("Notes", 11))
+        col_raw_json = int(header_map.get("Raw CSV (JSON)", 19))
+        col_instrument_key = int(header_map.get("Instrument Key", 23))
+        col_canonical = int(header_map.get("Canonical ID", 27))
+        fetch_only_set: set[str] | None = None
+        if fetch_only_symbols is not None:
+            fetch_only_set = {str(s).strip().upper() for s in fetch_only_symbols if str(s).strip()}
+        if priority_symbols:
+            pset = {str(s).strip().upper() for s in priority_symbols if str(s).strip()}
+            if pset:
+                prioritized = [r for r in rows if len(r) >= col_symbol and str(r[col_symbol - 1]).strip().upper() in pset]
+                others = [r for r in rows if len(r) < col_symbol or str(r[col_symbol - 1]).strip().upper() not in pset]
+                rows = prioritized + others
+
+        expected = self._expected_last_completed_daily_date()
+        expected_lcd = expected.isoformat()
+        horizon_start = self._history_horizon_start_ist()
+        horizon_floor = horizon_start.date()
+
+        scanned = 0
+        fetches = 0
+        updated = 0
+        stale = 0
+        missing = 0
+        invalid = 0
+        error_count = 0
+        index_rows: list[list[object]] = []
+        stats_by_canonical: dict[str, TradabilityStats] = {}
+        quality_by_canonical: dict[str, dict[str, Any]] = {}
+
+        for row in rows:
+            symbol = row[col_symbol - 1].strip().upper() if len(row) >= col_symbol else ""
+            if not symbol:
+                continue
+            scanned += 1
+            exchange = row[col_exchange - 1].strip().upper() if len(row) >= col_exchange else "NSE"
+            segment = row[col_segment - 1].strip().upper() if len(row) >= col_segment else "CASH"
+            enabled = row[col_enabled - 1] if len(row) >= col_enabled else "Y"
+            notes = row[col_notes - 1] if len(row) >= col_notes else ""
+            raw_json_text = row[col_raw_json - 1] if len(row) >= col_raw_json else ""
+            instrument_key = row[col_instrument_key - 1].strip() if len(row) >= col_instrument_key else ""
+            canonical = row[col_canonical - 1].strip().upper() if len(row) >= col_canonical else ""
+            if not canonical:
+                canonical = canonical_id_from_fields(self._extract_isin_from_notes(notes), exchange, symbol)
+                row[col_canonical - 1] = canonical
+
+            path, cached = self._read_score_cache_with_migration(symbol, exchange, segment, instrument_key)
+            before_sig = self._last_candle_sig(cached)
+            last_error = ""
+            source = "cache"
+            api_calls = 0
+            candles = cached
+            suspended_or_delisted = False
+            if raw_json_text.strip():
+                try:
+                    raw_obj = json.loads(raw_json_text)
+                    if isinstance(raw_obj, dict):
+                        suspended_or_delisted = (
+                            self._flag_any(raw_obj.get("is_delisted"), False)
+                            or self._flag_any(raw_obj.get("is_suspended"), False)
+                            or self._flag_any(raw_obj.get("suspended"), False)
+                        )
+                except Exception:
+                    suspended_or_delisted = False
+
+            try:
+                if str(enabled).strip().upper() != "Y":
+                    status = "DISABLED"
+                    quality = "DISABLED"
+                elif not instrument_key:
+                    status = "INVALID_KEY_SKIPPED"
+                    quality = "INVALID_KEY"
+                    invalid += 1
+                else:
+                    allow_fetch_for_symbol = fetch_only_set is None or symbol in fetch_only_set
+                    did_fetch = False
+                    if allow_fetch_for_symbol and len(candles) == 0 and fetches < api_cap:
+                        api = self._fetch_daily_candles_windowed_between(instrument_key, horizon_start, now_ist())
+                        fetches += 1
+                        api_calls += 1
+                        did_fetch = True
+                        source = "upstox_api_full_history"
+                        if api:
+                            candles = self.gcs.merge_candles(path, api)
+                    elif allow_fetch_for_symbol and len(candles) > 0 and fetches < api_cap:
+                        api = self._fetch_daily_candles_incremental(instrument_key, candles, lookback_days=9500)
+                        fetches += 1
+                        api_calls += 1
+                        did_fetch = True
+                        source = "upstox_api_incremental"
+                        if api:
+                            candles = self.gcs.merge_candles(path, api)
+
+                    if allow_fetch_for_symbol and run_full_backfill and len(candles) > 0 and fetches < api_cap:
+                        first_ts = self._first_candle_ts(candles)
+                        if first_ts is None or first_ts.astimezone(IST).date() > (horizon_floor + timedelta(days=14)):
+                            older = self._fetch_daily_candles_backfill_older(instrument_key, candles, lookback_days=9500)
+                            fetches += 1
+                            api_calls += 1
+                            did_fetch = True
+                            source = "upstox_api_backfill_older"
+                            if older:
+                                candles = self.gcs.merge_candles(path, older)
+
+                    if allow_fetch_for_symbol and not did_fetch and fetches >= api_cap:
+                        source = "api_cap_blocked"
+                    elif not allow_fetch_for_symbol:
+                        source = "fetch_scope_skipped"
+
+                    last_ts = self._last_candle_ts(candles)
+                    if len(candles) == 0 or last_ts is None:
+                        status = "MISSING"
+                        quality = "MISSING"
+                        missing += 1
+                    else:
+                        last_date = last_ts.astimezone(IST).date()
+                        stale_days = max(0, (expected - last_date).days)
+                        if stale_days > 0:
+                            status = "STALE_READY"
+                            quality = "STALE"
+                            stale += 1
+                        else:
+                            status = "FRESH_READY"
+                            quality = "FRESH"
+            except UpstoxApiError as exc:
+                if self._is_invalid_instrument_key_error(exc):
+                    status = "INVALID_KEY_SKIPPED"
+                    quality = "INVALID_KEY"
+                    invalid += 1
+                else:
+                    status = "FETCH_ERROR"
+                    quality = "STALE" if len(cached) > 0 else "MISSING"
+                    error_count += 1
+                last_error = self._error_text_short(exc, max_len=180)
+                logger.warning(
+                    "universe_v2_candle_fetch_failed symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
+                    symbol,
+                    exchange,
+                    segment,
+                    instrument_key,
+                    last_error,
+                )
+            except Exception as exc:
+                status = "FETCH_ERROR"
+                quality = "STALE" if len(cached) > 0 else "MISSING"
+                error_count += 1
+                last_error = self._error_text_short(exc, max_len=180)
+                logger.warning(
+                    "universe_v2_candle_fetch_unexpected_error symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
+                    symbol,
+                    exchange,
+                    segment,
+                    instrument_key,
+                    last_error,
+                )
+
+            after_sig = self._last_candle_sig(candles)
+            if after_sig != before_sig:
+                updated += 1
+
+            stats = compute_tradability_stats(candles)
+            last_ts = self._last_candle_ts(candles)
+            last_date = last_ts.astimezone(IST).date().isoformat() if last_ts is not None else ""
+            stale_days = max(0, (expected - last_ts.astimezone(IST).date()).days) if last_ts is not None else 9999
+            stats_by_canonical[canonical] = stats
+            quality_by_canonical[canonical] = {
+                "data_quality_flag": quality,
+                "stale_days": int(stale_days),
+                "last_1d_date": last_date,
+                "status": status,
+                "suspended_or_delisted": bool(suspended_or_delisted),
+            }
+            index_rows.append(
+                self._history_index_row_v2(
+                    symbol=symbol,
+                    exchange=exchange,
+                    segment=segment,
+                    enabled=enabled,
+                    candles=candles,
+                    path=path,
+                    status=status,
+                    api_calls=api_calls,
+                    last_error=last_error,
+                    expected_lcd=expected_lcd,
+                    source=source,
+                )
+            )
+
+        if write_history_index:
+            self.sheets.replace_score_cache_1d_index(index_rows)
+        assign_turnover_rank_and_bucket(stats_by_canonical)
+        return {
+            "statsByCanonical": stats_by_canonical,
+            "qualityByCanonical": quality_by_canonical,
+            "summary": {
+                "scanned": scanned,
+                "fetches": fetches,
+                "updated": updated,
+                "stale": stale,
+                "missing": missing,
+                "invalidKey": invalid,
+                "errors": error_count,
+                "expectedLatestDailyCandleDate": expected_lcd,
+                "fetchScopeSymbols": len(fetch_only_set) if fetch_only_set is not None else -1,
+            },
+        }
+
+    def _write_universe_v2_columns(
+        self,
+        *,
+        controls: UniverseControls,
+        stats_by_canonical: dict[str, TradabilityStats],
+        quality_by_canonical: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
+        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        col_symbol = int(header_map.get("Symbol", 2))
+        col_exchange = int(header_map.get("Exchange", 3))
+        col_enabled = int(header_map.get("Enabled", 9))
+        col_notes = int(header_map.get("Notes", 11))
+        col_canonical = int(header_map.get("Canonical ID", 27))
+        col_primary_exchange = int(header_map.get("Primary Exchange", 28))
+        col_secondary_exchange = int(header_map.get("Secondary Exchange", 29))
+        col_secondary_key = int(header_map.get("Secondary Instrument Key", 30))
+
+        updated_at = now_ist_str()
+        eligible_swing_count = 0
+        eligible_intraday_count = 0
+        disabled_count = 0
+        stale_count = 0
+        disable_reasons: dict[str, int] = {}
+        total_master_count = 0
+
+        header_to_colvals: dict[str, list[list[Any]]] = {h: [] for h in UNIVERSE_V2_HEADERS}
+        for row in rows:
+            symbol = row[col_symbol - 1].strip().upper() if len(row) >= col_symbol else ""
+            if not symbol:
+                for h in UNIVERSE_V2_HEADERS:
+                    header_to_colvals[h].append([""])
+                continue
+            exchange = row[col_exchange - 1].strip().upper() if len(row) >= col_exchange else "NSE"
+            enabled = row[col_enabled - 1].strip().upper() if len(row) >= col_enabled else "Y"
+            notes = row[col_notes - 1] if len(row) >= col_notes else ""
+            canonical = row[col_canonical - 1].strip().upper() if len(row) >= col_canonical else ""
+            if not canonical:
+                canonical = canonical_id_from_fields(self._extract_isin_from_notes(notes), exchange, symbol)
+
+            total_master_count += 1
+            stats = stats_by_canonical.get(canonical, TradabilityStats())
+            quality = quality_by_canonical.get(
+                canonical,
+                {
+                    "data_quality_flag": "MISSING",
+                    "stale_days": 9999,
+                    "last_1d_date": "",
+                    "status": "MISSING",
+                    "suspended_or_delisted": False,
+                },
+            )
+            data_quality_flag = str(quality.get("data_quality_flag") or "MISSING").strip().upper()
+            stale_days = int(quality.get("stale_days") or 0)
+            suspended_or_delisted = bool(quality.get("suspended_or_delisted"))
+            if data_quality_flag == "STALE":
+                stale_count += 1
+
+            eligibility = classify_eligibility(
+                stats=stats,
+                data_quality_flag=data_quality_flag,
+                stale_days=stale_days,
+                controls=controls,
+                suspended_or_delisted=suspended_or_delisted,
+                enabled=(enabled == "Y"),
+            )
+            if eligibility.eligible_swing:
+                eligible_swing_count += 1
+            if eligibility.eligible_intraday:
+                eligible_intraday_count += 1
+            if not eligibility.eligible_swing:
+                disabled_count += 1
+                reason = str(eligibility.disable_reason or "UNKNOWN_DISABLE_REASON")
+                disable_reasons[reason] = disable_reasons.get(reason, 0) + 1
+
+            values = {
+                "Canonical ID": canonical,
+                "Primary Exchange": (
+                    row[col_primary_exchange - 1].strip().upper()
+                    if len(row) >= col_primary_exchange and row[col_primary_exchange - 1].strip()
+                    else exchange
+                ),
+                "Secondary Exchange": row[col_secondary_exchange - 1].strip().upper() if len(row) >= col_secondary_exchange else "",
+                "Secondary Instrument Key": row[col_secondary_key - 1].strip() if len(row) >= col_secondary_key else "",
+                "Bars 1D": int(stats.bars_1d),
+                "Last 1D Date": str(quality.get("last_1d_date") or ""),
+                "Price Last": round(float(stats.price_last), 4) if math.isfinite(float(stats.price_last)) else 0.0,
+                "Turnover Med 60D": round(float(stats.turnover_med_60d), 4) if math.isfinite(float(stats.turnover_med_60d)) else 0.0,
+                "ATR 14": round(float(stats.atr_14), 6) if math.isfinite(float(stats.atr_14)) else 0.0,
+                "ATR Pct 14D": round(float(stats.atr_pct_14d), 6) if math.isfinite(float(stats.atr_pct_14d)) else 0.0,
+                "Gap Risk 60D": round(float(stats.gap_risk_60d), 6) if math.isfinite(float(stats.gap_risk_60d)) else 0.0,
+                "Turnover Rank 60D": int(stats.turnover_rank_60d) if stats.turnover_rank_60d is not None else "",
+                "Liquidity Bucket": str(stats.liquidity_bucket or ""),
+                "Data Quality Flag": data_quality_flag,
+                "Stale Days": int(stale_days),
+                "Eligible Swing": "Y" if eligibility.eligible_swing else "N",
+                "Eligible Intraday": "Y" if eligibility.eligible_intraday else "N",
+                "Disable Reason": str(eligibility.disable_reason or ""),
+                "Universe Mode": str(controls.mode),
+                "Universe V2 Updated At": updated_at,
+            }
+            for h in UNIVERSE_V2_HEADERS:
+                header_to_colvals[h].append([values[h]])
+
+        if rows:
+            end_row = 3 + len(rows)
+            for h in UNIVERSE_V2_HEADERS:
+                col = int(header_map[h])
+                col_a1 = self.sheets.col_to_a1(col)
+                self.sheets.update_values(
+                    f"'{SheetNames.UNIVERSE}'!{col_a1}4:{col_a1}{end_row}",
+                    header_to_colvals[h],
+                )
+
+        top_disable = sorted(disable_reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        return {
+            "totalMasterCount": total_master_count,
+            "eligibleSwingCount": eligible_swing_count,
+            "eligibleIntradayCount": eligible_intraday_count,
+            "disabledCount": disabled_count,
+            "staleCount": stale_count,
+            "topDisableReasons": [{"reason": k, "count": v} for k, v in top_disable],
+            "mode": controls.mode,
+        }
+
+    def run_universe_v2_pipeline(
+        self,
+        *,
+        build_limit: int = 0,
+        replace: bool = False,
+        candle_api_cap: int = 600,
+        run_full_backfill: bool = True,
+        write_v2_eligibility: bool = False,
+    ) -> dict[str, Any]:
+        controls = self._build_universe_v2_controls()
+        try:
+            raw_out = self.refresh_raw_universe_from_upstox()
+        except Exception as exc:
+            # Raw fallback contract: keep last-good snapshot pointer and exit without mutating universe/cache sheets.
+            return {
+                "raw": {
+                    "ok": False,
+                    "errorType": type(exc).__name__,
+                    "error": self._error_text_short(exc, max_len=240),
+                    "latestPointerUnchanged": True,
+                },
+                "build": {"skipped": "raw_snapshot_failed"},
+                "cache": {"skipped": "raw_snapshot_failed"},
+                "eligibility": {"skipped": "raw_snapshot_failed"},
+            }
+        build_out = self.build_trading_universe_from_upstox_raw(limit=max(0, build_limit), replace=replace)
+        appended_symbols = build_out.get("appendedSymbols") if isinstance(build_out, dict) else None
+        fetch_only_symbols: list[str] | None
+        if replace:
+            # Replace mode is explicit full rebuild; allow full fetch scope.
+            fetch_only_symbols = None
+        elif isinstance(appended_symbols, list):
+            # Daily mode: reduce overlap by fetching candles only for newly appended symbols.
+            fetch_only_symbols = list(appended_symbols)
+        else:
+            fetch_only_symbols = []
+        cache_out = self._update_universe_v2_cache_and_stats(
+            api_cap=max(0, candle_api_cap),
+            run_full_backfill=bool(run_full_backfill),
+            priority_symbols=(list(appended_symbols) if isinstance(appended_symbols, list) else None),
+            fetch_only_symbols=fetch_only_symbols,
+        )
+        if write_v2_eligibility:
+            stats_out = self._write_universe_v2_columns(
+                controls=controls,
+                stats_by_canonical=cache_out["statsByCanonical"],
+                quality_by_canonical=cache_out["qualityByCanonical"],
+            )
+        else:
+            stats_out = {"skipped": "deferred_to_score_refresh"}
+        return {
+            "raw": raw_out,
+            "build": build_out,
+            "cache": cache_out["summary"],
+            "eligibility": stats_out,
+        }
+
+    def recompute_universe_v2_from_cache(self) -> dict[str, Any]:
+        controls = self._build_universe_v2_controls()
+        cache_out = self._update_universe_v2_cache_and_stats(
+            api_cap=0,
+            run_full_backfill=False,
+            fetch_only_symbols=None,
+            write_history_index=False,
+        )
+        stats_out = self._write_universe_v2_columns(
+            controls=controls,
+            stats_by_canonical=cache_out["statsByCanonical"],
+            quality_by_canonical=cache_out["qualityByCanonical"],
+        )
+        return {
+            "cache": cache_out["summary"],
+            "eligibility": stats_out,
+        }
+
+    def audit_universe_v2_integrity(self) -> dict[str, Any]:
+        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
+        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        col_symbol = int(header_map.get("Symbol", 2))
+        col_exchange = int(header_map.get("Exchange", 3))
+        col_segment = int(header_map.get("Segment", 4))
+        col_canonical = int(header_map.get("Canonical ID", 27))
+        col_instrument_key = int(header_map.get("Instrument Key", 23))
+
+        universe_rows: list[dict[str, str]] = []
+        for rnum, row in enumerate(rows, start=4):
+            sym = row[col_symbol - 1].strip().upper() if len(row) >= col_symbol else ""
+            if not sym:
+                continue
+            universe_rows.append(
+                {
+                    "row": str(rnum),
+                    "symbol": sym,
+                    "exchange": (row[col_exchange - 1].strip().upper() if len(row) >= col_exchange else "NSE"),
+                    "segment": (row[col_segment - 1].strip().upper() if len(row) >= col_segment else "CASH"),
+                    "canonical": (row[col_canonical - 1].strip().upper() if len(row) >= col_canonical else ""),
+                    "instrument_key": (row[col_instrument_key - 1].strip() if len(row) >= col_instrument_key else ""),
+                }
+            )
+
+        canon_ctr = Counter(x["canonical"] for x in universe_rows if x["canonical"])
+        sym_exch_ctr = Counter((x["symbol"], x["exchange"]) for x in universe_rows)
+        hist_rows = self.sheets.read_sheet_rows(SheetNames.SCORE_CACHE_1D, 4)
+        hist_key_ctr = Counter()
+        hist_path_ctr = Counter()
+        history_first_date_known = 0
+        history_first_date_year_2000 = 0
+        history_status_counts: Counter[str] = Counter()
+        history_terminal_or_fresh_count = 0
+        history_last_date_known = 0
+        history_last_date_min: date_cls | None = None
+        history_last_date_max: date_cls | None = None
+        for row in hist_rows:
+            if len(row) < 3:
+                continue
+            sym = row[0].strip().upper() if len(row) > 0 else ""
+            if not sym:
+                continue
+            exch = row[1].strip().upper() if len(row) > 1 else "NSE"
+            seg = row[2].strip().upper() if len(row) > 2 else "CASH"
+            path = row[13].strip() if len(row) > 13 else ""
+            first_candle_date = row[14].strip() if len(row) > 14 else ""
+            status = row[7].strip().upper() if len(row) > 7 else ""
+            last_candle_time = row[5].strip() if len(row) > 5 else ""
+            hist_key_ctr[(sym, exch, seg)] += 1
+            if path:
+                hist_path_ctr[path] += 1
+            if status:
+                history_status_counts[status] += 1
+            if status in {
+                "FRESH_READY",
+                "INSUFFICIENT_HISTORY_FINAL",
+                "STALE_SKIPPED",
+                "INVALID_KEY_SKIPPED",
+                "MISSING_SKIPPED",
+            }:
+                history_terminal_or_fresh_count += 1
+            if first_candle_date:
+                history_first_date_known += 1
+                parsed = self._parse_iso_date(first_candle_date)
+                if parsed is not None and parsed.year == 2000:
+                    history_first_date_year_2000 += 1
+            if last_candle_time:
+                parsed_last = self._parse_iso_date(last_candle_time)
+                if parsed_last is not None:
+                    history_last_date_known += 1
+                    if history_last_date_min is None or parsed_last < history_last_date_min:
+                        history_last_date_min = parsed_last
+                    if history_last_date_max is None or parsed_last > history_last_date_max:
+                        history_last_date_max = parsed_last
+
+        canon_dups = sorted([(k, v) for k, v in canon_ctr.items() if v > 1], key=lambda kv: (-kv[1], kv[0]))
+        sym_dups = sorted([(k, v) for k, v in sym_exch_ctr.items() if v > 1], key=lambda kv: (-kv[1], kv[0]))
+        hist_key_dups = sorted([(k, v) for k, v in hist_key_ctr.items() if v > 1], key=lambda kv: (-kv[1], kv[0]))
+        hist_path_dups = sorted([(k, v) for k, v in hist_path_ctr.items() if v > 1], key=lambda kv: (-kv[1], kv[0]))
+
+        return {
+            "universeRows": len(universe_rows),
+            "historyRows": sum(hist_key_ctr.values()),
+            "universeDuplicateCanonicalCount": len(canon_dups),
+            "universeDuplicateSymbolExchangeCount": len(sym_dups),
+            "historyDuplicateSymbolExchangeSegmentCount": len(hist_key_dups),
+            "historyDuplicatePathCount": len(hist_path_dups),
+            "historyFirstCandleDateKnownCount": history_first_date_known,
+            "historyFirstCandleYear2000Count": history_first_date_year_2000,
+            "historyStatusCounts": dict(sorted(history_status_counts.items())),
+            "historyTerminalOrFreshCount": history_terminal_or_fresh_count,
+            "historyPendingOrErrorCount": max(0, sum(hist_key_ctr.values()) - history_terminal_or_fresh_count),
+            "historyLastCandleDateKnownCount": history_last_date_known,
+            "historyLastCandleDateMin": history_last_date_min.isoformat() if history_last_date_min else "",
+            "historyLastCandleDateMax": history_last_date_max.isoformat() if history_last_date_max else "",
+            "samples": {
+                "universeDuplicateCanonical": [{"canonical": k, "count": v} for k, v in canon_dups[:10]],
+                "universeDuplicateSymbolExchange": [{"symbol": k[0], "exchange": k[1], "count": v} for k, v in sym_dups[:10]],
+                "historyDuplicateSymbolExchangeSegment": [
+                    {"symbol": k[0], "exchange": k[1], "segment": k[2], "count": v} for k, v in hist_key_dups[:10]
+                ],
+                "historyDuplicatePath": [{"path": k, "count": v} for k, v in hist_path_dups[:10]],
+            },
+        }
 
     def _fetch_daily_candles_windowed(self, instrument_key: str, lookback_days: int) -> list[list[object]]:
         end = now_ist()
@@ -596,8 +1579,7 @@ class UniverseService:
         expected_lcd: str = "",
         refresh_provisional_current: bool = False,
     ) -> tuple[list[list[object]], str, int]:
-        path = self.gcs.score_cache_1d_path(symbol, exchange, segment)
-        cached = self.gcs.read_candles(path)
+        path, cached = self._read_score_cache_with_migration(symbol, exchange, segment, instrument_key)
         has_required_lookback = self._daily_cache_has_lookback(cached, lookback_days) if cached else False
         if len(cached) >= min_bars:
             if self._daily_cache_is_current(cached):
@@ -685,6 +1667,7 @@ class UniverseService:
         terminal_insufficient = 0
         terminal_stale = 0
         terminal_invalid_key = 0
+        terminal_missing = 0
         provisional_ready = 0
         pending = 0
         updated = 0
@@ -696,8 +1679,7 @@ class UniverseService:
 
         for u in rows:
             scanned += 1
-            path = self.gcs.score_cache_1d_path(u.symbol, u.exchange, u.segment)
-            cached = self.gcs.read_candles(path)
+            path, cached = self._read_score_cache_with_migration(u.symbol, u.exchange, u.segment, u.instrument_key)
             before_bars = len(cached)
             before_last_text = self._last_candle_text(cached)
             before_last_sig = self._last_candle_sig(cached)
@@ -732,6 +1714,12 @@ class UniverseService:
             ):
                 candles, source, api_calls = cached, "invalid_instrument_key_terminal", 0
             elif (
+                not before_ready
+                and not retry_stale_terminal_today
+                and self._prefetch_should_skip_missing_retry(prev_row, cached, expected_lcd=expected)
+            ):
+                candles, source, api_calls = cached, "gcs_score_cache_1d_missing_terminal", 0
+            elif (
                 before_ready
                 and not allow_provisional_intraday
                 and not retry_stale_terminal_today
@@ -754,12 +1742,33 @@ class UniverseService:
                         refresh_provisional_current=before_provisional,
                     )
                 except UpstoxApiError as exc:
-                    if not self._is_invalid_instrument_key_error(exc):
-                        raise
-                    candles, source, api_calls = cached, "invalid_instrument_key_terminal", 1
                     row_last_error = self._error_text_short(exc)
+                    if self._is_invalid_instrument_key_error(exc):
+                        candles, source, api_calls = cached, "invalid_instrument_key_terminal", 1
+                        logger.warning(
+                            "prefetch_score_cache_batch skip invalid instrument key symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
+                            u.symbol,
+                            u.exchange,
+                            u.segment,
+                            u.instrument_key,
+                            row_last_error,
+                        )
+                    else:
+                        # Keep full-universe progress resilient to one-symbol API failures.
+                        candles, source, api_calls = cached, "upstox_api_error", 1
+                        logger.warning(
+                            "prefetch_score_cache_batch symbol fetch error symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
+                            u.symbol,
+                            u.exchange,
+                            u.segment,
+                            u.instrument_key,
+                            row_last_error,
+                        )
+                except Exception as exc:
+                    row_last_error = self._error_text_short(exc)
+                    candles, source, api_calls = cached, "prefetch_unexpected_error", 0
                     logger.warning(
-                        "prefetch_score_cache_batch skip invalid instrument key symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
+                        "prefetch_score_cache_batch unexpected symbol error symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
                         u.symbol,
                         u.exchange,
                         u.segment,
@@ -795,6 +1804,8 @@ class UniverseService:
                 terminal_stale += 1
             elif source == "invalid_instrument_key_terminal":
                 terminal_invalid_key += 1
+            elif source == "gcs_score_cache_1d_missing_terminal":
+                terminal_missing += 1
             if source in {"api_cap_blocked", "gcs_score_cache_1d_stale_api_cap_blocked"} and fetches >= api_cap:
                 # Continue scanning to count readiness but don't force more API beyond cap.
                 pass
@@ -817,7 +1828,7 @@ class UniverseService:
         self.sheets.replace_score_cache_1d_index(score_cache_index_rows)
 
         total = len(rows)
-        complete = min(total, fresh + terminal_insufficient + terminal_stale + terminal_invalid_key)
+        complete = min(total, fresh + terminal_insufficient + terminal_stale + terminal_invalid_key + terminal_missing)
         pending = max(0, total - complete)
         out = {
             "scanned": scanned,
@@ -830,6 +1841,7 @@ class UniverseService:
             "terminalInsufficientHistory": terminal_insufficient,
             "terminalStaleSkipped": terminal_stale,
             "terminalInvalidInstrumentKey": terminal_invalid_key,
+            "terminalMissingSkipped": terminal_missing,
             "prefillDone": complete,
             "prefillComplete": pending == 0,
             "prefillCoveragePct": round((complete * 100.0 / total), 2) if total else 0.0,
@@ -840,8 +1852,20 @@ class UniverseService:
             "expectedLatestDailyCandleDate": expected,
         }
         logger.info(
-            "prefetch_score_cache_batch complete scanned=%s fetches=%s updated=%s retriedNoChange=%s freshReady=%s terminalIH=%s terminalStale=%s terminalInvalidKey=%s prefillDone=%s/%s pending=%s expectedLCD=%s",
-            scanned, fetches, updated, retried_no_change, fresh, terminal_insufficient, terminal_stale, terminal_invalid_key, complete, total, pending, expected,
+            "prefetch_score_cache_batch complete scanned=%s fetches=%s updated=%s retriedNoChange=%s freshReady=%s terminalIH=%s terminalStale=%s terminalInvalidKey=%s terminalMissing=%s prefillDone=%s/%s pending=%s expectedLCD=%s",
+            scanned,
+            fetches,
+            updated,
+            retried_no_change,
+            fresh,
+            terminal_insufficient,
+            terminal_stale,
+            terminal_invalid_key,
+            terminal_missing,
+            complete,
+            total,
+            pending,
+            expected,
         )
         return out
 
@@ -920,7 +1944,7 @@ class UniverseService:
                 skip_counts["invalidInstrumentKey"] += 1
                 api_calls = 1
                 source = "invalid_instrument_key_terminal"
-                candles = self.gcs.read_candles(self.gcs.score_cache_1d_path(u.symbol, u.exchange, u.segment))
+                _, candles = self._read_score_cache_with_migration(u.symbol, u.exchange, u.segment, u.instrument_key)
                 short_err = self._error_text_short(exc, max_len=96)
                 updates.append(
                     (
