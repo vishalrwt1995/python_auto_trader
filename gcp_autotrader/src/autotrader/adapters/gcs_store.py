@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from autotrader.domain.indicators import normalize_candles
@@ -74,7 +75,19 @@ class GoogleCloudStorageStore:
         return f"cache/score_1d/{exchange.upper()}/{segment.upper()}/{symbol.upper()}.json"
 
     @staticmethod
-    def upstox_raw_universe_versioned_path(run_date: str) -> str:
+    def score_cache_1d_path_by_instrument_key(instrument_key: str, exchange: str, segment: str) -> str:
+        raw = str(instrument_key or "").strip().upper()
+        if not raw:
+            return GoogleCloudStorageStore.score_cache_1d_path("UNKNOWN", exchange, segment)
+        # Upstox recommends instrument_key as the stable identifier; use a sanitized path-safe key.
+        safe = re.sub(r"[^A-Z0-9._-]+", "_", raw)
+        safe = re.sub(r"_+", "_", safe).strip("_")
+        return f"cache/score_1d_by_instrument/{exchange.upper()}/{segment.upper()}/{safe}.json"
+
+    @staticmethod
+    def upstox_raw_universe_versioned_path(run_date: str, run_stamp: str | None = None) -> str:
+        if run_stamp:
+            return f"raw/upstox/universe/{run_date}/{run_stamp}/complete.json.gz"
         return f"raw/upstox/universe/{run_date}/complete.json.gz"
 
     @staticmethod

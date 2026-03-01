@@ -517,15 +517,16 @@ def run_score_refresh(
             cache_only=cache_only,
             require_fresh_cache=require_fresh_cache,
         )
+        v2_out = c.universe_service().recompute_universe_v2_from_cache()
         sink.action(
             "Universe",
             "score_refresh",
             "DONE",
             "universe scoring complete",
-            {**sched_ctx, **_duration_ctx(started_perf), "regime": regime.__dict__, "score": score_out},
+            {**sched_ctx, **_duration_ctx(started_perf), "regime": regime.__dict__, "score": score_out, "universeV2": v2_out},
         )
         sink.flush_all()
-        return {"regime": regime.__dict__, "score": score_out}
+        return {"regime": regime.__dict__, "score": score_out, "universeV2": v2_out}
     except Exception as e:
         sink.action(
             "Universe",
@@ -636,6 +637,7 @@ def run_score_cache_update_close(
     api_cap: int = 600,
     lookback_days: int = 700,
     min_bars: int = 320,
+    retry_stale_terminal_today: bool = False,
     x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
     x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
 ) -> dict[str, Any]:
@@ -646,17 +648,17 @@ def run_score_cache_update_close(
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("score_cache_update_close", ttl_seconds=3600)
     if lease is None:
-        sink.action("Universe", "score_cache_update_close", "LOCK_BUSY", "skipped: lock busy", {**sched_ctx, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
+        sink.action("Universe", "score_cache_update_close", "LOCK_BUSY", "skipped: lock busy", {**sched_ctx, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today})
         sink.flush_all()
         return {"skipped": "lock_busy"}
     started_perf = time.perf_counter()
     try:
-        sink.action("Universe", "score_cache_update_close", "START", "", {**sched_ctx, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
+        sink.action("Universe", "score_cache_update_close", "START", "", {**sched_ctx, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today})
         out = c.universe_service().prefetch_score_cache_batch(
             api_cap=max(0, api_cap),
             lookback_days=lookback_days,
             min_bars=min_bars,
-            retry_stale_terminal_today=True,
+            retry_stale_terminal_today=bool(retry_stale_terminal_today),
         )
         sink.action("Universe", "score_cache_update_close", "DONE", "daily score-cache update batch complete", {**sched_ctx, **_duration_ctx(started_perf), **out})
         sink.flush_all()
@@ -667,7 +669,7 @@ def run_score_cache_update_close(
             "score_cache_update_close",
             "ERROR",
             f"{type(e).__name__}: {e}",
-            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars},
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today},
         )
         sink.flush_all()
         raise
@@ -831,6 +833,188 @@ def run_universe_refresh_append_backfill(
         raise
     finally:
         _release_named_locks(c.state, leases)
+
+
+@app.post("/jobs/universe-v2-refresh")
+def run_universe_v2_refresh(
+    x_job_token: str | None = Header(default=None),
+    build_limit: int = 0,
+    replace: bool = False,
+    candle_api_cap: int = 600,
+    run_full_backfill: bool = True,
+    write_v2_eligibility: bool = False,
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    leases, blocked_lock = _acquire_named_locks(
+        c.state,
+        ["universe_v2_refresh", "raw_universe_refresh", "universe_build", "score_cache_backfill_full", "score_cache_update_close"],
+        ttl_seconds=7200,
+    )
+    if blocked_lock is not None:
+        sink.action(
+            "Universe",
+            "universe_v2_refresh",
+            "LOCK_BUSY",
+            "skipped: lock busy",
+            {
+                **sched_ctx,
+                "blockedLock": blocked_lock,
+                "buildLimit": build_limit,
+                "replace": replace,
+                "candleApiCap": candle_api_cap,
+                "runFullBackfill": run_full_backfill,
+                "writeV2Eligibility": write_v2_eligibility,
+            },
+        )
+        sink.flush_all()
+        return {"skipped": "lock_busy", "blockedLock": blocked_lock}
+    started_perf = time.perf_counter()
+    try:
+        sink.action(
+            "Universe",
+            "universe_v2_refresh",
+            "START",
+            "",
+            {
+                **sched_ctx,
+                "buildLimit": build_limit,
+                "replace": replace,
+                "candleApiCap": candle_api_cap,
+                "runFullBackfill": run_full_backfill,
+                "writeV2Eligibility": write_v2_eligibility,
+            },
+        )
+        out = c.universe_service().run_universe_v2_pipeline(
+            build_limit=max(0, build_limit),
+            replace=replace,
+            candle_api_cap=max(0, candle_api_cap),
+            run_full_backfill=run_full_backfill,
+            write_v2_eligibility=write_v2_eligibility,
+        )
+        raw_ok = bool((out.get("raw") or {}).get("ok", True))
+        cache_summary = out.get("cache") if isinstance(out.get("cache"), dict) else {}
+        eligibility = out.get("eligibility") if isinstance(out.get("eligibility"), dict) else {}
+        if not raw_ok:
+            sink.action(
+                "Universe",
+                "universe_v2_refresh",
+                "WARN",
+                "raw snapshot failed; last-good retained",
+                {**sched_ctx, **_duration_ctx(started_perf), **out},
+            )
+        else:
+            if int(cache_summary.get("errors", 0) or 0) > 0:
+                sink.action(
+                    "Universe",
+                    "universe_v2_candle_update",
+                    "WARN",
+                    "one or more candle refreshes failed",
+                    {
+                        **sched_ctx,
+                        "errors": int(cache_summary.get("errors", 0) or 0),
+                        "missing": int(cache_summary.get("missing", 0) or 0),
+                        "stale": int(cache_summary.get("stale", 0) or 0),
+                        "invalidKey": int(cache_summary.get("invalidKey", 0) or 0),
+                    },
+                )
+            if "totalMasterCount" in eligibility:
+                sink.action(
+                    "Universe",
+                    "universe_v2_daily_summary",
+                    "DONE",
+                    "daily universe v2 eligibility summary",
+                    {
+                        **sched_ctx,
+                        "totalMasterCount": int(eligibility.get("totalMasterCount", 0) or 0),
+                        "eligibleSwingCount": int(eligibility.get("eligibleSwingCount", 0) or 0),
+                        "eligibleIntradayCount": int(eligibility.get("eligibleIntradayCount", 0) or 0),
+                        "disabledCount": int(eligibility.get("disabledCount", 0) or 0),
+                        "staleCount": int(eligibility.get("staleCount", 0) or 0),
+                        "topDisableReasons": eligibility.get("topDisableReasons") or [],
+                    },
+                )
+            else:
+                sink.action(
+                    "Universe",
+                    "universe_v2_daily_summary",
+                    "DONE",
+                    "daily universe v2 eligibility deferred to score_refresh",
+                    {
+                        **sched_ctx,
+                        "appended": int((out.get("build") or {}).get("appended", 0) or 0),
+                        "rawEligible": int((out.get("build") or {}).get("rawEligible", 0) or 0),
+                        "cacheFetches": int(cache_summary.get("fetches", 0) or 0),
+                        "cacheUpdated": int(cache_summary.get("updated", 0) or 0),
+                        "cacheMissing": int(cache_summary.get("missing", 0) or 0),
+                        "cacheStale": int(cache_summary.get("stale", 0) or 0),
+                    },
+                )
+            sink.action(
+                "Universe",
+                "universe_v2_refresh",
+                "DONE",
+                "universe v2 pipeline complete",
+                {**sched_ctx, **_duration_ctx(started_perf), **out},
+            )
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action(
+            "Universe",
+            "universe_v2_refresh",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {
+                **sched_ctx,
+                **_duration_ctx(started_perf),
+                "errorType": type(e).__name__,
+                "buildLimit": build_limit,
+                "replace": replace,
+                "candleApiCap": candle_api_cap,
+                "runFullBackfill": run_full_backfill,
+                "writeV2Eligibility": write_v2_eligibility,
+            },
+        )
+        sink.flush_all()
+        raise
+    finally:
+        _release_named_locks(c.state, leases)
+
+
+@app.post("/jobs/universe-v2-audit")
+def run_universe_v2_audit(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("Universe", "universe_v2_audit", "START", "", sched_ctx)
+        out = c.universe_service().audit_universe_v2_integrity()
+        sink.action("Universe", "universe_v2_audit", "DONE", "universe integrity audit complete", {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action(
+            "Universe",
+            "universe_v2_audit",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__},
+        )
+        sink.flush_all()
+        raise
 
 
 @app.post("/jobs/eod-close-update-score")

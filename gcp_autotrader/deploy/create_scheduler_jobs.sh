@@ -47,18 +47,20 @@ create_job "autotrader-bootstrap-sheets" "0 4 * * 1-5" "$SERVICE_URL/jobs/bootst
 # User approval is still required in the Upstox app/flow; the notifier webhook stores the token automatically.
 create_job "autotrader-upstox-token-request" "35 3 * * 1-5" "$SERVICE_URL/jobs/upstox-token-request"
 
-# Chained morning universe pipeline (raw refresh -> append -> start backfill for newly appended instruments).
-UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-refresh-append-backfill?replace=false&run_backfill=true&backfill_max_passes=1&backfill_api_cap=300&backfill_lookback_days=9500&min_bars=320&run_score_refresh=false"
+# Universe V2 morning pipeline (raw refresh -> canonical build -> backfill only newly appended instruments).
+UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false"
 create_job "autotrader-universe-refresh-append-backfill-0615" "15 6 * * 1-5" "$UNIVERSE_PIPELINE_URI" "{}" "30m"
 
 # Morning latest-1D update (Upstox daily candle expected after ~07:00 IST). Multiple spaced retries, no provisional intraday storage.
-CLOSE_UPDATE_URI="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320"
+CLOSE_UPDATE_URI="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=false"
 create_job "autotrader-score-cache-update-close-0705" "5 7 * * 1-5" "$CLOSE_UPDATE_URI"
 create_job "autotrader-score-cache-update-close-0725" "25 7 * * 1-5" "$CLOSE_UPDATE_URI"
 create_job "autotrader-score-cache-update-close-0745" "45 7 * * 1-5" "$CLOSE_UPDATE_URI"
 create_job "autotrader-score-cache-update-close-0805" "5 8 * * 1-5" "$CLOSE_UPDATE_URI"
 
-# Score refresh after latest daily candle update window (strict fresh-cache scoring, skips stale/incomplete rows).
+# Score refresh after latest daily candle update window:
+# - computes v1 scoring
+# - recomputes universe v2 eligibility from cache (no extra candle API fetch)
 MORNING_SCORE_URI="$SERVICE_URL/jobs/score-refresh?api_cap=0&cache_only=true&require_fresh_cache=true&fresh_hours=0"
 create_job "autotrader-score-0830" "30 8 * * 1-5" "$MORNING_SCORE_URI" "{}" "30m"
 

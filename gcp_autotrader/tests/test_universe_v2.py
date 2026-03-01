@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
+from autotrader.adapters.upstox_client import UpstoxApiError
 from autotrader.adapters.sheets_repository import SHEET_LAYOUTS, SheetNames
 from autotrader.services.universe_service import UniverseService
 from autotrader.services.universe_v2 import (
@@ -17,6 +20,7 @@ from autotrader.services.universe_v2 import (
     compute_tradability_stats,
 )
 from autotrader.settings import StrategySettings
+from autotrader.time_utils import IST
 from tests.fixtures_universe_v2 import (
     synthetic_candles_constant_tr,
     synthetic_candles_fixed_gap,
@@ -66,6 +70,94 @@ def _controls(mode: str = "BALANCED") -> UniverseControls:
             ),
         },
     )
+
+
+def _make_calendar_service(*, holiday_rows=None, by_date_rows=None, fail_all=False):
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        def get_market_holidays(self, date=None):
+            if fail_all:
+                raise UpstoxApiError("forced_holiday_api_failure")
+            if date is not None:
+                return list((by_date_rows or {}).get(str(date), []))
+            return list(holiday_rows or [])
+
+    return UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+
+
+def test_expected_lcd_normal_weekday_holiday_aware():
+    svc = _make_calendar_service(holiday_rows=[])
+    now = datetime(2026, 3, 4, 8, 0, tzinfo=IST)  # Wednesday
+    ctx = svc._expected_lcd_context(now)
+    assert ctx["expectedLCD"] == "2026-03-03"
+    assert ctx["todayTradingDay"] is True
+    assert ctx["method"] == "holiday-aware"
+
+
+def test_expected_lcd_weekend_holiday_aware():
+    svc = _make_calendar_service(holiday_rows=[])
+    now = datetime(2026, 3, 1, 8, 0, tzinfo=IST)  # Sunday
+    ctx = svc._expected_lcd_context(now)
+    assert ctx["expectedLCD"] == "2026-02-27"
+    assert ctx["todayTradingDay"] is False
+    assert ctx["method"] == "holiday-aware"
+
+
+def test_expected_lcd_single_weekday_holiday():
+    rows = [
+        {
+            "date": "2026-01-26",
+            "holiday_type": "TRADING_HOLIDAY",
+            "closed_exchanges": ["NSE", "BSE"],
+        }
+    ]
+    svc = _make_calendar_service(holiday_rows=rows)
+    now = datetime(2026, 1, 27, 8, 0, tzinfo=IST)
+    ctx = svc._expected_lcd_context(now)
+    assert ctx["expectedLCD"] == "2026-01-23"
+    candles = [["2026-01-23T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
+    assert svc._daily_cache_is_current(candles, now=now) is True
+
+
+def test_expected_lcd_consecutive_holidays():
+    rows = [
+        {"date": "2026-03-02", "holiday_type": "TRADING_HOLIDAY", "closed_exchanges": ["NSE"]},
+        {"date": "2026-03-03", "holiday_type": "TRADING_HOLIDAY", "closed_exchanges": ["NSE"]},
+    ]
+    svc = _make_calendar_service(holiday_rows=rows)
+    now = datetime(2026, 3, 4, 8, 0, tzinfo=IST)
+    ctx = svc._expected_lcd_context(now)
+    assert ctx["expectedLCD"] == "2026-02-27"
+
+
+def test_expected_lcd_year_boundary_with_previous_year_holiday_probe():
+    by_date_rows = {
+        "2025-12-31": [
+            {
+                "date": "2025-12-31",
+                "holiday_type": "TRADING_HOLIDAY",
+                "closed_exchanges": ["NSE"],
+            }
+        ]
+    }
+    svc = _make_calendar_service(holiday_rows=[], by_date_rows=by_date_rows)
+    now = datetime(2026, 1, 1, 9, 0, tzinfo=IST)
+    ctx = svc._expected_lcd_context(now)
+    assert ctx["expectedLCD"] == "2025-12-30"
+
+
+def test_expected_lcd_fallback_weekend_when_holiday_api_fails():
+    svc = _make_calendar_service(fail_all=True)
+    now = datetime(2026, 1, 27, 8, 0, tzinfo=IST)
+    ctx = svc._expected_lcd_context(now)
+    # Weekend-only fallback does not know Jan-26 holiday.
+    assert ctx["expectedLCD"] == "2026-01-26"
+    assert ctx["method"] == "fallback-weekend"
 
 
 def test_canonical_dedupe_prefers_nse_primary():

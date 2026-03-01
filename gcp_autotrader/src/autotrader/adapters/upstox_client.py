@@ -543,6 +543,32 @@ class UpstoxClient:
             return only
         return Quote(ltp=0.0)
 
+    def get_market_holidays(self, date: str | None = None) -> list[dict[str, Any]]:
+        """Return market holidays from Upstox v2 Market Holidays API.
+
+        - If `date` is provided (YYYY-MM-DD), queries a date-specific endpoint.
+        - Otherwise fetches the current-year holiday list.
+        """
+        endpoint = "market/holidays"
+        if date:
+            endpoint = f"{endpoint}/{str(date).strip()}"
+        data = self._request(
+            "GET",
+            endpoint,
+            auth=True,
+            version="v2",
+            content_type=None,
+        )
+        if isinstance(data, list):
+            return [r for r in data if isinstance(r, dict)]
+        if isinstance(data, dict):
+            rows = data.get("holidays") or data.get("data") or data.get("items") or []
+            if isinstance(rows, list):
+                return [r for r in rows if isinstance(r, dict)]
+            if date and ("holiday_type" in data or "date" in data):
+                return [data]
+        return []
+
     def get_expiries(self, instrument_key: str) -> list[str]:
         ik = str(instrument_key or "").strip()
         if not ik:

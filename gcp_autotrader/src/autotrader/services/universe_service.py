@@ -87,6 +87,12 @@ class UniverseService:
         self.gcs = gcs
         self.upstox = upstox
         self.cfg = cfg
+        # Trading-calendar caches for holiday-aware ExpectedLCD.
+        self._holiday_dates_by_year: dict[int, set[date_cls]] = {}
+        self._holiday_year_loaded_ok: set[int] = set()
+        self._holiday_date_probe_cache: dict[str, bool] = {}
+        self._holiday_api_fallback_day: str | None = None
+        self._expected_lcd_ctx_by_day: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _cfg_int(cfg: dict[str, str], key: str, default: int) -> int:
@@ -111,12 +117,162 @@ class UniverseService:
         kv = UniverseService._parse_pipe_kv(notes)
         return str(kv.get("isin", "")).strip().upper()
 
-    def _expected_last_completed_daily_date(self, now: datetime | None = None) -> date_cls:
+    def _is_weekend(self, d: date_cls) -> bool:
+        return d.weekday() >= 5
+
+    def _extract_holiday_date(self, row: dict[str, Any]) -> date_cls | None:
+        # Upstox payload fields observed across variants.
+        for key in ("date", "holiday_date", "holidayDate"):
+            d = self._parse_iso_date(str(row.get(key) or ""))
+            if d is not None:
+                return d
+        return None
+
+    def _exchange_token_set(self, v: Any) -> set[str]:
+        out: set[str] = set()
+        if isinstance(v, list):
+            items = v
+        elif isinstance(v, dict):
+            items = [v]
+        elif isinstance(v, str):
+            items = [v]
+        else:
+            items = []
+        for item in items:
+            if isinstance(item, dict):
+                s = str(item.get("exchange") or item.get("segment") or item.get("name") or "").strip().upper()
+            else:
+                s = str(item).strip().upper()
+            if s:
+                out.add(s.replace(":", "|"))
+        return out
+
+    def _row_closes_nse(self, row: dict[str, Any]) -> bool:
+        # Prefer explicit closed/open exchange fields when available.
+        closed = self._exchange_token_set(row.get("closed_exchanges"))
+        opened = self._exchange_token_set(row.get("open_exchanges"))
+        holiday_type = str(row.get("holiday_type") or row.get("holidayType") or "").strip().upper()
+
+        has_nse_closed = any("NSE" in token for token in closed)
+        has_nse_open = any("NSE" in token for token in opened)
+        if has_nse_closed and not has_nse_open:
+            return True
+        if has_nse_open:
+            return False
+        # Fallback heuristic: trading holiday rows without explicit open NSE are considered NSE-closed.
+        return holiday_type == "TRADING_HOLIDAY"
+
+    def _load_holiday_calendar_for_year(self, year: int, *, run_day: date_cls) -> tuple[set[date_cls], bool]:
+        if year in self._holiday_year_loaded_ok:
+            return self._holiday_dates_by_year.get(year, set()), True
+        if self._holiday_api_fallback_day == run_day.isoformat():
+            return set(), False
+        try:
+            rows = self.upstox.get_market_holidays()
+            dates = {
+                d
+                for r in rows
+                if isinstance(r, dict)
+                for d in [self._extract_holiday_date(r)]
+                if d is not None and d.year == year and self._row_closes_nse(r)
+            }
+            self._holiday_dates_by_year[year] = dates
+            self._holiday_year_loaded_ok.add(year)
+            return dates, True
+        except Exception as exc:
+            self._holiday_api_fallback_day = run_day.isoformat()
+            logger.warning(
+                "expected_lcd holiday calendar fetch failed year=%s runDay=%s fallback=weekend_only error=%s",
+                year,
+                run_day.isoformat(),
+                type(exc).__name__,
+            )
+            return set(), False
+
+    def _is_exchange_holiday(self, d: date_cls, *, run_year: int, run_day: date_cls) -> bool:
+        if self._holiday_api_fallback_day == run_day.isoformat():
+            return False
+        if d.year == run_year:
+            dates, ok = self._load_holiday_calendar_for_year(run_year, run_day=run_day)
+            if not ok:
+                return False
+            return d in dates
+        # Year-boundary fallback: probe specific date once and cache.
+        key = d.isoformat()
+        if key in self._holiday_date_probe_cache:
+            return self._holiday_date_probe_cache[key]
+        try:
+            rows = self.upstox.get_market_holidays(date=key)
+            is_holiday = any(
+                isinstance(r, dict)
+                and self._extract_holiday_date(r) == d
+                and self._row_closes_nse(r)
+                for r in rows
+            )
+            self._holiday_date_probe_cache[key] = bool(is_holiday)
+            return bool(is_holiday)
+        except Exception as exc:
+            self._holiday_api_fallback_day = run_day.isoformat()
+            logger.warning(
+                "expected_lcd holiday date probe failed date=%s runDay=%s fallback=weekend_only error=%s",
+                key,
+                run_day.isoformat(),
+                type(exc).__name__,
+            )
+            self._holiday_date_probe_cache[key] = False
+            return False
+
+    def _is_trading_day(self, d: date_cls, *, run_year: int, run_day: date_cls) -> bool:
+        if self._is_weekend(d):
+            return False
+        if self._is_exchange_holiday(d, run_year=run_year, run_day=run_day):
+            return False
+        return True
+
+    def _expected_lcd_context(self, now: datetime | None = None) -> dict[str, Any]:
         now_i = (now or now_ist()).astimezone(IST)
-        d = now_i.date() - timedelta(days=1)
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
-        return d
+        today = now_i.date()
+        cache_key = today.isoformat()
+        cached = self._expected_lcd_ctx_by_day.get(cache_key)
+        if cached is not None:
+            return cached
+
+        run_year = today.year
+        # Try loading current-year calendar once; failures auto-switch fallback mode.
+        self._load_holiday_calendar_for_year(run_year, run_day=today)
+
+        cursor = today - timedelta(days=1)
+        expected = None
+        for _ in range(370):
+            if self._is_trading_day(cursor, run_year=run_year, run_day=today):
+                expected = cursor
+                break
+            cursor -= timedelta(days=1)
+        if expected is None:
+            # Safety fallback should never happen.
+            expected = self._prev_weekday(today - timedelta(days=1))
+        today_trading = self._is_trading_day(today, run_year=run_year, run_day=today)
+        method = "fallback-weekend" if self._holiday_api_fallback_day == today.isoformat() else "holiday-aware"
+        ctx = {
+            "today": today.isoformat(),
+            "todayTradingDay": bool(today_trading),
+            "marketClosedToday": not bool(today_trading),
+            "expectedLCD": expected.isoformat(),
+            "method": method,
+        }
+        self._expected_lcd_ctx_by_day[cache_key] = ctx
+        logger.info(
+            "expected_lcd resolved expected=%s today=%s todayTradingDay=%s marketClosedToday=%s method=%s",
+            ctx["expectedLCD"],
+            ctx["today"],
+            ctx["todayTradingDay"],
+            ctx["marketClosedToday"],
+            ctx["method"],
+        )
+        return ctx
+
+    def _expected_last_completed_daily_date(self, now: datetime | None = None) -> date_cls:
+        return self._parse_iso_date(self._expected_lcd_context(now).get("expectedLCD", "")) or self._prev_weekday((now or now_ist()).astimezone(IST).date() - timedelta(days=1))
 
     def _build_universe_v2_controls(self) -> UniverseControls:
         self.sheets.ensure_config_defaults(self.UNIVERSE_V2_CONFIG_DEFAULTS)
@@ -948,8 +1104,9 @@ class UniverseService:
                 others = [r for r in rows if len(r) < col_symbol or str(r[col_symbol - 1]).strip().upper() not in pset]
                 rows = prioritized + others
 
-        expected = self._expected_last_completed_daily_date()
-        expected_lcd = expected.isoformat()
+        expected_ctx = self._expected_lcd_context()
+        expected_lcd = str(expected_ctx.get("expectedLCD") or "")
+        expected = self._parse_iso_date(expected_lcd) or self._expected_last_completed_daily_date()
         horizon_start = self._history_horizon_start_ist()
         horizon_floor = horizon_start.date()
 
@@ -1137,6 +1294,9 @@ class UniverseService:
                 "invalidKey": invalid,
                 "errors": error_count,
                 "expectedLatestDailyCandleDate": expected_lcd,
+                "expectedLcdMethod": str(expected_ctx.get("method") or "fallback-weekend"),
+                "todayTradingDay": bool(expected_ctx.get("todayTradingDay", False)),
+                "marketClosedToday": bool(expected_ctx.get("marketClosedToday", True)),
                 "fetchScopeSymbols": len(fetch_only_set) if fetch_only_set is not None else -1,
             },
         }
@@ -1503,12 +1663,8 @@ class UniverseService:
         return out
 
     def _expected_latest_daily_candle_date(self, now: datetime | None = None) -> date_cls:
-        now = now or now_ist()
-        now_i = now.astimezone(IST)
-        # By design we start cache prefetch after 18:00 IST, so expect today's daily bar after that.
-        if now_i.weekday() < 5 and (now_i.hour, now_i.minute) >= (18, 0):
-            return now_i.date()
-        return self._prev_weekday(now_i.date() - timedelta(days=1))
+        # Holiday-aware ExpectedLCD: most recent completed trading day strictly before today.
+        return self._expected_last_completed_daily_date(now)
 
     def _daily_cache_is_current(self, candles: list[list[object]], now: datetime | None = None) -> bool:
         last_ts = self._last_candle_ts(candles)
@@ -1672,7 +1828,8 @@ class UniverseService:
         pending = 0
         updated = 0
         retried_no_change = 0
-        expected = self._expected_latest_daily_candle_date().strftime("%Y-%m-%d")
+        expected_ctx = self._expected_lcd_context()
+        expected = str(expected_ctx.get("expectedLCD") or self._expected_latest_daily_candle_date().strftime("%Y-%m-%d"))
         updated_at = now_ist_str()
         score_cache_index_rows: list[list[object]] = []
         prev_index = self._read_score_cache_index_snapshot()
@@ -1850,9 +2007,12 @@ class UniverseService:
             "freshCoveragePct": round((fresh * 100.0 / total), 2) if total else 0.0,
             "provisionalCoveragePct": round((provisional_ready * 100.0 / total), 2) if total else 0.0,
             "expectedLatestDailyCandleDate": expected,
+            "expectedLcdMethod": str(expected_ctx.get("method") or "fallback-weekend"),
+            "todayTradingDay": bool(expected_ctx.get("todayTradingDay", False)),
+            "marketClosedToday": bool(expected_ctx.get("marketClosedToday", True)),
         }
         logger.info(
-            "prefetch_score_cache_batch complete scanned=%s fetches=%s updated=%s retriedNoChange=%s freshReady=%s terminalIH=%s terminalStale=%s terminalInvalidKey=%s terminalMissing=%s prefillDone=%s/%s pending=%s expectedLCD=%s",
+            "prefetch_score_cache_batch complete scanned=%s fetches=%s updated=%s retriedNoChange=%s freshReady=%s terminalIH=%s terminalStale=%s terminalInvalidKey=%s terminalMissing=%s prefillDone=%s/%s pending=%s expectedLCD=%s method=%s todayTradingDay=%s",
             scanned,
             fetches,
             updated,
@@ -1866,6 +2026,8 @@ class UniverseService:
             total,
             pending,
             expected,
+            out.get("expectedLcdMethod"),
+            out.get("todayTradingDay"),
         )
         return out
 

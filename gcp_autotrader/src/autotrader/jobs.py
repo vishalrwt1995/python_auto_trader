@@ -5,10 +5,10 @@ import uuid
 
 import typer
 
-from autotrader.container import get_container, get_settings
+from autotrader.container import get_container
 from autotrader.services.log_sink import LogSink
 
-app = typer.Typer(add_completion=False, no_args_is_help=True)
+app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 
 
 def _print(obj):
@@ -61,6 +61,54 @@ def universe_build(limit: int = typer.Option(0), replace: bool = typer.Option(Fa
     sink.action("Universe", "build_from_raw", "START", "", {"limit": limit, "replace": replace})
     out = c.universe_service().build_trading_universe_from_upstox_raw(limit=limit, replace=replace)
     sink.action("Universe", "build_from_raw", "DONE", "trading universe built/appended", out)
+    sink.flush_all()
+    _print(out)
+
+
+@app.command("universe-v2-refresh")
+def universe_v2_refresh(
+    build_limit: int = typer.Option(0),
+    replace: bool = typer.Option(False),
+    candle_api_cap: int = typer.Option(600),
+    run_full_backfill: bool = typer.Option(True),
+    write_v2_eligibility: bool = typer.Option(False),
+) -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sink.action(
+        "Universe",
+        "universe_v2_refresh",
+        "START",
+        "",
+        {
+            "buildLimit": build_limit,
+            "replace": replace,
+            "candleApiCap": candle_api_cap,
+            "runFullBackfill": run_full_backfill,
+            "writeV2Eligibility": write_v2_eligibility,
+        },
+    )
+    out = c.universe_service().run_universe_v2_pipeline(
+        build_limit=max(0, build_limit),
+        replace=replace,
+        candle_api_cap=max(0, candle_api_cap),
+        run_full_backfill=run_full_backfill,
+        write_v2_eligibility=write_v2_eligibility,
+    )
+    sink.action("Universe", "universe_v2_refresh", "DONE", "universe v2 pipeline complete", out)
+    sink.flush_all()
+    _print(out)
+
+
+@app.command("universe-v2-audit")
+def universe_v2_audit() -> None:
+    c = get_container()
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sink.action("Universe", "universe_v2_audit", "START")
+    out = c.universe_service().audit_universe_v2_integrity()
+    sink.action("Universe", "universe_v2_audit", "DONE", "universe integrity audit complete", out)
     sink.flush_all()
     _print(out)
 
@@ -149,12 +197,18 @@ def score_cache_update_close(
     api_cap: int = typer.Option(600),
     lookback_days: int = typer.Option(700),
     min_bars: int = typer.Option(320),
+    retry_stale_terminal_today: bool = typer.Option(False),
 ) -> None:
     c = get_container()
     c.sheets.ensure_core_sheets()
     sink = LogSink(c.sheets)
-    sink.action("Universe", "score_cache_update_close", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
-    out = c.universe_service().prefetch_score_cache_batch(api_cap=max(0, api_cap), lookback_days=lookback_days, min_bars=min_bars)
+    sink.action("Universe", "score_cache_update_close", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today})
+    out = c.universe_service().prefetch_score_cache_batch(
+        api_cap=max(0, api_cap),
+        lookback_days=lookback_days,
+        min_bars=min_bars,
+        retry_stale_terminal_today=retry_stale_terminal_today,
+    )
     sink.action("Universe", "score_cache_update_close", "DONE", "daily score-cache update batch complete", out)
     sink.flush_all()
     _print(out)
@@ -184,5 +238,6 @@ def version() -> None:
 
 
 if __name__ == "__main__":
-    get_settings()
+    # Do not eagerly resolve runtime settings here. This allows commands like
+    # `--help` and `version` to work without requiring all cloud env vars.
     app()

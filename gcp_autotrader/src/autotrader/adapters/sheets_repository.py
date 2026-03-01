@@ -61,7 +61,7 @@ SHEET_LAYOUTS: dict[str, SheetLayout] = {
     SheetNames.SCORE_CACHE_1D: SheetLayout(
         title="Score Cache 1D - universe daily candle cache index",
         tab_name=SheetNames.SCORE_CACHE_1D,
-        headers=["Symbol", "Exchange", "Segment", "Enabled", "Bars", "Last Candle Time", "Updated At", "Status", "API Calls (Run)", "Last Error", "File Name", "ISIN", "Notes", "GCS Path"],
+        headers=["Symbol", "Exchange", "Segment", "Enabled", "Bars", "Last Candle Time", "Updated At", "Status", "API Calls (Run)", "Last Error", "File Name", "ISIN", "Notes", "GCS Path", "First Candle Date"],
     ),
     SheetNames.SCORE_CACHE_1D_DATA: SheetLayout(
         title="Score Cache 1D Data - sheet-backed JSON blobs for Stage-A scoring",
@@ -103,6 +103,17 @@ class GoogleSheetsRepository:
 
     def _values(self):
         return self._svc().spreadsheets().values()
+
+    @staticmethod
+    def col_to_a1(col_num_1_based: int) -> str:
+        n = int(col_num_1_based)
+        if n <= 0:
+            raise ValueError("col_num_1_based must be >= 1")
+        out = ""
+        while n > 0:
+            n, rem = divmod(n - 1, 26)
+            out = chr(65 + rem) + out
+        return out
 
     def _sheet_meta(self) -> dict[str, int]:
         meta = self._svc().spreadsheets().get(spreadsheetId=self.spreadsheet_id).execute()
@@ -281,6 +292,56 @@ class GoogleSheetsRepository:
         rows = self.get_values(f"'{sheet_name}'!A{start_row}:ZZ")
         return [[str(c) if c is not None else "" for c in row] for row in rows]
 
+    def read_sheet_headers(self, sheet_name: str, header_row: int = 3) -> list[str]:
+        rows = self.get_values(f"'{sheet_name}'!A{header_row}:ZZ{header_row}")
+        if not rows:
+            return []
+        return [str(c).strip() if c is not None else "" for c in rows[0]]
+
+    def ensure_sheet_headers_append(
+        self,
+        sheet_name: str,
+        required_headers: list[str],
+        *,
+        header_row: int = 3,
+    ) -> dict[str, int]:
+        headers = self.read_sheet_headers(sheet_name, header_row=header_row)
+        existing_map: dict[str, int] = {}
+        for i, h in enumerate(headers, start=1):
+            key = str(h).strip()
+            if key and key not in existing_map:
+                existing_map[key] = i
+
+        missing = [h for h in required_headers if str(h).strip() and str(h).strip() not in existing_map]
+        if missing:
+            start_col = len(headers) + 1 if headers else 1
+            end_col = start_col + len(missing) - 1
+            # Some sheets are still created with 26 columns; expand before writing beyond Z.
+            self.ensure_sheet_grid_min(sheet_name, min_rows=max(1000, header_row), min_cols=end_col)
+            start_a1 = self.col_to_a1(start_col)
+            self.update_values(f"'{sheet_name}'!{start_a1}{header_row}", [missing])
+            headers = self.read_sheet_headers(sheet_name, header_row=header_row)
+            existing_map.clear()
+            for i, h in enumerate(headers, start=1):
+                key = str(h).strip()
+                if key and key not in existing_map:
+                    existing_map[key] = i
+        return existing_map
+
+    def ensure_config_defaults(self, defaults: dict[str, str]) -> int:
+        existing = self.read_config_label_map()
+        to_append: list[list[Any]] = []
+        for k, v in defaults.items():
+            key = str(k).strip()
+            if not key:
+                continue
+            if key in existing:
+                continue
+            to_append.append([key, str(v)])
+        if to_append:
+            self.append_values(f"'{SheetNames.CONFIG}'!A1", to_append)
+        return len(to_append)
+
     def append_rows(self, sheet_name: str, rows: list[list[Any]]) -> None:
         self.append_values(f"'{sheet_name}'!A4", rows)
 
@@ -315,12 +376,22 @@ class GoogleSheetsRepository:
             self.update_values(f"'{SheetNames.WATCHLIST}'!A4", rows)
 
     def replace_score_cache_1d_index(self, rows: list[list[Any]], *, chunk_size: int = 500) -> None:
+        self.ensure_sheet_headers_append(
+            SheetNames.SCORE_CACHE_1D,
+            SHEET_LAYOUTS[SheetNames.SCORE_CACHE_1D].headers,
+            header_row=3,
+        )
         target_tabs = [SheetNames.SCORE_CACHE_1D]
         # Some workbooks still contain a duplicate visual tab with emoji prefix.
         # Mirror writes so operators checking either tab see the same cache-index state.
         try:
             existing_tabs = self._sheet_meta()
             if "📚 History Candle 1D" in existing_tabs and "📚 History Candle 1D" not in target_tabs:
+                self.ensure_sheet_headers_append(
+                    "📚 History Candle 1D",
+                    SHEET_LAYOUTS[SheetNames.SCORE_CACHE_1D].headers,
+                    header_row=3,
+                )
                 target_tabs.append("📚 History Candle 1D")
         except Exception:
             logger.debug("score_cache_1d_index mirror tab detection failed", exc_info=True)
@@ -734,12 +805,16 @@ class GoogleSheetsRepository:
         return out
 
     def replace_universe_rows(self, rows: list[list[Any]]) -> None:
-        self.clear_range(f"'{SheetNames.UNIVERSE}'!A4:Z")
+        self.clear_range(f"'{SheetNames.UNIVERSE}'!A4:ZZ")
         if rows:
+            max_cols = max((len(r) for r in rows), default=26)
+            self.ensure_sheet_grid_min(SheetNames.UNIVERSE, min_rows=max(1000, 4 + len(rows) + 5), min_cols=max(26, max_cols))
             self.update_values(f"'{SheetNames.UNIVERSE}'!A4", rows)
 
     def append_universe_rows(self, rows: list[list[Any]]) -> None:
         if rows:
+            max_cols = max((len(r) for r in rows), default=26)
+            self.ensure_sheet_grid_min(SheetNames.UNIVERSE, min_rows=1000, min_cols=max(26, max_cols))
             self.append_values(f"'{SheetNames.UNIVERSE}'!A4", rows)
 
     def read_universe_row_count_and_symbols(self) -> tuple[int, set[str]]:
