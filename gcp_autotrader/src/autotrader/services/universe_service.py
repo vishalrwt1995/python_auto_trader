@@ -3737,7 +3737,7 @@ class UniverseService:
                     float(round(float(r.get("priceLast") or 0.0), 4)),
                     r.get("last1DDate", ""),
                     "Y",
-                    "",
+                    "SELECTED_SWING_V2",
                     f"B={round(float(r.get('breakout') or 0.0),2)}|P={round(float(r.get('pullback') or 0.0),2)}|MR={round(float(r.get('meanRev') or 0.0),2)}",
                 ]
             )
@@ -3770,7 +3770,7 @@ class UniverseService:
                     float(round(float(r.get("priceLast") or 0.0), 4)),
                     r.get("last1DDate", ""),
                     "Y",
-                    "",
+                    ("SELECTED_PHASE2_INPLAY" if str(r.get("source") or "").upper() == "PHASE2_INPLAY" else "SELECTED_PHASE1_FALLBACK"),
                     f"m={round(float(r.get('momentumComponent') or 0.0),3)}|liq={round(float(r.get('liquidityComponent') or 0.0),3)}|vol={round(float(r.get('volSanityComponent') or 0.0),3)}",
                 ]
             )
