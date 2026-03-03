@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import json
 import time
 from typing import Any
 
@@ -344,6 +345,8 @@ def run_premarket_precompute(
             min_score=max(1, min_watchlist_score),
             require_today_scored=require_today_scored,
             require_full_coverage=require_full_coverage,
+            premarket=True,
+            intraday_timeframe="5m",
         )
         done_message = "watchlist ready" if bool(wl_out.get("ready")) and int(wl_out.get("selected", 0) or 0) > 0 else "watchlist blocked"
         sink.action(
@@ -378,10 +381,12 @@ def run_premarket_precompute(
 @app.post("/jobs/watchlist-refresh")
 def run_watchlist_refresh(
     x_job_token: str | None = Header(default=None),
-    target_size: int = 300,
+    target_size: int = 150,
     require_full_coverage: bool = False,
     require_today_scored: bool = False,
     min_watchlist_score: int = 1,
+    premarket: bool = False,
+    intraday_timeframe: str = "5m",
     x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
     x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
 ) -> dict[str, Any]:
@@ -403,6 +408,8 @@ def run_watchlist_refresh(
                 "requireFullCoverage": require_full_coverage,
                 "requireTodayScored": require_today_scored,
                 "minWatchlistScore": min_watchlist_score,
+                "premarket": bool(premarket),
+                "intradayTimeframe": str(intraday_timeframe),
             },
         )
         sink.flush_all()
@@ -420,16 +427,18 @@ def run_watchlist_refresh(
                 "requireFullCoverage": require_full_coverage,
                 "requireTodayScored": require_today_scored,
                 "minWatchlistScore": min_watchlist_score,
+                "premarket": bool(premarket),
+                "intradayTimeframe": str(intraday_timeframe),
             },
         )
-        regime = c.regime_service().get_market_regime()
-        _write_market_brain_best_effort(c, regime)
         wl_out = c.universe_service().build_watchlist(
-            regime,
+            None,
             target_size=target_size,
             min_score=max(1, min_watchlist_score),
             require_today_scored=require_today_scored,
             require_full_coverage=require_full_coverage,
+            premarket=bool(premarket),
+            intraday_timeframe=str(intraday_timeframe or "5m"),
         )
         done_message = "watchlist ready" if bool(wl_out.get("ready")) and int(wl_out.get("selected", 0) or 0) > 0 else "watchlist blocked"
         sink.action(
@@ -437,10 +446,16 @@ def run_watchlist_refresh(
             "watchlist_refresh",
             "DONE",
             done_message,
-            {**sched_ctx, **_duration_ctx(started_perf), "watchlist": wl_out, "regime": regime.__dict__},
+            {
+                **sched_ctx,
+                **_duration_ctx(started_perf),
+                "watchlist": wl_out,
+                "regime": wl_out.get("regimeV2", {}),
+                "regimeV2": wl_out.get("regimeV2", {}),
+            },
         )
         sink.flush_all()
-        return {"regime": regime.__dict__, "watchlist": wl_out}
+        return {"regime": wl_out.get("regimeV2", {}), "regimeV2": wl_out.get("regimeV2", {}), "watchlist": wl_out}
     except Exception as e:
         sink.action(
             "Universe",
@@ -638,6 +653,9 @@ def run_score_cache_update_close(
     lookback_days: int = 700,
     min_bars: int = 320,
     retry_stale_terminal_today: bool = False,
+    run_intraday_update: bool = True,
+    intraday_api_cap: int = 600,
+    intraday_lookback_trading_days: int = 60,
     x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
     x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
 ) -> dict[str, Any]:
@@ -646,20 +664,63 @@ def run_score_cache_update_close(
     c.sheets.ensure_core_sheets()
     sink = LogSink(c.sheets)
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
-    lease = c.state.try_acquire_lock("score_cache_update_close", ttl_seconds=3600)
-    if lease is None:
-        sink.action("Universe", "score_cache_update_close", "LOCK_BUSY", "skipped: lock busy", {**sched_ctx, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today})
+    lock_names = ["score_cache_update_close"]
+    if run_intraday_update:
+        lock_names.append("intraday_cache_update_close_5m")
+    leases, blocked_lock = _acquire_named_locks(c.state, lock_names, ttl_seconds=3600)
+    if blocked_lock is not None:
+        sink.action(
+            "Universe",
+            "score_cache_update_close",
+            "LOCK_BUSY",
+            "skipped: lock busy",
+            {
+                **sched_ctx,
+                "blockedLock": blocked_lock,
+                "apiCap": api_cap,
+                "lookbackDays": lookback_days,
+                "minBars": min_bars,
+                "retryStaleTerminalToday": retry_stale_terminal_today,
+                "runIntradayUpdate": run_intraday_update,
+                "intradayApiCap": intraday_api_cap,
+                "intradayLookbackTradingDays": intraday_lookback_trading_days,
+            },
+        )
         sink.flush_all()
-        return {"skipped": "lock_busy"}
+        return {"skipped": "lock_busy", "blockedLock": blocked_lock}
     started_perf = time.perf_counter()
     try:
-        sink.action("Universe", "score_cache_update_close", "START", "", {**sched_ctx, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today})
+        sink.action(
+            "Universe",
+            "score_cache_update_close",
+            "START",
+            "",
+            {
+                **sched_ctx,
+                "apiCap": api_cap,
+                "lookbackDays": lookback_days,
+                "minBars": min_bars,
+                "retryStaleTerminalToday": retry_stale_terminal_today,
+                "runIntradayUpdate": run_intraday_update,
+                "intradayApiCap": intraday_api_cap,
+                "intradayLookbackTradingDays": intraday_lookback_trading_days,
+            },
+        )
         out = c.universe_service().prefetch_score_cache_batch(
             api_cap=max(0, api_cap),
             lookback_days=lookback_days,
             min_bars=min_bars,
             retry_stale_terminal_today=bool(retry_stale_terminal_today),
         )
+        if run_intraday_update:
+            intraday_out = c.universe_service().prefetch_intraday_cache_5m_batch(
+                api_cap=max(0, int(intraday_api_cap)),
+                lookback_trading_days=max(1, int(intraday_lookback_trading_days)),
+                only_symbols=None,
+                refresh_last_day_only=True,
+                retry_stale_terminal_today=bool(retry_stale_terminal_today),
+            )
+            out = {**out, "intraday5m": intraday_out}
         sink.action("Universe", "score_cache_update_close", "DONE", "daily score-cache update batch complete", {**sched_ctx, **_duration_ctx(started_perf), **out})
         sink.flush_all()
         return out
@@ -669,12 +730,23 @@ def run_score_cache_update_close(
             "score_cache_update_close",
             "ERROR",
             f"{type(e).__name__}: {e}",
-            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today},
+            {
+                **sched_ctx,
+                **_duration_ctx(started_perf),
+                "errorType": type(e).__name__,
+                "apiCap": api_cap,
+                "lookbackDays": lookback_days,
+                "minBars": min_bars,
+                "retryStaleTerminalToday": retry_stale_terminal_today,
+                "runIntradayUpdate": run_intraday_update,
+                "intradayApiCap": intraday_api_cap,
+                "intradayLookbackTradingDays": intraday_lookback_trading_days,
+            },
         )
         sink.flush_all()
         raise
     finally:
-        c.state.release_lock(lease)
+        _release_named_locks(c.state, leases)
 
 
 @app.post("/jobs/universe-refresh-append-backfill")
@@ -843,6 +915,9 @@ def run_universe_v2_refresh(
     candle_api_cap: int = 600,
     run_full_backfill: bool = True,
     write_v2_eligibility: bool = False,
+    run_intraday_appended_backfill: bool = True,
+    intraday_api_cap: int = 1200,
+    intraday_lookback_trading_days: int = 60,
     x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
     x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
 ) -> dict[str, Any]:
@@ -851,11 +926,16 @@ def run_universe_v2_refresh(
     c.sheets.ensure_core_sheets()
     sink = LogSink(c.sheets)
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
-    leases, blocked_lock = _acquire_named_locks(
-        c.state,
-        ["universe_v2_refresh", "raw_universe_refresh", "universe_build", "score_cache_backfill_full", "score_cache_update_close"],
-        ttl_seconds=7200,
-    )
+    lock_names = [
+        "universe_v2_refresh",
+        "raw_universe_refresh",
+        "universe_build",
+        "score_cache_backfill_full",
+        "score_cache_update_close",
+    ]
+    if run_intraday_appended_backfill:
+        lock_names.append("intraday_cache_backfill_appended_5m")
+    leases, blocked_lock = _acquire_named_locks(c.state, lock_names, ttl_seconds=7200)
     if blocked_lock is not None:
         sink.action(
             "Universe",
@@ -870,6 +950,9 @@ def run_universe_v2_refresh(
                 "candleApiCap": candle_api_cap,
                 "runFullBackfill": run_full_backfill,
                 "writeV2Eligibility": write_v2_eligibility,
+                "runIntradayAppendedBackfill": run_intraday_appended_backfill,
+                "intradayApiCap": intraday_api_cap,
+                "intradayLookbackTradingDays": intraday_lookback_trading_days,
             },
         )
         sink.flush_all()
@@ -888,6 +971,9 @@ def run_universe_v2_refresh(
                 "candleApiCap": candle_api_cap,
                 "runFullBackfill": run_full_backfill,
                 "writeV2Eligibility": write_v2_eligibility,
+                "runIntradayAppendedBackfill": run_intraday_appended_backfill,
+                "intradayApiCap": intraday_api_cap,
+                "intradayLookbackTradingDays": intraday_lookback_trading_days,
             },
         )
         out = c.universe_service().run_universe_v2_pipeline(
@@ -897,6 +983,29 @@ def run_universe_v2_refresh(
             run_full_backfill=run_full_backfill,
             write_v2_eligibility=write_v2_eligibility,
         )
+        try:
+            appended_symbols = (out.get("build") or {}).get("appendedSymbols") if isinstance(out, dict) else []
+            if isinstance(appended_symbols, list):
+                payload = {
+                    "runDate": str((out.get("raw") or {}).get("runDate") or ""),
+                    "symbols": [str(s).strip().upper() for s in appended_symbols if str(s).strip()],
+                }
+                c.state.set_runtime_prop("runtime:universe_v2_last_appended_symbols", json.dumps(payload, separators=(",", ":")))
+        except Exception:
+            logger.warning("failed to persist runtime:universe_v2_last_appended_symbols", exc_info=True)
+        if run_intraday_appended_backfill:
+            appended_symbols = (out.get("build") or {}).get("appendedSymbols") if isinstance(out, dict) else []
+            appended_set = [str(s).strip().upper() for s in (appended_symbols or []) if str(s).strip()]
+            if appended_set:
+                intraday_appended = c.universe_service().prefetch_intraday_cache_5m_batch(
+                    api_cap=max(0, int(intraday_api_cap)),
+                    lookback_trading_days=max(1, int(intraday_lookback_trading_days)),
+                    only_symbols=appended_set,
+                    refresh_last_day_only=False,
+                )
+                out = {**out, "intradayAppended5m": intraday_appended}
+            else:
+                out = {**out, "intradayAppended5m": {"skipped": "no_appended_symbols", "symbols": 0}}
         raw_ok = bool((out.get("raw") or {}).get("ok", True))
         cache_summary = out.get("cache") if isinstance(out.get("cache"), dict) else {}
         eligibility = out.get("eligibility") if isinstance(out.get("eligibility"), dict) else {}
@@ -979,6 +1088,9 @@ def run_universe_v2_refresh(
                 "candleApiCap": candle_api_cap,
                 "runFullBackfill": run_full_backfill,
                 "writeV2Eligibility": write_v2_eligibility,
+                "runIntradayAppendedBackfill": run_intraday_appended_backfill,
+                "intradayApiCap": intraday_api_cap,
+                "intradayLookbackTradingDays": intraday_lookback_trading_days,
             },
         )
         sink.flush_all()
@@ -1015,6 +1127,218 @@ def run_universe_v2_audit(
         )
         sink.flush_all()
         raise
+
+
+@app.post("/jobs/intraday-cache-backfill-full")
+def run_intraday_cache_backfill_full(
+    x_job_token: str | None = Header(default=None),
+    api_cap: int = 1200,
+    lookback_trading_days: int = 60,
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    lease = c.state.try_acquire_lock("intraday_cache_backfill_full_5m", ttl_seconds=7200)
+    if lease is None:
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_full_5m",
+            "LOCK_BUSY",
+            "skipped: lock busy",
+            {**sched_ctx, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days},
+        )
+        sink.flush_all()
+        return {"skipped": "lock_busy"}
+    started_perf = time.perf_counter()
+    try:
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_full_5m",
+            "START",
+            "",
+            {**sched_ctx, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days},
+        )
+        out = c.universe_service().prefetch_intraday_cache_5m_batch(
+            api_cap=max(0, int(api_cap)),
+            lookback_trading_days=max(1, int(lookback_trading_days)),
+            only_symbols=None,
+            refresh_last_day_only=False,
+        )
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_full_5m",
+            "DONE",
+            "intraday 5m full backfill batch complete",
+            {**sched_ctx, **_duration_ctx(started_perf), **out},
+        )
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_full_5m",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days},
+        )
+        sink.flush_all()
+        raise
+    finally:
+        c.state.release_lock(lease)
+
+
+@app.post("/jobs/intraday-cache-backfill-appended")
+def run_intraday_cache_backfill_appended(
+    x_job_token: str | None = Header(default=None),
+    api_cap: int = 1200,
+    lookback_trading_days: int = 60,
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    lease = c.state.try_acquire_lock("intraday_cache_backfill_appended_5m", ttl_seconds=7200)
+    if lease is None:
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_appended_5m",
+            "LOCK_BUSY",
+            "skipped: lock busy",
+            {**sched_ctx, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days},
+        )
+        sink.flush_all()
+        return {"skipped": "lock_busy"}
+    started_perf = time.perf_counter()
+    try:
+        payload_text = c.state.get_runtime_prop("runtime:universe_v2_last_appended_symbols", "")
+        symbols: list[str] = []
+        run_date = ""
+        if payload_text:
+            try:
+                payload_obj = json.loads(payload_text)
+                if isinstance(payload_obj, dict):
+                    run_date = str(payload_obj.get("runDate") or "")
+                    arr = payload_obj.get("symbols") or []
+                    if isinstance(arr, list):
+                        symbols = [str(s).strip().upper() for s in arr if str(s).strip()]
+            except Exception:
+                symbols = []
+        if not symbols:
+            out = {"skipped": "no_appended_symbols", "symbols": 0, "runDate": run_date}
+            sink.action(
+                "Universe",
+                "intraday_cache_backfill_appended_5m",
+                "DONE",
+                "no appended symbols to backfill",
+                {**sched_ctx, **_duration_ctx(started_perf), **out},
+            )
+            sink.flush_all()
+            return out
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_appended_5m",
+            "START",
+            "",
+            {**sched_ctx, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days, "symbols": len(symbols), "runDate": run_date},
+        )
+        out = c.universe_service().prefetch_intraday_cache_5m_batch(
+            api_cap=max(0, int(api_cap)),
+            lookback_trading_days=max(1, int(lookback_trading_days)),
+            only_symbols=symbols,
+            refresh_last_day_only=False,
+        )
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_appended_5m",
+            "DONE",
+            "intraday 5m appended-symbol backfill complete",
+            {**sched_ctx, **_duration_ctx(started_perf), "runDate": run_date, "symbols": len(symbols), **out},
+        )
+        sink.flush_all()
+        return {**out, "runDate": run_date, "symbols": len(symbols)}
+    except Exception as e:
+        sink.action(
+            "Universe",
+            "intraday_cache_backfill_appended_5m",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days},
+        )
+        sink.flush_all()
+        raise
+    finally:
+        c.state.release_lock(lease)
+
+
+@app.post("/jobs/intraday-cache-update-close")
+def run_intraday_cache_update_close(
+    x_job_token: str | None = Header(default=None),
+    api_cap: int = 1200,
+    lookback_trading_days: int = 60,
+    retry_stale_terminal_today: bool = False,
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    lease = c.state.try_acquire_lock("intraday_cache_update_close_5m", ttl_seconds=7200)
+    if lease is None:
+        sink.action(
+            "Universe",
+            "intraday_cache_update_close_5m",
+            "LOCK_BUSY",
+            "skipped: lock busy",
+            {**sched_ctx, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days},
+        )
+        sink.flush_all()
+        return {"skipped": "lock_busy"}
+    started_perf = time.perf_counter()
+    try:
+        sink.action(
+            "Universe",
+            "intraday_cache_update_close_5m",
+            "START",
+            "",
+            {**sched_ctx, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days, "retryStaleTerminalToday": retry_stale_terminal_today},
+        )
+        out = c.universe_service().prefetch_intraday_cache_5m_batch(
+            api_cap=max(0, int(api_cap)),
+            lookback_trading_days=max(1, int(lookback_trading_days)),
+            only_symbols=None,
+            refresh_last_day_only=True,
+            retry_stale_terminal_today=bool(retry_stale_terminal_today),
+        )
+        sink.action(
+            "Universe",
+            "intraday_cache_update_close_5m",
+            "DONE",
+            "intraday 5m latest-session update complete",
+            {**sched_ctx, **_duration_ctx(started_perf), "retryStaleTerminalToday": retry_stale_terminal_today, **out},
+        )
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action(
+            "Universe",
+            "intraday_cache_update_close_5m",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days, "retryStaleTerminalToday": retry_stale_terminal_today},
+        )
+        sink.flush_all()
+        raise
+    finally:
+        c.state.release_lock(lease)
 
 
 @app.post("/jobs/eod-close-update-score")

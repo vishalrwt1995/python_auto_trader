@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -72,12 +72,19 @@ def _controls(mode: str = "BALANCED") -> UniverseControls:
     )
 
 
-def _make_calendar_service(*, holiday_rows=None, by_date_rows=None, fail_all=False):
+def _make_calendar_service(*, holiday_rows=None, by_date_rows=None, fail_all=False, gcs_json=None):
     class FakeSheets:
         pass
 
     class FakeGcs:
-        pass
+        def __init__(self):
+            self._obj = dict(gcs_json or {})
+
+        def read_json(self, path, default=None):
+            return self._obj.get(path, default)
+
+        def write_json(self, path, data):
+            self._obj[path] = data
 
     class FakeUpstox:
         def get_market_holidays(self, date=None):
@@ -133,6 +140,42 @@ def test_expected_lcd_consecutive_holidays():
     now = datetime(2026, 3, 4, 8, 0, tzinfo=IST)
     ctx = svc._expected_lcd_context(now)
     assert ctx["expectedLCD"] == "2026-02-27"
+
+
+def test_expected_lcd_uses_stored_holiday_calendar_when_available():
+    cache_path = UniverseService._holiday_calendar_cache_path(2026)
+    svc = _make_calendar_service(
+        fail_all=True,
+        gcs_json={
+            cache_path: {
+                "year": 2026,
+                "dates": ["2026-03-02"],
+                "source": "seeded",
+            }
+        },
+    )
+    now = datetime(2026, 3, 3, 8, 0, tzinfo=IST)
+    ctx = svc._expected_lcd_context(now)
+    assert ctx["expectedLCD"] == "2026-02-27"
+    assert ctx["method"] == "holiday-aware"
+
+
+def test_year_boundary_holiday_uses_stored_calendar_first():
+    cache_path_2025 = UniverseService._holiday_calendar_cache_path(2025)
+    svc = _make_calendar_service(
+        holiday_rows=[],
+        gcs_json={
+            cache_path_2025: {
+                "year": 2025,
+                "dates": ["2025-12-31"],
+                "source": "seeded",
+            }
+        },
+    )
+    now = datetime(2026, 1, 1, 8, 0, tzinfo=IST)
+    ctx = svc._expected_lcd_context(now)
+    assert ctx["expectedLCD"] == "2025-12-30"
+    assert ctx["method"] == "holiday-aware"
 
 
 def test_expected_lcd_year_boundary_with_previous_year_holiday_probe():
@@ -457,6 +500,27 @@ def test_prefetch_stale_retry_terminalizes_api_cap_blocked_source():
     assert svc._prefetch_should_skip_stale_retry(prev_row, candles, expected_lcd="2026-02-28") is True
 
 
+def test_prefetch_stale_retry_allows_retry_after_terminal_skip_status():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    candles = [["2026-02-27T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
+    prev_row = {
+        "status": "STALE_SKIPPED",
+        "expectedlcd": "2026-02-28",
+        "last_candle_time": "2026-02-27 00:00:00",
+        "src": "gcs_score_cache_1d_stale_terminal",
+    }
+    assert svc._prefetch_should_skip_stale_retry(prev_row, candles, expected_lcd="2026-02-28") is False
+
+
 def test_prefetch_missing_retry_terminalizes_api_cap_blocked_source():
     class FakeSheets:
         pass
@@ -476,6 +540,103 @@ def test_prefetch_missing_retry_terminalizes_api_cap_blocked_source():
         "src": "api_cap_blocked",
     }
     assert svc._prefetch_should_skip_missing_retry(prev_row, candles, expected_lcd="2026-02-28") is True
+
+
+def test_intraday_prefetch_stale_retry_terminalizes_empty_fetch_source():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    candles = [["2026-02-27T15:25:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
+    prev_row = {
+        "status": "STALE_READY",
+        "expectedlcd": "2026-02-28",
+        "last_candle_time": "2026-02-27 15:25:00",
+        "src": "upstox_api_5m_empty",
+    }
+    assert svc._prefetch_intraday_should_skip_stale_retry(prev_row, candles, expected_lcd="2026-02-28") is True
+
+
+def test_intraday_prefetch_stale_retry_allows_retry_after_terminal_skip_status():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    candles = [["2026-02-27T15:25:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
+    prev_row = {
+        "status": "STALE_SKIPPED",
+        "expectedlcd": "2026-02-28",
+        "last_candle_time": "2026-02-27 15:25:00",
+        "src": "gcs_intraday_5m_stale_terminal",
+    }
+    assert svc._prefetch_intraday_should_skip_stale_retry(prev_row, candles, expected_lcd="2026-02-28") is False
+
+
+def test_intraday_prefetch_missing_retry_terminalizes_empty_source():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    candles: list[list[object]] = []
+    prev_row = {
+        "status": "MISSING",
+        "expectedlcd": "2026-02-28",
+        "last_candle_time": "",
+        "src": "upstox_api_5m_empty",
+    }
+    assert svc._prefetch_intraday_should_skip_missing_retry(prev_row, candles, expected_lcd="2026-02-28") is True
+
+
+def test_intraday_windowed_fetch_uses_30_day_chunks():
+    class FakeSheets:
+        pass
+
+    class FakeGcs:
+        pass
+
+    class FakeUpstox:
+        def __init__(self):
+            self.calls: list[tuple[str, str]] = []
+
+        def get_historical_candles_v3_intraday_range(
+            self,
+            instrument_key: str,
+            *,
+            from_date: str,
+            to_date: str,
+            unit: str = "minutes",
+            interval: int = 5,
+        ) -> list[list[object]]:
+            self.calls.append((from_date, to_date))
+            return []
+
+    upstox = FakeUpstox()
+    svc = UniverseService(FakeSheets(), FakeGcs(), upstox, StrategySettings())
+    _, calls = svc._fetch_intraday_5m_windowed_between(
+        "NSE_EQ|TEST",
+        from_date=date(2026, 1, 1),
+        to_date=date(2026, 2, 28),
+    )
+    assert calls == 2
+    assert upstox.calls == [("2026-01-01", "2026-01-30"), ("2026-01-31", "2026-02-28")]
 
 
 def test_universe_v2_fetch_scope_limits_api_to_target_symbols():

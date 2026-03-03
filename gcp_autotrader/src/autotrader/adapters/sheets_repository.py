@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import random
+import ssl
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -20,9 +23,12 @@ class SheetLayout:
 class SheetNames:
     CONFIG = "⚙️ Config"
     WATCHLIST = "📋 Watchlist"
+    WATCHLIST_SWING_V2 = "Watchlist_Swing_V2"
+    WATCHLIST_INTRADAY_V2 = "Watchlist_Intraday_V2"
     UNIVERSE = "🧾 Universe Instruments"
     CANDLE_CACHE = "🗄️ Candle Cache"
     SCORE_CACHE_1D = "History Candle 1D"
+    SCORE_CACHE_5M = "History Candle 5m"
     SCORE_CACHE_1D_DATA = "📗 Score Cache 1D Data"
     BACKFILL = "📚 History Backfill"
     DECISIONS = "🧠 Decision Log"
@@ -43,6 +49,63 @@ LEGACY_SHEET_NAMES: dict[str, str] = {
 
 
 SHEET_LAYOUTS: dict[str, SheetLayout] = {
+    SheetNames.WATCHLIST_SWING_V2: SheetLayout(
+        title="Watchlist Swing V2 - regime-aware deterministic swing selections",
+        tab_name=SheetNames.WATCHLIST_SWING_V2,
+        headers=[
+            "RunTS",
+            "RunDate",
+            "Rank",
+            "Symbol",
+            "InstrumentKey",
+            "Exchange",
+            "SwingScoreV2",
+            "SetupLabel",
+            "RegimeDaily",
+            "RegimeIntraday",
+            "TurnoverRank60D",
+            "LiquidityBucket",
+            "ATRPct14D",
+            "GapRisk60D",
+            "PriceLast",
+            "Last1DDate",
+            "Enabled",
+            "Reason",
+            "Notes",
+        ],
+    ),
+    SheetNames.WATCHLIST_INTRADAY_V2: SheetLayout(
+        title="Watchlist Intraday V2 - phase2 in-play + phase1 fallback",
+        tab_name=SheetNames.WATCHLIST_INTRADAY_V2,
+        headers=[
+            "RunTS",
+            "RunDate",
+            "RunTimeBlock",
+            "Rank",
+            "Symbol",
+            "InstrumentKey",
+            "Exchange",
+            "IntradayScoreV2",
+            "Source",
+            "SetupLabel",
+            "RegimeDaily",
+            "RegimeIntraday",
+            "VWAPBias",
+            "VolumeShock",
+            "ORBSignal",
+            "ReversalSignal",
+            "Confidence",
+            "TurnoverRank60D",
+            "LiquidityBucket",
+            "ATRPct14D",
+            "GapRisk60D",
+            "PriceLast",
+            "Last1DDate",
+            "Enabled",
+            "Reason",
+            "Notes",
+        ],
+    ),
     SheetNames.UNIVERSE: SheetLayout(
         title="Universe Instruments - Master list for smart watchlist generation",
         tab_name=SheetNames.UNIVERSE,
@@ -61,6 +124,11 @@ SHEET_LAYOUTS: dict[str, SheetLayout] = {
     SheetNames.SCORE_CACHE_1D: SheetLayout(
         title="Score Cache 1D - universe daily candle cache index",
         tab_name=SheetNames.SCORE_CACHE_1D,
+        headers=["Symbol", "Exchange", "Segment", "Enabled", "Bars", "Last Candle Time", "Updated At", "Status", "API Calls (Run)", "Last Error", "File Name", "ISIN", "Notes", "GCS Path", "First Candle Date"],
+    ),
+    SheetNames.SCORE_CACHE_5M: SheetLayout(
+        title="Score Cache 5m - intraday candle cache index",
+        tab_name=SheetNames.SCORE_CACHE_5M,
         headers=["Symbol", "Exchange", "Segment", "Enabled", "Bars", "Last Candle Time", "Updated At", "Status", "API Calls (Run)", "Last Error", "File Name", "ISIN", "Notes", "GCS Path", "First Candle Date"],
     ),
     SheetNames.SCORE_CACHE_1D_DATA: SheetLayout(
@@ -105,6 +173,55 @@ class GoogleSheetsRepository:
         return self._svc().spreadsheets().values()
 
     @staticmethod
+    def _is_retryable_sheets_error(exc: Exception) -> bool:
+        try:
+            from googleapiclient.errors import HttpError
+
+            if isinstance(exc, HttpError):
+                status = int(getattr(getattr(exc, "resp", None), "status", 0) or 0)
+                if status in {408, 409, 425, 429, 500, 502, 503, 504}:
+                    return True
+        except Exception:
+            pass
+
+        if isinstance(exc, (BrokenPipeError, TimeoutError, ConnectionResetError, ConnectionAbortedError, ssl.SSLError)):
+            return True
+        msg = str(exc).lower()
+        return any(
+            token in msg
+            for token in (
+                "broken pipe",
+                "unexpected eof",
+                "timed out",
+                "connection reset",
+                "temporarily unavailable",
+                "service unavailable",
+                "internal error encountered",
+                "quota exceeded",
+                "rate limit exceeded",
+            )
+        )
+
+    def _execute_with_retry(self, request: Any, *, op: str, retries: int = 6) -> Any:
+        for attempt in range(1, max(1, int(retries)) + 1):
+            try:
+                return request.execute()
+            except Exception as exc:
+                retryable = self._is_retryable_sheets_error(exc)
+                if (not retryable) or attempt >= retries:
+                    raise
+                sleep_s = min(8.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
+                logger.warning(
+                    "sheets_retry op=%s attempt=%s/%s sleepSec=%.2f error=%s",
+                    op,
+                    attempt,
+                    retries,
+                    sleep_s,
+                    exc,
+                )
+                time.sleep(sleep_s)
+
+    @staticmethod
     def col_to_a1(col_num_1_based: int) -> str:
         n = int(col_num_1_based)
         if n <= 0:
@@ -116,7 +233,10 @@ class GoogleSheetsRepository:
         return out
 
     def _sheet_meta(self) -> dict[str, int]:
-        meta = self._svc().spreadsheets().get(spreadsheetId=self.spreadsheet_id).execute()
+        meta = self._execute_with_retry(
+            self._svc().spreadsheets().get(spreadsheetId=self.spreadsheet_id),
+            op="sheet_meta_get",
+        )
         out: dict[str, int] = {}
         for sh in meta.get("sheets", []):
             p = sh.get("properties", {})
@@ -127,7 +247,10 @@ class GoogleSheetsRepository:
         return out
 
     def _sheet_grid_meta(self) -> dict[str, dict[str, int]]:
-        meta = self._svc().spreadsheets().get(spreadsheetId=self.spreadsheet_id).execute()
+        meta = self._execute_with_retry(
+            self._svc().spreadsheets().get(spreadsheetId=self.spreadsheet_id),
+            op="sheet_grid_meta_get",
+        )
         out: dict[str, dict[str, int]] = {}
         for sh in meta.get("sheets", []):
             p = sh.get("properties", {}) or {}
@@ -154,59 +277,77 @@ class GoogleSheetsRepository:
         target_cols = max(col_count, int(min_cols or 0))
         if target_rows == row_count and target_cols == col_count:
             return
-        self._svc().spreadsheets().batchUpdate(
-            spreadsheetId=self.spreadsheet_id,
-            body={
-                "requests": [
-                    {
-                        "updateSheetProperties": {
-                            "properties": {
-                                "sheetId": int(meta["sheetId"]),
-                                "gridProperties": {
-                                    "rowCount": target_rows,
-                                    "columnCount": target_cols,
+        self._execute_with_retry(
+            self._svc().spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "updateSheetProperties": {
+                                "properties": {
+                                    "sheetId": int(meta["sheetId"]),
+                                    "gridProperties": {
+                                        "rowCount": target_rows,
+                                        "columnCount": target_cols,
+                                    },
                                 },
-                            },
-                            "fields": "gridProperties(rowCount,columnCount)",
+                                "fields": "gridProperties(rowCount,columnCount)",
+                            }
                         }
-                    }
-                ]
-            },
-        ).execute()
+                    ]
+                },
+            ),
+            op="sheet_grid_resize",
+        )
 
     def get_values(self, a1_range: str) -> list[list[Any]]:
-        res = self._values().get(spreadsheetId=self.spreadsheet_id, range=a1_range).execute()
+        res = self._execute_with_retry(
+            self._values().get(spreadsheetId=self.spreadsheet_id, range=a1_range),
+            op="values_get",
+        )
         return res.get("values", [])
 
     def update_values(self, a1_range: str, values: list[list[Any]]) -> None:
-        self._values().update(
-            spreadsheetId=self.spreadsheet_id,
-            range=a1_range,
-            valueInputOption="USER_ENTERED",
-            body={"values": values},
-        ).execute()
+        self._execute_with_retry(
+            self._values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=a1_range,
+                valueInputOption="USER_ENTERED",
+                body={"values": values},
+            ),
+            op="values_update",
+        )
 
     def batch_update_values(self, data: list[dict[str, Any]]) -> None:
         if not data:
             return
-        self._values().batchUpdate(
-            spreadsheetId=self.spreadsheet_id,
-            body={"valueInputOption": "USER_ENTERED", "data": data},
-        ).execute()
+        self._execute_with_retry(
+            self._values().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"valueInputOption": "USER_ENTERED", "data": data},
+            ),
+            op="values_batch_update",
+        )
 
     def append_values(self, a1_range: str, values: list[list[Any]], *, value_input_option: str = "USER_ENTERED") -> None:
         if not values:
             return
-        self._values().append(
-            spreadsheetId=self.spreadsheet_id,
-            range=a1_range,
-            valueInputOption=value_input_option,
-            insertDataOption="INSERT_ROWS",
-            body={"values": values},
-        ).execute()
+        self._execute_with_retry(
+            self._values().append(
+                spreadsheetId=self.spreadsheet_id,
+                range=a1_range,
+                valueInputOption=value_input_option,
+                insertDataOption="INSERT_ROWS",
+                body={"values": values},
+            ),
+            op="values_append",
+        )
 
     def clear_range(self, a1_range: str) -> None:
-        self._values().clear(spreadsheetId=self.spreadsheet_id, range=a1_range, body={}).execute()
+        self._execute_with_retry(
+            self._values().clear(spreadsheetId=self.spreadsheet_id, range=a1_range, body={}),
+            op="values_clear",
+        )
 
     def ensure_core_sheets(self) -> None:
         existing = self._sheet_meta()
@@ -223,27 +364,51 @@ class GoogleSheetsRepository:
                     }
                 )
         if rename_requests:
-            self._svc().spreadsheets().batchUpdate(
-                spreadsheetId=self.spreadsheet_id,
-                body={"requests": rename_requests},
-            ).execute()
+            self._execute_with_retry(
+                self._svc().spreadsheets().batchUpdate(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={"requests": rename_requests},
+                ),
+                op="sheet_rename_batch",
+            )
             existing = self._sheet_meta()
 
         requests: list[dict[str, Any]] = []
         for name in [
-            SheetNames.CONFIG, SheetNames.WATCHLIST, SheetNames.MARKET, SheetNames.SCAN, SheetNames.SIGNALS,
+            SheetNames.CONFIG, SheetNames.WATCHLIST_SWING_V2, SheetNames.WATCHLIST_INTRADAY_V2, SheetNames.MARKET, SheetNames.SCAN, SheetNames.SIGNALS,
             SheetNames.ORDERS, SheetNames.POSITIONS, SheetNames.PNL, SheetNames.RISK,
-            SheetNames.UNIVERSE, SheetNames.SCORE_CACHE_1D, SheetNames.SCORE_CACHE_1D_DATA,
+            SheetNames.UNIVERSE, SheetNames.SCORE_CACHE_1D, SheetNames.SCORE_CACHE_5M, SheetNames.SCORE_CACHE_1D_DATA,
             SheetNames.DECISIONS, SheetNames.ACTIONS,
         ]:
             if name not in existing:
                 requests.append({"addSheet": {"properties": {"title": name}}})
         if requests:
-            self._svc().spreadsheets().batchUpdate(
-                spreadsheetId=self.spreadsheet_id,
-                body={"requests": requests},
-            ).execute()
+            self._execute_with_retry(
+                self._svc().spreadsheets().batchUpdate(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={"requests": requests},
+                ),
+                op="sheet_add_batch",
+            )
             existing = self._sheet_meta()
+
+        # Watchlist V2 migration: delete legacy watchlist tab once V2 tabs are in place.
+        if SheetNames.WATCHLIST in existing:
+            try:
+                self._execute_with_retry(
+                    self._svc().spreadsheets().batchUpdate(
+                        spreadsheetId=self.spreadsheet_id,
+                        body={
+                            "requests": [
+                                {"deleteSheet": {"sheetId": int(existing[SheetNames.WATCHLIST])}},
+                            ]
+                        },
+                    ),
+                    op="sheet_delete_legacy_watchlist",
+                )
+                existing = self._sheet_meta()
+            except Exception:
+                logger.debug("Unable to delete legacy watchlist tab", exc_info=True)
 
         value_updates: list[dict[str, Any]] = []
         for name, layout in SHEET_LAYOUTS.items():
@@ -259,19 +424,22 @@ class GoogleSheetsRepository:
         sid = existing.get(SheetNames.SCORE_CACHE_1D_DATA)
         if sid is not None:
             try:
-                self._svc().spreadsheets().batchUpdate(
-                    spreadsheetId=self.spreadsheet_id,
-                    body={
-                        "requests": [
-                            {
-                                "updateSheetProperties": {
-                                    "properties": {"sheetId": sid, "hidden": True},
-                                    "fields": "hidden",
+                self._execute_with_retry(
+                    self._svc().spreadsheets().batchUpdate(
+                        spreadsheetId=self.spreadsheet_id,
+                        body={
+                            "requests": [
+                                {
+                                    "updateSheetProperties": {
+                                        "properties": {"sheetId": sid, "hidden": True},
+                                        "fields": "hidden",
+                                    }
                                 }
-                            }
-                        ]
-                    },
-                ).execute()
+                            ]
+                        },
+                    ),
+                    op="sheet_hide_score_cache_data",
+                )
             except Exception:
                 logger.debug("Unable to hide score cache data tab", exc_info=True)
 
@@ -346,34 +514,45 @@ class GoogleSheetsRepository:
         self.append_values(f"'{sheet_name}'!A4", rows)
 
     def read_watchlist(self) -> list[WatchlistRow]:
-        rows = self.read_sheet_rows(SheetNames.WATCHLIST, 4)
+        rows = self.read_sheet_rows(SheetNames.WATCHLIST_INTRADAY_V2, 4)
         out: list[WatchlistRow] = []
         for row in rows:
-            if len(row) < 9:
+            if len(row) < 24:
                 continue
-            if not row[1].strip():
+            if not row[4].strip():
                 continue
-            if row[8].strip().upper() != "Y":
+            if row[23].strip().upper() != "Y":
                 continue
             out.append(
                 WatchlistRow(
-                    symbol=row[1].strip().upper(),
-                    exchange=(row[2].strip().upper() or "NSE"),
-                    segment=(row[3].strip().upper() or "CASH"),
-                    product=(row[4].strip().upper() or "CNC"),
-                    strategy=(row[5].strip().upper() or "AUTO"),
-                    sector=row[6].strip() or "UNKNOWN",
-                    beta=float(row[7]) if row[7] else 1.0,
+                    symbol=row[4].strip().upper(),
+                    exchange=(row[6].strip().upper() or "NSE"),
+                    segment="CASH",
+                    product="MIS",
+                    strategy="AUTO",
+                    sector="UNKNOWN",
+                    beta=1.0,
                     enabled=True,
-                    note=row[9].strip() if len(row) > 9 else "",
+                    note=row[25].strip() if len(row) > 25 else "",
                 )
             )
         return out
 
     def replace_watchlist(self, rows: list[list[Any]]) -> None:
-        self.clear_range(f"'{SheetNames.WATCHLIST}'!A4:Z")
+        # Legacy alias retained for compatibility: writes into intraday V2 tab.
+        self.clear_range(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4:ZZ")
         if rows:
-            self.update_values(f"'{SheetNames.WATCHLIST}'!A4", rows)
+            self.update_values(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4", rows)
+
+    def replace_watchlist_swing_v2(self, rows: list[list[Any]]) -> None:
+        self.clear_range(f"'{SheetNames.WATCHLIST_SWING_V2}'!A4:ZZ")
+        if rows:
+            self.update_values(f"'{SheetNames.WATCHLIST_SWING_V2}'!A4", rows)
+
+    def replace_watchlist_intraday_v2(self, rows: list[list[Any]]) -> None:
+        self.clear_range(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4:ZZ")
+        if rows:
+            self.update_values(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4", rows)
 
     def replace_score_cache_1d_index(self, rows: list[list[Any]], *, chunk_size: int = 500) -> None:
         self.ensure_sheet_headers_append(
@@ -406,6 +585,19 @@ class GoogleSheetsRepository:
             # RAW preserves candle timestamps as text (prevents Sheets from showing date serials like 46077).
             for tab in target_tabs:
                 self.append_values(f"'{tab}'!A4", chunk, value_input_option="RAW")
+
+    def replace_score_cache_5m_index(self, rows: list[list[Any]], *, chunk_size: int = 500) -> None:
+        self.ensure_sheet_headers_append(
+            SheetNames.SCORE_CACHE_5M,
+            SHEET_LAYOUTS[SheetNames.SCORE_CACHE_5M].headers,
+            header_row=3,
+        )
+        self.clear_range(f"'{SheetNames.SCORE_CACHE_5M}'!A4:Z")
+        if not rows:
+            return
+        for i in range(0, len(rows), max(1, int(chunk_size))):
+            chunk = rows[i : i + max(1, int(chunk_size))]
+            self.append_values(f"'{SheetNames.SCORE_CACHE_5M}'!A4", chunk, value_input_option="RAW")
 
     def replace_scan_rows(self, rows: list[list[Any]]) -> None:
         self.clear_range(f"'{SheetNames.SCAN}'!A4:Z")

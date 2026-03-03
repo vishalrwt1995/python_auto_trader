@@ -456,6 +456,42 @@ class UpstoxClient:
             candles = data
         return [c[:6] for c in candles if isinstance(c, list) and len(c) >= 6]
 
+    def get_historical_candles_v3_intraday_range(
+        self,
+        instrument_key: str,
+        *,
+        from_date: str,
+        to_date: str,
+        unit: str = "minutes",
+        interval: int = 5,
+    ) -> list[list[Any]]:
+        ik = self._enc_instrument_key(instrument_key)
+        norm_unit = str(unit or "minutes").strip().lower()
+        if norm_unit == "minute":
+            norm_unit = "minutes"
+        attempts = [
+            f"historical-candle/{ik}/{norm_unit}/{int(interval)}/{to_date}/{from_date}",
+            f"historical-candle/{ik}/{int(interval)}/{norm_unit}/{to_date}/{from_date}",
+            f"historical-candle/{ik}/{int(interval)}/{to_date}/{from_date}",
+        ]
+        data: Any = {}
+        last_exc: Exception | None = None
+        for endpoint in attempts:
+            try:
+                data = self._request("GET", endpoint, auth=True, version="v3", content_type=None)
+                break
+            except Exception as exc:
+                last_exc = exc
+                data = {}
+        if not data and last_exc is not None:
+            raise last_exc
+        candles = []
+        if isinstance(data, dict):
+            candles = data.get("candles") or []
+        elif isinstance(data, list):
+            candles = data
+        return [c[:6] for c in candles if isinstance(c, list) and len(c) >= 6]
+
     def get_intraday_candles_v3(
         self,
         instrument_key: str,
@@ -463,19 +499,28 @@ class UpstoxClient:
         interval: int = 15,
     ) -> list[list[Any]]:
         ik = self._enc_instrument_key(instrument_key)
-        # Upstox v3 path expects interval first, then unit: .../{interval}/{unit}
-        # Keep a compatibility fallback for older assumptions to avoid hard failures.
-        base = "historical-candle/intra-day"
         norm_unit = str(unit or "minutes").strip().lower()
         if norm_unit == "minute":
             norm_unit = "minutes"
-        attempts = [
-            f"{base}/{ik}/{int(interval)}/{norm_unit}",
-            f"{base}/{ik}/{norm_unit}/{int(interval)}",
-        ]
+        units = [norm_unit]
+        if norm_unit == "minutes":
+            units.append("minute")
+        attempts: list[str] = []
+        for base in ("historical-candle/intraday", "historical-candle/intra-day"):
+            for u in units:
+                attempts.append(f"{base}/{ik}/{u}/{int(interval)}")
+                attempts.append(f"{base}/{ik}/{int(interval)}/{u}")
+            attempts.append(f"{base}/{ik}/{int(interval)}")
+        deduped_attempts: list[str] = []
+        seen: set[str] = set()
+        for endpoint in attempts:
+            if endpoint in seen:
+                continue
+            seen.add(endpoint)
+            deduped_attempts.append(endpoint)
         data: Any = {}
         last_exc: Exception | None = None
-        for endpoint in attempts:
+        for endpoint in deduped_attempts:
             try:
                 data = self._request("GET", endpoint, auth=True, version="v3", content_type=None)
                 break

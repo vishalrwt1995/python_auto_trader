@@ -19,6 +19,22 @@ post_job() {
     -d '{}'
 }
 
+is_close_complete() {
+  local resp="$1"
+  python3 - "$resp" <<'PY'
+import json
+import sys
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    data = json.loads(raw)
+except Exception:
+    print("false")
+    raise SystemExit(0)
+done = bool(data.get("prefillComplete")) and int(data.get("terminalStaleSkipped", 0) or 0) == 0
+print("true" if done else "false")
+PY
+}
+
 if [[ "${AUTO_REQUEST_TOKEN}" == "true" ]]; then
   echo "== 0) Request Upstox token =="
   post_job "/jobs/upstox-token-request" || true
@@ -26,7 +42,7 @@ if [[ "${AUTO_REQUEST_TOKEN}" == "true" ]]; then
 fi
 
 echo "== 1) Universe V2 rebuild (replace=true) =="
-post_job "/jobs/universe-v2-refresh?build_limit=0&replace=true&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false"
+post_job "/jobs/universe-v2-refresh?build_limit=0&replace=true&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1200&intraday_lookback_trading_days=60"
 echo
 
 echo "== 1b) Backfill completion loop =="
@@ -57,14 +73,14 @@ echo "== 2) Last-candle close update completion loop =="
 CLOSE_DONE=0
 for i in $(seq 1 "${CLOSE_MAX_PASSES}"); do
   echo "[close pass ${i}/${CLOSE_MAX_PASSES}]"
-  RESP="$(post_job "/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320" || true)"
+  RESP="$(post_job "/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60" || true)"
   echo "${RESP}"
 
   if [[ "${RESP}" == *'"skipped":"lock_busy"'* ]]; then
     sleep 60
     continue
   fi
-  if [[ "${RESP}" == *'"prefillComplete":true'* ]]; then
+  if [[ "$(is_close_complete "${RESP}")" == "true" ]]; then
     CLOSE_DONE=1
     break
   fi

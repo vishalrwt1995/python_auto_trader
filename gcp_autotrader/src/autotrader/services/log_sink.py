@@ -63,13 +63,21 @@ class LogSink:
     def flush_decisions(self) -> None:
         if not self.decision_buffer:
             return
-        self.sheets.append_rows(SheetNames.DECISIONS, self.decision_buffer)
+        try:
+            self.sheets.append_rows(SheetNames.DECISIONS, self.decision_buffer)
+        except Exception:
+            logger.exception("log_sink_flush_decisions_failed execId=%s rows=%s", self.exec_id, len(self.decision_buffer))
+            return
         self.decision_buffer.clear()
 
     def flush_actions(self) -> None:
         if not self.action_buffer:
             return
-        self.sheets.append_rows(SheetNames.ACTIONS, self.action_buffer)
+        try:
+            self.sheets.append_rows(SheetNames.ACTIONS, self.action_buffer)
+        except Exception:
+            logger.exception("log_sink_flush_actions_failed execId=%s rows=%s", self.exec_id, len(self.action_buffer))
+            return
         self.action_buffer.clear()
 
     def flush_logs(self) -> None:
@@ -88,6 +96,9 @@ class LogSink:
             self.flush_actions()
 
     def flush_all(self) -> None:
-        self.flush_decisions()
-        self.flush_logs()
-        self.flush_actions()
+        try:
+            self.flush_decisions()
+            self.flush_logs()
+            self.flush_actions()
+        except Exception:
+            logger.exception("log_sink_flush_all_failed execId=%s", self.exec_id)

@@ -48,11 +48,11 @@ create_job "autotrader-bootstrap-sheets" "0 4 * * 1-5" "$SERVICE_URL/jobs/bootst
 create_job "autotrader-upstox-token-request" "35 3 * * 1-5" "$SERVICE_URL/jobs/upstox-token-request"
 
 # Universe V2 morning pipeline (raw refresh -> canonical build -> backfill only newly appended instruments).
-UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false"
-create_job "autotrader-universe-refresh-append-backfill-0615" "15 6 * * 1-5" "$UNIVERSE_PIPELINE_URI" "{}" "30m"
+UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1200&intraday_lookback_trading_days=60"
+create_job "autotrader-universe-v2-refresh-0615" "15 6 * * 1-5" "$UNIVERSE_PIPELINE_URI" "{}" "30m"
 
 # Morning latest-1D update (Upstox daily candle expected after ~07:00 IST). Multiple spaced retries, no provisional intraday storage.
-CLOSE_UPDATE_URI="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=false"
+CLOSE_UPDATE_URI="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
 create_job "autotrader-score-cache-update-close-0705" "5 7 * * 1-5" "$CLOSE_UPDATE_URI"
 create_job "autotrader-score-cache-update-close-0725" "25 7 * * 1-5" "$CLOSE_UPDATE_URI"
 create_job "autotrader-score-cache-update-close-0745" "45 7 * * 1-5" "$CLOSE_UPDATE_URI"
@@ -64,9 +64,16 @@ create_job "autotrader-score-cache-update-close-0805" "5 8 * * 1-5" "$CLOSE_UPDA
 MORNING_SCORE_URI="$SERVICE_URL/jobs/score-refresh?api_cap=0&cache_only=true&require_fresh_cache=true&fresh_hours=0"
 create_job "autotrader-score-0830" "30 8 * * 1-5" "$MORNING_SCORE_URI" "{}" "30m"
 
-# Market-open watchlist refresh (live regime + watchlist only). No 100% score-coverage gate.
-WATCHLIST_URI="$SERVICE_URL/jobs/watchlist-refresh?target_size=300&require_full_coverage=false&require_today_scored=true&min_watchlist_score=1"
-create_job "autotrader-watchlist-refresh-0916" "16 9 * * 1-5" "$WATCHLIST_URI"
+# Watchlist V2 cadence.
+WATCHLIST_V2_URI="$SERVICE_URL/jobs/watchlist-refresh?target_size=150&require_full_coverage=false&require_today_scored=false&min_watchlist_score=1&premarket=false&intraday_timeframe=5m"
+WATCHLIST_V2_PREMARKET_URI="$SERVICE_URL/jobs/watchlist-refresh?target_size=150&require_full_coverage=false&require_today_scored=false&min_watchlist_score=1&premarket=true&intraday_timeframe=5m"
+create_job "autotrader-watchlist-v2-premarket-0900" "0 9 * * 1-5" "$WATCHLIST_V2_PREMARKET_URI"
+create_job "autotrader-watchlist-v2-5m-0930" "30-59/5 9 * * 1-5" "$WATCHLIST_V2_URI"
+create_job "autotrader-watchlist-v2-5m-1000" "0-30/5 10 * * 1-5" "$WATCHLIST_V2_URI"
+create_job "autotrader-watchlist-v2-15m-1045" "45 10 * * 1-5" "$WATCHLIST_V2_URI"
+create_job "autotrader-watchlist-v2-15m-11to12" "0,15,30,45 11-12 * * 1-5" "$WATCHLIST_V2_URI"
+create_job "autotrader-watchlist-v2-15m-1300" "0 13 * * 1-5" "$WATCHLIST_V2_URI"
+create_job "autotrader-watchlist-v2-final-1445" "45 14 * * 1-5" "$WATCHLIST_V2_URI"
 
 # Live scanner loop (strict market hours only: 09:20..15:30 IST, weekdays).
 SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=false"
@@ -109,6 +116,10 @@ gcloud scheduler jobs delete "autotrader-score-cache-backfill-full-0630" \
   --location "$REGION" \
   --quiet || true
 gcloud scheduler jobs delete "autotrader-universe-refresh-append-backfill-0610" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+gcloud scheduler jobs delete "autotrader-universe-refresh-append-backfill-0615" \
   --project "$PROJECT_ID" \
   --location "$REGION" \
   --quiet || true
@@ -169,6 +180,23 @@ gcloud scheduler jobs delete "autotrader-watchlist-refresh-0915" \
   --location "$REGION" \
   --quiet || true
 gcloud scheduler jobs delete "autotrader-watchlist-refresh-0921" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+gcloud scheduler jobs delete "autotrader-watchlist-refresh-0916" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+
+gcloud scheduler jobs delete "autotrader-intraday-cache-update-close-0815" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+gcloud scheduler jobs delete "autotrader-intraday-cache-update-close-0825" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+gcloud scheduler jobs delete "autotrader-intraday-cache-backfill-appended-0630" \
   --project "$PROJECT_ID" \
   --location "$REGION" \
   --quiet || true
