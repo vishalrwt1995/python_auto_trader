@@ -331,14 +331,7 @@ def run_premarket_precompute(
         )
         regime = c.regime_service().get_market_regime()
         _write_market_brain_best_effort(c, regime)
-        score_out = c.universe_service().score_universe_batch(
-            regime,
-            api_cap=max(0, api_cap),
-            fresh_hours=max(0, fresh_hours),
-            sheet_write_batch_size=200,
-            cache_only=cache_only,
-            require_fresh_cache=require_fresh_cache,
-        )
+        v2_out = c.universe_service().recompute_universe_v2_from_cache()
         wl_out = c.universe_service().build_watchlist(
             regime,
             target_size=target_size,
@@ -354,10 +347,10 @@ def run_premarket_precompute(
             "premarket_precompute",
             "DONE",
             done_message,
-            {**sched_ctx, **_duration_ctx(started_perf), "score": score_out, "watchlist": wl_out},
+            {**sched_ctx, **_duration_ctx(started_perf), "universeV2": v2_out, "watchlist": wl_out},
         )
         sink.flush_all()
-        return {"regime": regime.__dict__, "score": score_out, "watchlist": wl_out}
+        return {"regime": regime.__dict__, "universeV2": v2_out, "watchlist": wl_out}
     except Exception as e:
         sink.action(
             "Universe",
@@ -524,24 +517,16 @@ def run_score_refresh(
         )
         regime = c.regime_service().get_market_regime()
         _write_market_brain_best_effort(c, regime)
-        score_out = c.universe_service().score_universe_batch(
-            regime,
-            api_cap=max(0, api_cap),
-            fresh_hours=max(0, fresh_hours),
-            sheet_write_batch_size=200,
-            cache_only=cache_only,
-            require_fresh_cache=require_fresh_cache,
-        )
         v2_out = c.universe_service().recompute_universe_v2_from_cache()
         sink.action(
             "Universe",
             "score_refresh",
             "DONE",
-            "universe scoring complete",
-            {**sched_ctx, **_duration_ctx(started_perf), "regime": regime.__dict__, "score": score_out, "universeV2": v2_out},
+            "universe v2 recompute complete",
+            {**sched_ctx, **_duration_ctx(started_perf), "regime": regime.__dict__, "universeV2": v2_out},
         )
         sink.flush_all()
-        return {"regime": regime.__dict__, "score": score_out, "universeV2": v2_out}
+        return {"regime": regime.__dict__, "universeV2": v2_out}
     except Exception as e:
         sink.action(
             "Universe",
@@ -848,20 +833,13 @@ def run_universe_refresh_append_backfill(
                     break
                 if int(out.get("fetches", 0) or 0) == 0 and int(out.get("staleOrMissing", 0) or 0) == 0:
                     break
-        score_out: dict[str, Any] | None = None
+        v2_out: dict[str, Any] | None = None
         regime_dict: dict[str, Any] | None = None
         if run_score_refresh:
             regime = c.regime_service().get_market_regime()
             _write_market_brain_best_effort(c, regime)
             regime_dict = regime.__dict__
-            score_out = c.universe_service().score_universe_batch(
-                regime,
-                api_cap=max(0, score_api_cap),
-                fresh_hours=max(0, score_fresh_hours),
-                sheet_write_batch_size=200,
-                cache_only=True,
-                require_fresh_cache=True,
-            )
+            v2_out = c.universe_service().recompute_universe_v2_from_cache()
         out: dict[str, Any] = {
             "raw": raw_out,
             "build": build_out,
@@ -874,7 +852,7 @@ def run_universe_refresh_append_backfill(
         }
         if run_score_refresh:
             out["regime"] = regime_dict or {}
-            out["score"] = score_out or {}
+            out["universeV2"] = v2_out or {}
         sink.action(
             "Universe",
             "universe_refresh_append_backfill",
@@ -1419,20 +1397,13 @@ def run_eod_close_update_score(
                 break
             # If provider is not ready yet, retries should continue on later scheduled runs.
         score_triggered = close_complete or not score_when_complete_only
-        score_out: dict[str, Any] | None = None
+        v2_out: dict[str, Any] | None = None
         regime_dict: dict[str, Any] | None = None
         if score_triggered:
             regime = c.regime_service().get_market_regime()
             _write_market_brain_best_effort(c, regime)
             regime_dict = regime.__dict__
-            score_out = c.universe_service().score_universe_batch(
-                regime,
-                api_cap=max(0, score_api_cap),
-                fresh_hours=max(0, score_fresh_hours),
-                sheet_write_batch_size=200,
-                cache_only=True,
-                require_fresh_cache=True,
-            )
+            v2_out = c.universe_service().recompute_universe_v2_from_cache()
         out: dict[str, Any] = {
             "closeUpdate": {
                 "runs": close_runs,
@@ -1444,9 +1415,9 @@ def run_eod_close_update_score(
         }
         if regime_dict is not None:
             out["regime"] = regime_dict
-        if score_out is not None:
-            out["score"] = score_out
-        done_message = "eod latest candles complete and score generated" if score_triggered else "eod latest candles incomplete; score skipped"
+        if v2_out is not None:
+            out["universeV2"] = v2_out
+        done_message = "eod latest candles complete and universe v2 recomputed" if score_triggered else "eod latest candles incomplete; universe v2 recompute skipped"
         sink.action(
             "Universe",
             "eod_close_update_score",

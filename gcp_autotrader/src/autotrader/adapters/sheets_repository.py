@@ -47,6 +47,17 @@ LEGACY_SHEET_NAMES: dict[str, str] = {
     "📘 Score Cache 1D": SheetNames.SCORE_CACHE_1D,
 }
 
+UNIVERSE_V1_DEPRECATED_HEADERS: tuple[str, ...] = (
+    "Score",
+    "RSI",
+    "Vol Ratio",
+    "Last Scanned",
+    "Last Product",
+    "Last Strategy",
+    "Last Note",
+    "Sc Calc",
+)
+
 
 SHEET_LAYOUTS: dict[str, SheetLayout] = {
     SheetNames.WATCHLIST_SWING_V2: SheetLayout(
@@ -111,9 +122,8 @@ SHEET_LAYOUTS: dict[str, SheetLayout] = {
         tab_name=SheetNames.UNIVERSE,
         headers=[
             "#", "Symbol", "Exchange", "Segment", "Allowed Product", "Strategy", "Sector", "Beta", "Enabled",
-            "Priority", "Notes", "Score", "RSI", "Vol Ratio", "Last Scanned", "Last Product", "Last Strategy",
-            "Last Note", "Raw CSV (JSON)", "Sector Source", "Sector Updated At",
-            "Data Provider", "Instrument Key", "Source Segment", "Security Type", "Sc Calc",
+            "Priority", "Notes", "Raw CSV (JSON)", "Sector Source", "Sector Updated At",
+            "Data Provider", "Instrument Key", "Source Segment", "Security Type",
         ],
     ),
     SheetNames.CANDLE_CACHE: SheetLayout(
@@ -300,6 +310,41 @@ class GoogleSheetsRepository:
             op="sheet_grid_resize",
         )
 
+    def _remove_columns_by_headers(self, sheet_name: str, headers_to_remove: Iterable[str], *, header_row: int = 3) -> int:
+        targets = {str(h).strip() for h in headers_to_remove if str(h).strip()}
+        if not targets:
+            return 0
+        grid = self._sheet_grid_meta().get(sheet_name)
+        if not grid:
+            return 0
+        headers = self.read_sheet_headers(sheet_name, header_row=header_row)
+        remove_idxs = [i for i, h in enumerate(headers, start=1) if str(h).strip() in targets]
+        if not remove_idxs:
+            return 0
+        sheet_id = int(grid.get("sheetId") or 0)
+        requests: list[dict[str, Any]] = []
+        for idx in sorted(remove_idxs, reverse=True):
+            requests.append(
+                {
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": idx - 1,
+                            "endIndex": idx,
+                        }
+                    }
+                }
+            )
+        self._execute_with_retry(
+            self._svc().spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"requests": requests},
+            ),
+            op="sheet_delete_columns_by_header",
+        )
+        return len(remove_idxs)
+
     def get_values(self, a1_range: str) -> list[list[Any]]:
         res = self._execute_with_retry(
             self._values().get(spreadsheetId=self.spreadsheet_id, range=a1_range),
@@ -410,10 +455,25 @@ class GoogleSheetsRepository:
             except Exception:
                 logger.debug("Unable to delete legacy watchlist tab", exc_info=True)
 
+        if SheetNames.UNIVERSE in existing:
+            try:
+                self._remove_columns_by_headers(
+                    SheetNames.UNIVERSE,
+                    UNIVERSE_V1_DEPRECATED_HEADERS,
+                    header_row=3,
+                )
+            except Exception:
+                logger.debug("Unable to remove deprecated universe v1 score columns", exc_info=True)
+
         value_updates: list[dict[str, Any]] = []
         for name, layout in SHEET_LAYOUTS.items():
             if name not in existing:
                 continue
+            try:
+                self.clear_range(f"'{name}'!A1:ZZ1")
+                self.clear_range(f"'{name}'!A3:ZZ3")
+            except Exception:
+                logger.debug("Unable to clear title/header rows for sheet=%s", name, exc_info=True)
             title_row = [layout.title] + [""] * (len(layout.headers) - 1)
             value_updates.append({"range": f"'{name}'!A1", "values": [title_row]})
             value_updates.append({"range": f"'{name}'!A3", "values": [layout.headers]})
@@ -960,38 +1020,55 @@ class GoogleSheetsRepository:
         self.batch_update_values(data)
 
     def read_universe_rows(self) -> list[UniverseRow]:
+        header_map = self.read_sheet_headers(SheetNames.UNIVERSE, header_row=3)
+        h2i: dict[str, int] = {}
+        for i, h in enumerate(header_map, start=1):
+            key = str(h).strip()
+            if key and key not in h2i:
+                h2i[key] = i
+
+        def _col(name: str, default: int) -> int:
+            return int(h2i.get(name, default))
+
+        col_symbol = _col("Symbol", 2)
+        col_exchange = _col("Exchange", 3)
+        col_segment = _col("Segment", 4)
+        col_allowed_product = _col("Allowed Product", 5)
+        col_strategy = _col("Strategy", 6)
+        col_sector = _col("Sector", 7)
+        col_beta = _col("Beta", 8)
+        col_enabled = _col("Enabled", 9)
+        col_priority = _col("Priority", 10)
+        col_notes = _col("Notes", 11)
+        col_provider = _col("Data Provider", 15)
+        col_instrument_key = _col("Instrument Key", 16)
+        col_source_segment = _col("Source Segment", 17)
+        col_security_type = _col("Security Type", 18)
+
         rows = self.read_sheet_rows(SheetNames.UNIVERSE, 4)
         out: list[UniverseRow] = []
         for idx, row in enumerate(rows, start=4):
-            if len(row) < 9 or not row[1].strip():
+            if len(row) < col_symbol or not row[col_symbol - 1].strip():
                 continue
-            if row[8].strip().upper() != "Y":
+            if len(row) < col_enabled or row[col_enabled - 1].strip().upper() != "Y":
                 continue
             out.append(
                 UniverseRow(
                     row_number=idx,
-                    symbol=row[1].strip().upper(),
-                    exchange=(row[2].strip().upper() or "NSE"),
-                    segment=(row[3].strip().upper() or "CASH"),
-                    allowed_product=(row[4].strip().upper() or "BOTH"),
-                    strategy_pref=(row[5].strip().upper() or "AUTO"),
-                    sector=(row[6].strip() or "UNKNOWN"),
-                    beta=float(row[7]) if row[7] else 1.0,
-                    enabled=row[8].strip().upper(),
-                    priority=float(row[9]) if len(row) > 9 and row[9] else 0.0,
-                    notes=row[10] if len(row) > 10 else "",
-                    score=float(row[11]) if len(row) > 11 and row[11] else 0.0,
-                    last_rsi=float(row[12]) if len(row) > 12 and row[12] else 0.0,
-                    last_vol_ratio=float(row[13]) if len(row) > 13 and row[13] else 0.0,
-                    last_scanned=row[14] if len(row) > 14 else "",
-                    last_product=(row[15].strip().upper() if len(row) > 15 else ""),
-                    last_strategy=(row[16].strip().upper() if len(row) > 16 else ""),
-                    last_note=row[17] if len(row) > 17 else "",
-                    provider=(row[21].strip().upper() if len(row) > 21 else ""),
-                    instrument_key=(row[22].strip() if len(row) > 22 else ""),
-                    source_segment=(row[23].strip().upper() if len(row) > 23 else ""),
-                    security_type=(row[24].strip().upper() if len(row) > 24 else ""),
-                    score_calc=(row[25].strip() if len(row) > 25 else ""),
+                    symbol=row[col_symbol - 1].strip().upper(),
+                    exchange=(row[col_exchange - 1].strip().upper() if len(row) >= col_exchange else "NSE") or "NSE",
+                    segment=(row[col_segment - 1].strip().upper() if len(row) >= col_segment else "CASH") or "CASH",
+                    allowed_product=(row[col_allowed_product - 1].strip().upper() if len(row) >= col_allowed_product else "BOTH") or "BOTH",
+                    strategy_pref=(row[col_strategy - 1].strip().upper() if len(row) >= col_strategy else "AUTO") or "AUTO",
+                    sector=(row[col_sector - 1].strip() if len(row) >= col_sector else "") or "UNKNOWN",
+                    beta=float(row[col_beta - 1]) if len(row) >= col_beta and row[col_beta - 1] else 1.0,
+                    enabled=(row[col_enabled - 1].strip().upper() if len(row) >= col_enabled else "Y"),
+                    priority=float(row[col_priority - 1]) if len(row) >= col_priority and row[col_priority - 1] else 0.0,
+                    notes=row[col_notes - 1] if len(row) >= col_notes else "",
+                    provider=(row[col_provider - 1].strip().upper() if len(row) >= col_provider else ""),
+                    instrument_key=(row[col_instrument_key - 1].strip() if len(row) >= col_instrument_key else ""),
+                    source_segment=(row[col_source_segment - 1].strip().upper() if len(row) >= col_source_segment else ""),
+                    security_type=(row[col_security_type - 1].strip().upper() if len(row) >= col_security_type else ""),
                 )
             )
         return out
@@ -999,14 +1076,16 @@ class GoogleSheetsRepository:
     def replace_universe_rows(self, rows: list[list[Any]]) -> None:
         self.clear_range(f"'{SheetNames.UNIVERSE}'!A4:ZZ")
         if rows:
-            max_cols = max((len(r) for r in rows), default=26)
-            self.ensure_sheet_grid_min(SheetNames.UNIVERSE, min_rows=max(1000, 4 + len(rows) + 5), min_cols=max(26, max_cols))
+            base_cols = len(SHEET_LAYOUTS[SheetNames.UNIVERSE].headers)
+            max_cols = max((len(r) for r in rows), default=base_cols)
+            self.ensure_sheet_grid_min(SheetNames.UNIVERSE, min_rows=max(1000, 4 + len(rows) + 5), min_cols=max(base_cols, max_cols))
             self.update_values(f"'{SheetNames.UNIVERSE}'!A4", rows)
 
     def append_universe_rows(self, rows: list[list[Any]]) -> None:
         if rows:
-            max_cols = max((len(r) for r in rows), default=26)
-            self.ensure_sheet_grid_min(SheetNames.UNIVERSE, min_rows=1000, min_cols=max(26, max_cols))
+            base_cols = len(SHEET_LAYOUTS[SheetNames.UNIVERSE].headers)
+            max_cols = max((len(r) for r in rows), default=base_cols)
+            self.ensure_sheet_grid_min(SheetNames.UNIVERSE, min_rows=1000, min_cols=max(base_cols, max_cols))
             self.append_values(f"'{SheetNames.UNIVERSE}'!A4", rows)
 
     def read_universe_row_count_and_symbols(self) -> tuple[int, set[str]]:
@@ -1022,19 +1101,6 @@ class GoogleSheetsRepository:
             count += 1
             symbols.add(symbol)
         return count, symbols
-
-    def update_universe_score_columns(self, updates: list[tuple[int, list[Any]]]) -> int:
-        if not updates:
-            return 0
-        data = []
-        for row_num, vals in updates:
-            if len(vals) >= 8:
-                data.append({"range": f"'{SheetNames.UNIVERSE}'!L{row_num}:R{row_num}", "values": [vals[:7]]})
-                data.append({"range": f"'{SheetNames.UNIVERSE}'!Z{row_num}", "values": [[vals[7]]]})
-            else:
-                data.append({"range": f"'{SheetNames.UNIVERSE}'!L{row_num}:R{row_num}", "values": [vals]})
-        self.batch_update_values(data)
-        return len(data)
 
     def append_decisions(self, rows: list[list[Any]]) -> None:
         self.append_rows(SheetNames.DECISIONS, rows)

@@ -93,7 +93,7 @@ if [[ "${CLOSE_DONE}" -ne 1 ]]; then
 fi
 
 echo
-echo "== 3) Score refresh (v1 + v2) =="
+echo "== 3) Score refresh (universe v2 + market regime) =="
 post_job "/jobs/score-refresh?api_cap=0&cache_only=true&require_fresh_cache=true&fresh_hours=0"
 echo
 

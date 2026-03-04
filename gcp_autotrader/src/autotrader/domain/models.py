@@ -250,18 +250,10 @@ class UniverseRow:
     enabled: str = "Y"
     priority: float = 0.0
     notes: str = ""
-    score: float = 0.0
-    last_rsi: float = 0.0
-    last_vol_ratio: float = 0.0
-    last_scanned: str = ""
-    last_product: str = ""
-    last_strategy: str = ""
-    last_note: str = ""
     provider: str = ""
     instrument_key: str = ""
     source_segment: str = ""
     security_type: str = ""
-    score_calc: str = ""
 
 
 @dataclass

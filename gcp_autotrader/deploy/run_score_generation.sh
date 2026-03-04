@@ -14,7 +14,7 @@ post_job() {
     -d '{}'
 }
 
-echo "== Score refresh (v1 + v2) =="
+echo "== Score refresh (universe v2 + market regime) =="
 post_job "/jobs/score-refresh?api_cap=0&cache_only=true&require_fresh_cache=true&fresh_hours=0"
 echo
 
@@ -23,4 +23,3 @@ post_job "/jobs/universe-v2-audit"
 echo
 
 echo "Score generation complete."
-

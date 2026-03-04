@@ -14,9 +14,8 @@ from typing import Any
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
 from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
-from autotrader.domain.indicators import calc_atr, compute_indicators
+from autotrader.domain.indicators import calc_atr
 from autotrader.domain.models import RegimeSnapshot, UniverseRow
-from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
 from autotrader.services.universe_v2 import (
     UNIVERSE_V2_HEADERS,
     CanonicalListing,
@@ -430,12 +429,6 @@ class UniverseService:
             if k:
                 out[k] = v
         return out
-
-    @staticmethod
-    def _score_calc_skip_short(code: str, detail: str = "") -> str:
-        c = str(code or "").strip().upper()[:10] or "SKIP"
-        d = str(detail or "").strip()[:24]
-        return f"{c}:{d}" if d else c
 
     @staticmethod
     def _is_invalid_instrument_key_error(exc: Exception) -> bool:
@@ -956,19 +949,23 @@ class UniverseService:
     def build_trading_universe_from_upstox_raw(self, limit: int = 0, *, replace: bool = False) -> dict[str, Any]:
         raw_rows, meta = self._load_latest_upstox_raw_universe()
         header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
-        col_canonical = int(header_map.get("Canonical ID", 27))
-        col_primary_exchange = int(header_map.get("Primary Exchange", 28))
-        col_secondary_exchange = int(header_map.get("Secondary Exchange", 29))
-        col_secondary_key = int(header_map.get("Secondary Instrument Key", 30))
+        base_cols = 18
+        col_canonical = int(header_map.get("Canonical ID", 19))
+        col_primary_exchange = int(header_map.get("Primary Exchange", 20))
+        col_secondary_exchange = int(header_map.get("Secondary Exchange", 21))
+        col_secondary_key = int(header_map.get("Secondary Instrument Key", 22))
         col_symbol = int(header_map.get("Symbol", 2))
         col_exchange = int(header_map.get("Exchange", 3))
         col_enabled = int(header_map.get("Enabled", 9))
         col_notes = int(header_map.get("Notes", 11))
-        col_provider = int(header_map.get("Data Provider", 22))
-        col_instrument_key = int(header_map.get("Instrument Key", 23))
-        col_source_segment = int(header_map.get("Source Segment", 24))
-        col_security_type = int(header_map.get("Security Type", 25))
-        min_cols = max(26, max(header_map.values()) if header_map else 26)
+        col_raw_json = int(header_map.get("Raw CSV (JSON)", 12))
+        col_sector_source = int(header_map.get("Sector Source", 13))
+        col_sector_updated = int(header_map.get("Sector Updated At", 14))
+        col_provider = int(header_map.get("Data Provider", 15))
+        col_instrument_key = int(header_map.get("Instrument Key", 16))
+        col_source_segment = int(header_map.get("Source Segment", 17))
+        col_security_type = int(header_map.get("Security Type", 18))
+        min_cols = max(base_cols, max(header_map.values()) if header_map else base_cols)
 
         existing_rows = [] if replace else self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
         for row in existing_rows:
@@ -1119,21 +1116,13 @@ class UniverseService:
             row[8] = "Y"
             row[9] = 0
             row[col_notes - 1] = f"isin={m.isin}|name={m.name}|source=upstox_bod"
-            row[11] = 0
-            row[12] = 0
-            row[13] = 0
-            row[14] = ""
-            row[15] = ""
-            row[16] = ""
-            row[17] = ""
-            row[18] = json.dumps(raw_json, ensure_ascii=False, separators=(",", ":"))
-            row[19] = ""
-            row[20] = ""
+            row[col_raw_json - 1] = json.dumps(raw_json, ensure_ascii=False, separators=(",", ":"))
+            row[col_sector_source - 1] = ""
+            row[col_sector_updated - 1] = ""
             row[col_provider - 1] = "UPSTOX"
             row[col_instrument_key - 1] = str(m.primary_instrument_key)
             row[col_source_segment - 1] = str(m.primary_source_segment).upper()
             row[col_security_type - 1] = str(m.security_type).upper() or "UNKNOWN"
-            row[25] = ""
             row[col_canonical - 1] = canonical
             row[col_primary_exchange - 1] = str(m.primary_exchange).upper()
             row[col_secondary_exchange - 1] = str(m.secondary_exchange).upper()
@@ -1335,7 +1324,7 @@ class UniverseService:
         col_exchange = int(header_map.get("Exchange", 3))
         col_segment = int(header_map.get("Segment", 4))
         col_enabled = int(header_map.get("Enabled", 9))
-        col_instrument_key = int(header_map.get("Instrument Key", 23))
+        col_instrument_key = int(header_map.get("Instrument Key", 16))
 
         effective_lookback_days = 1 if refresh_last_day_only else max(1, int(lookback_trading_days))
         expected_ctx = self._expected_lcd_context()
@@ -1628,7 +1617,8 @@ class UniverseService:
     ) -> dict[str, Any]:
         header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
         rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
-        min_cols = max(26, max(header_map.values()) if header_map else 26)
+        base_cols = 18
+        min_cols = max(base_cols, max(header_map.values()) if header_map else base_cols)
         for r in rows:
             if len(r) < min_cols:
                 r.extend([""] * (min_cols - len(r)))
@@ -1638,9 +1628,9 @@ class UniverseService:
         col_segment = int(header_map.get("Segment", 4))
         col_enabled = int(header_map.get("Enabled", 9))
         col_notes = int(header_map.get("Notes", 11))
-        col_raw_json = int(header_map.get("Raw CSV (JSON)", 19))
-        col_instrument_key = int(header_map.get("Instrument Key", 23))
-        col_canonical = int(header_map.get("Canonical ID", 27))
+        col_raw_json = int(header_map.get("Raw CSV (JSON)", 12))
+        col_instrument_key = int(header_map.get("Instrument Key", 16))
+        col_canonical = int(header_map.get("Canonical ID", 19))
         fetch_only_set: set[str] | None = None
         if fetch_only_symbols is not None:
             fetch_only_set = {str(s).strip().upper() for s in fetch_only_symbols if str(s).strip()}
@@ -1861,10 +1851,10 @@ class UniverseService:
         col_exchange = int(header_map.get("Exchange", 3))
         col_enabled = int(header_map.get("Enabled", 9))
         col_notes = int(header_map.get("Notes", 11))
-        col_canonical = int(header_map.get("Canonical ID", 27))
-        col_primary_exchange = int(header_map.get("Primary Exchange", 28))
-        col_secondary_exchange = int(header_map.get("Secondary Exchange", 29))
-        col_secondary_key = int(header_map.get("Secondary Instrument Key", 30))
+        col_canonical = int(header_map.get("Canonical ID", 19))
+        col_primary_exchange = int(header_map.get("Primary Exchange", 20))
+        col_secondary_exchange = int(header_map.get("Secondary Exchange", 21))
+        col_secondary_key = int(header_map.get("Secondary Instrument Key", 22))
 
         updated_at = now_ist_str()
         eligible_swing_count = 0
@@ -2054,8 +2044,8 @@ class UniverseService:
         col_symbol = int(header_map.get("Symbol", 2))
         col_exchange = int(header_map.get("Exchange", 3))
         col_segment = int(header_map.get("Segment", 4))
-        col_canonical = int(header_map.get("Canonical ID", 27))
-        col_instrument_key = int(header_map.get("Instrument Key", 23))
+        col_canonical = int(header_map.get("Canonical ID", 19))
+        col_instrument_key = int(header_map.get("Instrument Key", 16))
 
         universe_rows: list[dict[str, str]] = []
         for rnum, row in enumerate(rows, start=4):
@@ -2591,264 +2581,6 @@ class UniverseService:
             out.get("todayTradingDay"),
         )
         return out
-
-    @staticmethod
-    def _auto_strategy(ind) -> str:
-        if ind.macd.crossed in {"BUY", "SELL"}:
-            return "EMA_CROSS"
-        if 45 <= ind.rsi.curr <= 65:
-            return "RSI_EMA"
-        return "ALL"
-
-    @staticmethod
-    def _resolve_product(u: UniverseRow, score: int, regime: RegimeSnapshot) -> str:
-        if u.allowed_product in {"MIS", "CNC"}:
-            return u.allowed_product
-        if regime.regime == "RANGE":
-            return "MIS"
-        if regime.regime == "AVOID":
-            return "CNC"
-        if u.beta >= 1.25 and score >= 60:
-            return "MIS"
-        return "CNC"
-
-    def score_universe_batch(
-        self,
-        regime: RegimeSnapshot,
-        *,
-        lookback_days: int = 700,
-        min_bars: int = 320,
-        api_cap: int = 120,
-        fresh_hours: int = 18,
-        sheet_write_batch_size: int = 200,
-        cache_only: bool = False,
-        require_fresh_cache: bool = False,
-    ) -> dict[str, Any]:
-        candidates = self.sheets.read_universe_rows()
-        cache_index = self._read_score_cache_index_snapshot()
-        updates: list[tuple[int, list[object]]] = []
-        scored = 0
-        scanned = 0
-        fetches = 0
-        skip_counts = {"freshWindow": 0, "insufficientHistory": 0, "staleCache": 0, "indicatorNone": 0, "invalidInstrumentKey": 0}
-        scored_zero = 0
-        now = now_ist()
-        expected_lcd = self._expected_latest_daily_candle_date(now).strftime("%Y-%m-%d")
-
-        for u in candidates:
-            scanned += 1
-            idx_meta = cache_index.get((u.symbol, u.exchange, u.segment)) or {}
-            idx_src = str(idx_meta.get("src") or "")
-            current_cache_provisional = self._is_provisional_source(idx_src)
-            prev_score_kv = self._parse_pipe_kv(u.last_note)
-            prev_score_provisional = str(prev_score_kv.get("prov", "")).strip().upper() in {"Y", "1", "TRUE"}
-            if u.last_scanned and fresh_hours > 0:
-                ts = parse_any_ts(u.last_scanned)
-                if ts is not None:
-                    age_hours = (now.astimezone(ts.tzinfo) - ts).total_seconds() / 3600.0
-                    if age_hours <= fresh_hours and not (prev_score_provisional and not current_cache_provisional):
-                        skip_counts["freshWindow"] += 1
-                        continue
-
-            try:
-                candles, source, api_calls = self._daily_score_candles(
-                    u.symbol,
-                    u.exchange,
-                    u.segment,
-                    u.instrument_key,
-                    lookback_days,
-                    min_bars,
-                    allow_api=(fetches < api_cap),
-                    cache_only=cache_only,
-                )
-            except UpstoxApiError as exc:
-                if not self._is_invalid_instrument_key_error(exc):
-                    raise
-                skip_counts["invalidInstrumentKey"] += 1
-                api_calls = 1
-                source = "invalid_instrument_key_terminal"
-                _, candles = self._read_score_cache_with_migration(u.symbol, u.exchange, u.segment, u.instrument_key)
-                short_err = self._error_text_short(exc, max_len=96)
-                updates.append(
-                    (
-                        u.row_number,
-                        [
-                            u.score if math.isfinite(u.score) else 0,
-                            u.last_rsi if math.isfinite(u.last_rsi) else 0,
-                            u.last_vol_ratio if math.isfinite(u.last_vol_ratio) else 0,
-                            now_ist_str(),
-                            u.last_product or "",
-                            u.last_strategy or "",
-                            f"Skip=INVALID_INSTRUMENT_KEY|Bars={len(candles)}|Src={source}|Err={short_err}",
-                            self._score_calc_skip_short("INVKEY", u.instrument_key),
-                        ],
-                    )
-                )
-                logger.warning(
-                    "score_universe_batch skip invalid instrument key symbol=%s exchange=%s segment=%s instrument_key=%s error=%s",
-                    u.symbol,
-                    u.exchange,
-                    u.segment,
-                    u.instrument_key,
-                    short_err,
-                )
-                if len(updates) >= max(1, int(sheet_write_batch_size)):
-                    self.sheets.update_universe_score_columns(updates)
-                    updates.clear()
-                fetches += api_calls
-                continue
-            fetches += api_calls
-            if len(candles) < min_bars:
-                last_candle_ts = self._last_candle_ts(candles)
-                lcd = last_candle_ts.astimezone(now.tzinfo).strftime("%Y-%m-%d") if last_candle_ts is not None else "NA"
-                # Mark true ineligible rows (some history but not enough bars) as processed so coverage can complete.
-                if len(candles) > 0:
-                    skip_counts["insufficientHistory"] += 1
-                    note = f"Skip=INSUFFICIENT_HISTORY|Bars={len(candles)}|Need={min_bars}|LCD={lcd}|Src={source}"
-                    updates.append(
-                        (
-                            u.row_number,
-                            [
-                                u.score if math.isfinite(u.score) else 0,
-                                u.last_rsi if math.isfinite(u.last_rsi) else 0,
-                                u.last_vol_ratio if math.isfinite(u.last_vol_ratio) else 0,
-                                now_ist_str(),
-                                u.last_product or "",
-                                u.last_strategy or "",
-                                note,
-                                self._score_calc_skip_short("IH", f"{len(candles)}/{min_bars}"),
-                            ],
-                        )
-                    )
-                    if len(updates) >= max(1, int(sheet_write_batch_size)):
-                        self.sheets.update_universe_score_columns(updates)
-                        updates.clear()
-                continue
-            if require_fresh_cache and not self._daily_cache_is_current(candles):
-                skip_counts["staleCache"] += 1
-                last_candle_ts = self._last_candle_ts(candles)
-                lcd = last_candle_ts.astimezone(now.tzinfo).strftime("%Y-%m-%d") if last_candle_ts is not None else "NA"
-                note = f"Skip=STALE_CACHE|Bars={len(candles)}|ExpectedLCD={expected_lcd}|LCD={lcd}|Src={source}"
-                updates.append(
-                    (
-                        u.row_number,
-                        [
-                            0,
-                            0,
-                            0,
-                            now_ist_str(),
-                            "",
-                            "",
-                            note,
-                            self._score_calc_skip_short("STL", lcd),
-                        ],
-                    )
-                )
-                if len(updates) >= max(1, int(sheet_write_batch_size)):
-                    self.sheets.update_universe_score_columns(updates)
-                    updates.clear()
-                continue
-            ind = compute_indicators(candles, self.cfg)
-            if ind is None:
-                skip_counts["indicatorNone"] += 1
-                last_candle_ts = self._last_candle_ts(candles)
-                lcd = last_candle_ts.astimezone(now.tzinfo).strftime("%Y-%m-%d") if last_candle_ts is not None else "NA"
-                note = f"Skip=INDICATOR_NONE|Bars={len(candles)}|LCD={lcd}|Src={source}"
-                updates.append(
-                    (
-                        u.row_number,
-                        [
-                            u.score if math.isfinite(u.score) else 0,
-                            u.last_rsi if math.isfinite(u.last_rsi) else 0,
-                            u.last_vol_ratio if math.isfinite(u.last_vol_ratio) else 0,
-                            now_ist_str(),
-                            u.last_product or "",
-                            u.last_strategy or "",
-                            note,
-                            self._score_calc_skip_short("IND0", lcd),
-                        ],
-                    )
-                )
-                if len(updates) >= max(1, int(sheet_write_batch_size)):
-                    self.sheets.update_universe_score_columns(updates)
-                    updates.clear()
-                continue
-            raw_score, score_parts = compute_universe_score_breakdown(ind)
-            priority_bonus = min(5.0, float(u.priority or 0.0))
-            base_score = min(100, int(round(raw_score + priority_bonus)))
-            product = self._resolve_product(u, base_score, regime)
-            strategy = u.strategy_pref if u.strategy_pref != "AUTO" else self._auto_strategy(ind)
-            last_candle_ts = self._last_candle_ts(candles)
-            lcd = last_candle_ts.astimezone(now.tzinfo).strftime("%Y-%m-%d") if last_candle_ts is not None else "NA"
-            note = (
-                f"Score={base_score}|Reg={regime.regime}|Bias={regime.bias}|RSI={ind.rsi.curr:.1f}|"
-                f"VR={ind.volume.ratio:.2f}|LCD={lcd}|Src={source}|Prov={'Y' if current_cache_provisional else 'N'}"
-            )
-            calc_short = format_universe_score_calc_short(base_score, score_parts, priority_bonus=priority_bonus)
-            updates.append((u.row_number, [base_score, round(ind.rsi.curr, 2), round(ind.volume.ratio, 3), now_ist_str(), product, strategy, note, calc_short]))
-            scored += 1
-            if base_score == 0:
-                scored_zero += 1
-
-            if len(updates) >= max(1, int(sheet_write_batch_size)):
-                self.sheets.update_universe_score_columns(updates)
-                updates.clear()
-
-            if fetches >= api_cap and scored > 0:
-                # Continue only with cached rows; if more api needed they will be deferred by scheduler.
-                pass
-
-        if updates:
-            self.sheets.update_universe_score_columns(updates)
-
-        cov = self.universe_score_coverage()
-        out = {
-            "scanned": scanned,
-            "scored": scored,
-            "scoredZero": scored_zero,
-            "fetches": fetches,
-            "coveragePct": cov["coveragePct"],
-            "total": cov["total"],
-            "todayCoveragePct": cov["todayCoveragePct"],
-            "cacheOnly": cache_only,
-            "skipCounts": skip_counts,
-        }
-        logger.info(
-            "score_universe_batch complete scanned=%s scored=%s scoredZero=%s fetches=%s cacheOnly=%s requireFresh=%s skips=%s coverage=%.2f todayCoverage=%.2f",
-            scanned,
-            scored,
-            scored_zero,
-            fetches,
-            cache_only,
-            require_fresh_cache,
-            skip_counts,
-            float(cov["coveragePct"] or 0.0),
-            float(cov["todayCoveragePct"] or 0.0),
-        )
-        return out
-
-    def universe_score_coverage(self) -> dict[str, float | int | bool]:
-        rows = self.sheets.read_universe_rows()
-        total = len(rows)
-        scored_any = 0
-        scored_today = 0
-        today = today_ist()
-        for r in rows:
-            if parse_any_ts(r.last_scanned):
-                scored_any += 1
-                ts = parse_any_ts(r.last_scanned)
-                if ts and ts.astimezone(now_ist().tzinfo).strftime("%Y-%m-%d") == today:
-                    scored_today += 1
-        return {
-            "total": total,
-            "scored": scored_any,
-            "missing": max(0, total - scored_any),
-            "coveragePct": round((scored_any * 100.0 / total), 2) if total else 0.0,
-            "todayScored": scored_today,
-            "todayCoveragePct": round((scored_today * 100.0 / total), 2) if total else 0.0,
-            "full": total > 0 and scored_any >= total,
-            "todayFull": total > 0 and scored_today >= total,
-        }
 
     @staticmethod
     def _clip01(v: float) -> float:
@@ -3836,12 +3568,13 @@ class UniverseService:
         return out
 
     def run_premarket_pipeline(self, regime: RegimeSnapshot, target_size: int = 150) -> UniversePipelineResult:
-        score_out = self.score_universe_batch(regime, api_cap=120, fresh_hours=12, sheet_write_batch_size=200)
-        wl_out = self.build_watchlist(regime, target_size=target_size, premarket=True)
+        del regime
+        v2_out = self.recompute_universe_v2_from_cache()
+        wl_out = self.build_watchlist(None, target_size=target_size, premarket=True)
         cov = wl_out.get("coverage", {}) if isinstance(wl_out, dict) else {}
         return UniversePipelineResult(
             synced=0,
-            scored=int(score_out["scored"]),
+            scored=int((v2_out.get("eligibility", {}) or {}).get("totalMasterCount", 0) or 0),
             selected=int(wl_out.get("selected", 0)),
             coverage_pct=float(cov.get("intradayCandidates", 0) or 0.0),
         )

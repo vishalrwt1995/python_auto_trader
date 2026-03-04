@@ -341,18 +341,19 @@ def test_stale_candle_handling_marks_row_stale():
         "Secondary Exchange",
         "Secondary Instrument Key",
     ]
+    col = {h: i for i, h in enumerate(combined_headers)}
 
     class FakeSheets:
         def __init__(self):
             self.index_rows: list[list[object]] = []
             row = [""] * len(combined_headers)
-            row[1] = "ABC"
-            row[2] = "NSE"
-            row[3] = "CASH"
-            row[8] = "Y"
-            row[10] = "isin=INE000A01001"
-            row[22] = "NSE_EQ|ABC"
-            row[26] = "INE000A01001"
+            row[col["Symbol"]] = "ABC"
+            row[col["Exchange"]] = "NSE"
+            row[col["Segment"]] = "CASH"
+            row[col["Enabled"]] = "Y"
+            row[col["Notes"]] = "isin=INE000A01001"
+            row[col["Instrument Key"]] = "NSE_EQ|ABC"
+            row[col["Canonical ID"]] = "INE000A01001"
             self.universe_rows = [row]
 
         def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
@@ -415,18 +416,19 @@ def test_universe_v2_cache_recompute_can_skip_history_index_write():
         "Secondary Exchange",
         "Secondary Instrument Key",
     ]
+    col = {h: i for i, h in enumerate(combined_headers)}
 
     class FakeSheets:
         def __init__(self):
             self.index_rows: list[list[object]] = []
             row = [""] * len(combined_headers)
-            row[1] = "ABC"
-            row[2] = "NSE"
-            row[3] = "CASH"
-            row[8] = "Y"
-            row[10] = "isin=INE000A01001"
-            row[22] = "NSE_EQ|ABC"
-            row[26] = "INE000A01001"
+            row[col["Symbol"]] = "ABC"
+            row[col["Exchange"]] = "NSE"
+            row[col["Segment"]] = "CASH"
+            row[col["Enabled"]] = "Y"
+            row[col["Notes"]] = "isin=INE000A01001"
+            row[col["Instrument Key"]] = "NSE_EQ|ABC"
+            row[col["Canonical ID"]] = "INE000A01001"
             self.universe_rows = [row]
 
         def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
@@ -647,6 +649,7 @@ def test_universe_v2_fetch_scope_limits_api_to_target_symbols():
         "Secondary Exchange",
         "Secondary Instrument Key",
     ]
+    col = {h: i for i, h in enumerate(combined_headers)}
 
     class FakeSheets:
         def __init__(self):
@@ -657,13 +660,13 @@ def test_universe_v2_fetch_scope_limits_api_to_target_symbols():
                 ("BBB", "INE000B01002", "NSE_EQ|BBB"),
             ]:
                 row = [""] * len(combined_headers)
-                row[1] = sym
-                row[2] = "NSE"
-                row[3] = "CASH"
-                row[8] = "Y"
-                row[10] = f"isin={isin}"
-                row[22] = ik
-                row[26] = isin
+                row[col["Symbol"]] = sym
+                row[col["Exchange"]] = "NSE"
+                row[col["Segment"]] = "CASH"
+                row[col["Enabled"]] = "Y"
+                row[col["Notes"]] = f"isin={isin}"
+                row[col["Instrument Key"]] = ik
+                row[col["Canonical ID"]] = isin
                 rows.append(row)
             self.universe_rows = rows
 

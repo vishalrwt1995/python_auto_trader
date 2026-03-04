@@ -138,16 +138,7 @@ def premarket_precompute(
     sink = LogSink(c.sheets)
     regime = c.regime_service().get_market_regime()
     sink.action("Universe", "premarket_precompute", "START", "", {"targetSize": target_size})
-    score_out = c.universe_service().score_universe_batch(
-        regime,
-        api_cap=api_cap,
-        lookback_days=lookback_days,
-        min_bars=min_bars,
-        fresh_hours=max(0, fresh_hours),
-        sheet_write_batch_size=200,
-        cache_only=cache_only,
-        require_fresh_cache=require_fresh_cache,
-    )
+    v2_out = c.universe_service().recompute_universe_v2_from_cache()
     wl_out = c.universe_service().build_watchlist(
         regime,
         target_size=target_size,
@@ -155,9 +146,9 @@ def premarket_precompute(
         require_today_scored=require_today_scored,
         require_full_coverage=require_full_coverage,
     )
-    sink.action("Universe", "premarket_precompute", "DONE", "watchlist ready", {"score": score_out, "watchlist": wl_out})
+    sink.action("Universe", "premarket_precompute", "DONE", "watchlist ready", {"universeV2": v2_out, "watchlist": wl_out})
     sink.flush_all()
-    _print({"regime": regime.__dict__, "score": score_out, "watchlist": wl_out})
+    _print({"regime": regime.__dict__, "universeV2": v2_out, "watchlist": wl_out})
 
 
 @app.command("score-cache-prefetch")
