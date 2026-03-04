@@ -3441,7 +3441,8 @@ class UniverseService:
         del regime
         now_i = now_ist()
         expected_lcd = self._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
-        run_ts = now_ist_str()
+        # Force a stable, locale-independent timestamp text for sheet auditability.
+        run_ts = now_i.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
         run_date = now_i.astimezone(IST).strftime("%Y-%m-%d")
         run_block = self._run_time_block(now_i, premarket=premarket)
         timeframe = "5m" if str(intraday_timeframe or "").strip().lower() != "15m" else "15m"
