@@ -20,6 +20,25 @@ if [[ -z "${JOB_TRIGGER_TOKEN:-}" ]]; then
   exit 1
 fi
 
+if [[ -z "$SHEET_ID" ]]; then
+  echo "ERROR: SHEET_ID argument is empty."
+  echo "Pass a valid Google Sheet ID as arg #5."
+  exit 1
+fi
+
+if [[ -z "$BUCKET" ]]; then
+  echo "ERROR: BUCKET argument is empty."
+  echo "Pass a valid GCS bucket as arg #6."
+  exit 1
+fi
+
+CLOUD_RUN_CPU="${CLOUD_RUN_CPU:-1}"
+CLOUD_RUN_MEMORY="${CLOUD_RUN_MEMORY:-4Gi}"
+CLOUD_RUN_MIN_INSTANCES="${CLOUD_RUN_MIN_INSTANCES:-0}"
+CLOUD_RUN_MAX_INSTANCES="${CLOUD_RUN_MAX_INSTANCES:-3}"
+CLOUD_RUN_TIMEOUT="${CLOUD_RUN_TIMEOUT:-3600}"
+CLOUD_RUN_CONCURRENCY="${CLOUD_RUN_CONCURRENCY:-1}"
+
 # Required secret-name envs (AppSettings.from_env hard requirements).
 GROWW_API_KEY_SECRET_NAME="${GROWW_API_KEY_SECRET_NAME:-groww-api-key}"
 GROWW_API_SECRET_SECRET_NAME="${GROWW_API_SECRET_SECRET_NAME:-groww-api-secret}"
@@ -78,12 +97,12 @@ gcloud run deploy "$SERVICE_NAME" \
   --platform managed \
   --allow-unauthenticated \
   --port 8080 \
-  --cpu 1 \
-  --memory 1Gi \
-  --min-instances 0 \
-  --max-instances 3 \
-  --timeout 3600 \
-  --concurrency 20 \
+  --cpu "$CLOUD_RUN_CPU" \
+  --memory "$CLOUD_RUN_MEMORY" \
+  --min-instances "$CLOUD_RUN_MIN_INSTANCES" \
+  --max-instances "$CLOUD_RUN_MAX_INSTANCES" \
+  --timeout "$CLOUD_RUN_TIMEOUT" \
+  --concurrency "$CLOUD_RUN_CONCURRENCY" \
   --update-env-vars "$ENV_VARS_CSV"
 
 echo "Cloud Run service deployed."

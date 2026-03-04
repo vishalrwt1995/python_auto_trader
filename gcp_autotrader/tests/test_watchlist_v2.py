@@ -170,7 +170,7 @@ def test_watchlist_v2_score_bounds_zero_to_hundred():
     svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
     svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_today()  # type: ignore[method-assign]
 
-    out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
+    out = svc.build_watchlist(None, target_size=20, premarket=True, intraday_timeframe="5m")
     assert out["ready"] is True
     assert sheets.swing_rows
     assert sheets.intraday_rows
@@ -178,6 +178,52 @@ def test_watchlist_v2_score_bounds_zero_to_hundred():
         assert 0.0 <= float(r[6]) <= 100.0
     for r in sheets.intraday_rows:
         assert 0.0 <= float(r[7]) <= 100.0
+
+
+def test_watchlist_v2_intraday_run_does_not_overwrite_swing_sheet():
+    sheets = _FakeSheets()
+    sheets.swing_rows = [["KEEP_SWING_ROW"]]
+    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    now_i = now_ist()
+    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    candidates = [
+        {
+            "symbol": "AAA",
+            "exchange": "NSE",
+            "segment": "CASH",
+            "enabled": True,
+            "instrumentKey": "NSE_EQ|AAA",
+            "eligibleSwing": True,
+            "eligibleIntraday": True,
+            "turnoverRank60D": 10,
+            "liquidityBucket": "A",
+            "atrPct14D": 0.02,
+            "gapRisk60D": 0.01,
+            "priceLast": 120.0,
+            "bars1D": 260,
+            "last1DDate": expected_lcd,
+            "fresh": True,
+            "disableReason": "",
+            "decisionPresent": True,
+        }
+    ]
+    svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
+    svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
+        "regimeDaily": "RANGE",
+        "regimeIntraday": "CHOPPY",
+        "source": {},
+    }
+    svc._watchlist_v2_candidates = lambda expected_lcd: list(candidates)  # type: ignore[method-assign]
+    svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
+    svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_today()  # type: ignore[method-assign]
+
+    out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
+    assert out["ready"] is True
+    assert out["swingSelected"] == 0
+    assert out["swingComputed"] >= 1
+    assert sheets.swing_rows == [["KEEP_SWING_ROW"]]
+    assert sheets.intraday_rows
 
 
 def test_watchlist_v2_phase2_first_merge():

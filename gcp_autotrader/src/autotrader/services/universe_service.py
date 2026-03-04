@@ -3021,8 +3021,21 @@ class UniverseService:
                     logger.warning("watchlist_v2 index daily fetch failed key=%s", key, exc_info=True)
             else:
                 # Premarket deterministic mode: never do live incremental refresh.
-                # If cache is missing, seed deterministic history bounded to ExpectedLCD.
-                if not cached:
+                # If cache is missing or behind ExpectedLCD, sync deterministic history
+                # bounded to ExpectedLCD.
+                exp = self._parse_iso_date(expected_lcd)
+                cached_last: date_cls | None = None
+                if cached:
+                    for row in reversed(cached):
+                        if not row:
+                            continue
+                        ts = parse_any_ts(row[0])
+                        if ts is None:
+                            continue
+                        cached_last = ts.astimezone(IST).date()
+                        break
+                needs_sync = (not cached) or (exp is not None and (cached_last is None or cached_last < exp))
+                if needs_sync:
                     try:
                         api = self._fetch_daily_candles_expected_lcd_bounded(
                             key,
@@ -3031,7 +3044,7 @@ class UniverseService:
                         )
                         if api:
                             merged = self.gcs.merge_candles(path, api)
-                            source = "upstox_api_expectedlcd_backfill"
+                            source = "upstox_api_expectedlcd_sync"
                         else:
                             source = "cache_missing_expectedlcd_fetch_empty"
                     except Exception:
@@ -3775,12 +3788,21 @@ class UniverseService:
                 ]
             )
 
-        self.sheets.replace_watchlist_swing_v2(swing_rows)
+        swing_written = bool(premarket)
+        if swing_written:
+            self.sheets.replace_watchlist_swing_v2(swing_rows)
+        else:
+            logger.info(
+                "build_watchlist_v2 swing write skipped premarket=%s runBlock=%s",
+                premarket,
+                run_block,
+            )
         self.sheets.replace_watchlist_intraday_v2(intraday_rows)
 
         out = {
             "selected": len(intraday_rows),
-            "swingSelected": len(swing_rows),
+            "swingSelected": len(swing_rows) if swing_written else 0,
+            "swingComputed": len(swing_rows),
             "intradaySelected": len(intraday_rows),
             "coverage": {
                 **coverage_v2,
