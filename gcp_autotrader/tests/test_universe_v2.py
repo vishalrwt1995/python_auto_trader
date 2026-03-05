@@ -869,3 +869,70 @@ def test_sync_sector_mapping_to_universe_updates_targeted_symbols_only():
     assert source_col[0][0] == "nse_quote_equity"
     assert updated_col[0][0] == "2026-03-05 09:00:00"
     assert sector_col[1][0] == "UNKNOWN"
+
+
+def test_sector_mapping_coverage_metrics_match_final_merged_mapping():
+    class FakeSheets:
+        @staticmethod
+        def ensure_sheet_headers_append(sheet_name: str, required_headers: list[str], header_row: int = 3) -> dict[str, int]:
+            del sheet_name, header_row
+            return {h: i + 1 for i, h in enumerate(required_headers)}
+
+        @staticmethod
+        def read_sheet_rows(sheet_name: str, start_row: int = 4) -> list[list[str]]:
+            del sheet_name, start_row
+            return [
+                [" aaa ", " nse ", "FINANCIALS", "BANKING", "BANKS", "PRIVATE BANKS", "sheet_seed", "2026-03-05 09:00:00"],
+            ]
+
+        @staticmethod
+        def replace_sector_mapping(rows: list[list[object]]) -> None:
+            del rows
+
+    class FakeGcs:
+        @staticmethod
+        def read_json(path: str, default=None):
+            del path
+            return [
+                {
+                    "symbol": "bbb",
+                    "exchange": "nse",
+                    "macro_sector": "INDUSTRIALS",
+                    "sector": "CAPITAL GOODS",
+                    "industry": "MACHINERY",
+                    "basic_industry": "HEAVY MACHINERY",
+                    "source": "gcs_seed",
+                    "updated_at": "2026-03-05 09:01:00",
+                }
+            ]
+
+        @staticmethod
+        def write_json(path: str, data: object) -> None:
+            del path, data
+
+    class FakeUpstox:
+        pass
+
+    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    universe_rows = [
+        {"symbol": "AAA", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "UNKNOWN"},
+        {"symbol": "BBB", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": False, "eligibleIntraday": True, "sector": "UNKNOWN"},
+        {"symbol": "CCC", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "ENERGY", "sectorSource": "universe_seed"},
+        {"symbol": "DDD", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "UNKNOWN"},
+        {"symbol": "ZZZ", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": False, "eligibleIntraday": False, "sector": "IT"},
+    ]
+
+    mapping, coverage_pct, _source_origin, metrics = svc._load_sector_mapping_dataset(universe_rows, include_meta=True)
+    assert ("AAA", "NSE") in mapping
+    assert ("BBB", "NSE") in mapping
+    assert ("CCC", "NSE") in mapping
+    assert metrics["eligible_universe_count"] == 4
+    assert metrics["mapped_count"] == 3
+    assert metrics["unmapped_count"] == 1
+    assert metrics["mapped_count"] + metrics["unmapped_count"] == metrics["eligible_universe_count"]
+    assert metrics["coverage_pct"] == pytest.approx(75.0, abs=0.1)
+    assert coverage_pct == pytest.approx(metrics["coverage_pct"], abs=0.1)
+    assert metrics["source_breakdown_counts"]["sheet"] == 1
+    assert metrics["source_breakdown_counts"]["gcs"] == 1
+    assert metrics["source_breakdown_counts"]["universe_fallback"] == 1
+    assert metrics["source_breakdown_counts"]["unknown"] == 0

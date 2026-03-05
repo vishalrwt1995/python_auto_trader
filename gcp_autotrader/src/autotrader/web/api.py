@@ -39,6 +39,49 @@ def _duration_ctx(started_perf: float) -> dict[str, Any]:
     return {"durationSec": round(time.perf_counter() - started_perf, 3)}
 
 
+def _watchlist_daily_source_enum(raw_source: str) -> str:
+    src = str(raw_source or "").strip().lower()
+    if src == "cache_only":
+        return "cache_only"
+    if "error" in src:
+        return "error_fallback"
+    if src.startswith("fallback_") or src == "cache_fallback":
+        return "fallback_proxy"
+    if "expectedlcd" in src or src == "upstox_api":
+        return "expectedlcd_sync_api"
+    return "cache_only"
+
+
+def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) -> dict[str, Any]:
+    coverage = wl_out.get("coverage", {}) if isinstance(wl_out.get("coverage"), dict) else {}
+    regime_v2 = wl_out.get("regimeV2", {}) if isinstance(wl_out.get("regimeV2"), dict) else {}
+    source = regime_v2.get("source", {}) if isinstance(regime_v2.get("source"), dict) else {}
+    phase_stats = wl_out.get("intradayPhaseStats", {}) if isinstance(wl_out.get("intradayPhaseStats"), dict) else {}
+
+    intraday_selected = int(
+        phase_stats.get("intradaySelectedCount", wl_out.get("intradaySelected", wl_out.get("selected", 0))) or 0
+    )
+    phase2_used = int(phase_stats.get("phase2UsedCount", 0) or 0)
+    phase1_fallback = int(phase_stats.get("phase1FallbackCount", max(0, intraday_selected - phase2_used)) or 0)
+    phase2_eligible = int(phase_stats.get("phase2EligibleCount", coverage.get("phase2Candidates", 0)) or 0)
+    phase2_eligible_pct = float(phase_stats.get("phase2EligiblePct", 0.0) or 0.0)
+
+    return {
+        "expectedLCD": str(coverage.get("expectedLCD") or ""),
+        "runTimeBlock": str(coverage.get("runTimeBlock") or ("PREMARKET" if is_premarket else "UNKNOWN")),
+        "isPremarket": bool(is_premarket),
+        "indexDailyKeyChosen": str(source.get("dailyKey") or ""),
+        "indexDailySource": _watchlist_daily_source_enum(str(source.get("dailySource") or "")),
+        "regimeDaily": str(regime_v2.get("regimeDaily") or "RANGE"),
+        "regimeIntraday": ("NA" if bool(is_premarket) else str(regime_v2.get("regimeIntraday") or "NA")),
+        "phase2_used_count": phase2_used,
+        "phase1_fallback_count": phase1_fallback,
+        "phase2_eligible_count": phase2_eligible,
+        "phase2_eligible_pct": round(phase2_eligible_pct, 2),
+        "intraday_selected_count": intraday_selected,
+    }
+
+
 def _write_market_brain_best_effort(c, regime: Any) -> None:
     try:
         c.sheets.write_market_brain(regime)
@@ -433,6 +476,7 @@ def run_watchlist_refresh(
             premarket=bool(premarket),
             intraday_timeframe=str(intraday_timeframe or "5m"),
         )
+        audit_ctx = _watchlist_done_log_fields(wl_out if isinstance(wl_out, dict) else {}, is_premarket=bool(premarket))
         done_message = "watchlist ready" if bool(wl_out.get("ready")) and int(wl_out.get("selected", 0) or 0) > 0 else "watchlist blocked"
         sink.action(
             "Universe",
@@ -445,6 +489,7 @@ def run_watchlist_refresh(
                 "watchlist": wl_out,
                 "regime": wl_out.get("regimeV2", {}),
                 "regimeV2": wl_out.get("regimeV2", {}),
+                **audit_ctx,
             },
         )
         sink.flush_all()

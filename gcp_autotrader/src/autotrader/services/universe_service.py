@@ -3083,24 +3083,91 @@ class UniverseService:
         out["reason"] = ""
         return out
 
-    def _load_sector_mapping_dataset(self, universe_rows: list[dict[str, Any]]) -> tuple[dict[tuple[str, str], dict[str, str]], float]:
+    @staticmethod
+    def _sector_map_key(symbol: str, exchange: str) -> tuple[str, str]:
+        return (str(symbol or "").strip().upper(), str(exchange or "NSE").strip().upper() or "NSE")
+
+    @staticmethod
+    def _sector_is_mapped(sector: str) -> bool:
+        return str(sector or "").strip().upper() not in {"", "UNKNOWN"}
+
+    @staticmethod
+    def _sector_source_bucket(source_origin: str) -> str:
+        v = str(source_origin or "").strip().lower()
+        if v in {"sheet", "gcs", "universe_fallback"}:
+            return v
+        return "unknown"
+
+    @staticmethod
+    def _eligible_universe_for_sector_mapping(universe_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            r
+            for r in universe_rows
+            if bool(r.get("enabled")) and bool(r.get("fresh")) and (bool(r.get("eligibleSwing")) or bool(r.get("eligibleIntraday")))
+        ]
+
+    def _sector_mapping_coverage_metrics(
+        self,
+        universe_rows: list[dict[str, Any]],
+        mapping: dict[tuple[str, str], dict[str, str]],
+        source_origin: dict[tuple[str, str], str],
+    ) -> dict[str, Any]:
+        eligible = self._eligible_universe_for_sector_mapping(universe_rows)
+        eligible_count = int(len(eligible))
+        mapped_count = 0
+        breakdown = {"sheet": 0, "gcs": 0, "universe_fallback": 0, "unknown": 0}
+
+        for row in eligible:
+            key = self._sector_map_key(str(row.get("symbol") or ""), str(row.get("exchange") or "NSE"))
+            mapped = mapping.get(key) or {}
+            if not self._sector_is_mapped(str(mapped.get("sector") or "")):
+                continue
+            mapped_count += 1
+            bucket = self._sector_source_bucket(source_origin.get(key, "unknown"))
+            breakdown[bucket] = int(breakdown.get(bucket, 0) or 0) + 1
+
+        unmapped_count = max(0, eligible_count - mapped_count)
+        coverage_pct = (mapped_count * 100.0 / eligible_count) if eligible_count else 0.0
+        return {
+            "eligible_universe_count": eligible_count,
+            "mapped_count": int(mapped_count),
+            "unmapped_count": int(unmapped_count),
+            "coverage_pct": float(round(coverage_pct, 2)),
+            "source_breakdown_counts": {
+                "sheet": int(breakdown["sheet"]),
+                "gcs": int(breakdown["gcs"]),
+                "universe_fallback": int(breakdown["universe_fallback"]),
+                "unknown": int(breakdown["unknown"]),
+            },
+        }
+
+    def _load_sector_mapping_dataset(
+        self,
+        universe_rows: list[dict[str, Any]],
+        *,
+        include_meta: bool = False,
+    ) -> tuple[dict[tuple[str, str], dict[str, str]], float] | tuple[dict[tuple[str, str], dict[str, str]], float, dict[tuple[str, str], str], dict[str, Any]]:
         mapping: dict[tuple[str, str], dict[str, str]] = {}
+        source_origin: dict[tuple[str, str], str] = {}
+        sheet_rows: list[list[str]] = []
+
         try:
             self.sheets.ensure_sheet_headers_append(
                 SheetNames.SECTOR_MAPPING,
                 self.WATCHLIST_SECTOR_MAPPING_HEADERS,
                 header_row=3,
             )
-            rows = self.sheets.read_sheet_rows(SheetNames.SECTOR_MAPPING, 4)
+            sheet_rows = self.sheets.read_sheet_rows(SheetNames.SECTOR_MAPPING, 4)
         except Exception:
-            rows = []
+            sheet_rows = []
 
-        for row in rows:
-            symbol = row[0].strip().upper() if len(row) > 0 else ""
-            exchange = row[1].strip().upper() if len(row) > 1 else "NSE"
-            if not symbol:
+        for row in sheet_rows:
+            symbol = row[0] if len(row) > 0 else ""
+            exchange = row[1] if len(row) > 1 else "NSE"
+            key = self._sector_map_key(symbol, exchange)
+            if not key[0]:
                 continue
-            mapping[(symbol, exchange)] = {
+            mapping[key] = {
                 "macroSector": row[2].strip().upper() if len(row) > 2 else "UNKNOWN",
                 "sector": row[3].strip().upper() if len(row) > 3 else "UNKNOWN",
                 "industry": row[4].strip().upper() if len(row) > 4 else "UNKNOWN",
@@ -3108,44 +3175,58 @@ class UniverseService:
                 "source": row[6].strip() if len(row) > 6 else "unknown",
                 "updatedAt": row[7].strip() if len(row) > 7 else "",
             }
+            source_origin[key] = "sheet"
 
-        if not mapping:
-            try:
-                payload = self.gcs.read_json("reference/sector_mapping/nse_symbol_classification.json", default=[])
-            except Exception:
-                payload = []
-            items = payload if isinstance(payload, list) else (payload.get("rows", []) if isinstance(payload, dict) else [])
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                symbol = str(item.get("symbol") or "").strip().upper()
-                exchange = str(item.get("exchange") or "NSE").strip().upper()
-                if not symbol:
-                    continue
-                mapping[(symbol, exchange)] = {
-                    "macroSector": str(item.get("macro_sector") or item.get("macroSector") or "UNKNOWN").strip().upper(),
-                    "sector": str(item.get("sector") or "UNKNOWN").strip().upper(),
-                    "industry": str(item.get("industry") or "UNKNOWN").strip().upper(),
-                    "basicIndustry": str(item.get("basic_industry") or item.get("basicIndustry") or "UNKNOWN").strip().upper(),
-                    "source": str(item.get("source") or "nse").strip() or "nse",
-                    "updatedAt": str(item.get("updated_at") or item.get("updatedAt") or ""),
-                }
+        try:
+            payload = self.gcs.read_json("reference/sector_mapping/nse_symbol_classification.json", default=[])
+        except Exception:
+            payload = []
+        items = payload if isinstance(payload, list) else (payload.get("rows", []) if isinstance(payload, dict) else [])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = self._sector_map_key(str(item.get("symbol") or ""), str(item.get("exchange") or "NSE"))
+            if not key[0]:
+                continue
+            gcs_entry = {
+                "macroSector": str(item.get("macro_sector") or item.get("macroSector") or "UNKNOWN").strip().upper() or "UNKNOWN",
+                "sector": str(item.get("sector") or "UNKNOWN").strip().upper() or "UNKNOWN",
+                "industry": str(item.get("industry") or "UNKNOWN").strip().upper() or "UNKNOWN",
+                "basicIndustry": str(item.get("basic_industry") or item.get("basicIndustry") or "UNKNOWN").strip().upper() or "UNKNOWN",
+                "source": str(item.get("source") or "nse").strip() or "nse",
+                "updatedAt": str(item.get("updated_at") or item.get("updatedAt") or ""),
+            }
+            existing = mapping.get(key)
+            if existing is None:
+                mapping[key] = gcs_entry
+                source_origin[key] = "gcs"
+                continue
+            if (not self._sector_is_mapped(str(existing.get("sector") or ""))) and self._sector_is_mapped(str(gcs_entry.get("sector") or "")):
+                mapping[key] = gcs_entry
+                source_origin[key] = "gcs"
 
-        if not mapping:
-            for row in universe_rows:
-                symbol = str(row.get("symbol") or "").strip().upper()
-                exchange = str(row.get("exchange") or "NSE").strip().upper()
-                if not symbol:
-                    continue
-                sector = str(row.get("sector") or "UNKNOWN").strip().upper() or "UNKNOWN"
-                mapping[(symbol, exchange)] = {
-                    "macroSector": "UNKNOWN",
-                    "sector": sector,
-                    "industry": "UNKNOWN",
-                    "basicIndustry": "UNKNOWN",
-                    "source": str(row.get("sectorSource") or "unknown").strip() or "unknown",
-                    "updatedAt": str(row.get("sectorUpdatedAt") or ""),
-                }
+        for row in universe_rows:
+            key = self._sector_map_key(str(row.get("symbol") or ""), str(row.get("exchange") or "NSE"))
+            if not key[0]:
+                continue
+            fallback_entry = {
+                "macroSector": "UNKNOWN",
+                "sector": str(row.get("sector") or "UNKNOWN").strip().upper() or "UNKNOWN",
+                "industry": "UNKNOWN",
+                "basicIndustry": "UNKNOWN",
+                "source": str(row.get("sectorSource") or "unknown").strip() or "unknown",
+                "updatedAt": str(row.get("sectorUpdatedAt") or ""),
+            }
+            existing = mapping.get(key)
+            if existing is None:
+                mapping[key] = fallback_entry
+                source_origin[key] = "universe_fallback" if self._sector_is_mapped(fallback_entry["sector"]) else "unknown"
+                continue
+            if (not self._sector_is_mapped(str(existing.get("sector") or ""))) and self._sector_is_mapped(fallback_entry["sector"]):
+                mapping[key] = fallback_entry
+                source_origin[key] = "universe_fallback"
+
+        if not sheet_rows and mapping:
             try:
                 rows_to_write = [
                     [
@@ -3165,19 +3246,11 @@ class UniverseService:
             except Exception:
                 logger.debug("sector_mapping replace failed", exc_info=True)
 
-        eligible = [
-            r
-            for r in universe_rows
-            if bool(r.get("enabled")) and bool(r.get("fresh")) and (bool(r.get("eligibleSwing")) or bool(r.get("eligibleIntraday")))
-        ]
-        mapped = 0
-        for r in eligible:
-            key = (str(r.get("symbol") or "").strip().upper(), str(r.get("exchange") or "NSE").strip().upper())
-            m = mapping.get(key) or {}
-            if str(m.get("sector") or "").strip().upper() not in {"", "UNKNOWN"}:
-                mapped += 1
-        coverage_pct = (mapped * 100.0 / len(eligible)) if eligible else 0.0
-        return mapping, float(round(coverage_pct, 2))
+        metrics = self._sector_mapping_coverage_metrics(universe_rows, mapping, source_origin)
+        coverage_pct = float(metrics.get("coverage_pct", 0.0) or 0.0)
+        if include_meta:
+            return mapping, coverage_pct, source_origin, metrics
+        return mapping, coverage_pct
 
     @staticmethod
     def _normalize_sector_mapping_row(raw: dict[str, Any], *, source: str) -> dict[str, str]:
@@ -3329,7 +3402,8 @@ class UniverseService:
     ) -> dict[str, Any]:
         expected_lcd = self._expected_latest_daily_candle_date(now_ist()).strftime("%Y-%m-%d")
         universe_rows = self._watchlist_v2_candidates(expected_lcd)
-        current_map, coverage_before = self._load_sector_mapping_dataset(universe_rows)
+        loaded = self._load_sector_mapping_dataset(universe_rows, include_meta=True)
+        current_map, coverage_before, source_origin, metrics_before = loaded
         only_set = {str(s).strip().upper() for s in (only_symbols or []) if str(s).strip()}
 
         candidates: list[tuple[str, str]] = []
@@ -3378,6 +3452,7 @@ class UniverseService:
                 ):
                     updated += 1
                 current_map[(symbol, exchange)] = norm
+                source_origin[(symbol, exchange)] = "sheet"
                 time.sleep(0.05)
         finally:
             client.close()
@@ -3427,7 +3502,8 @@ class UniverseService:
             except Exception:
                 logger.warning("sector mapping -> universe sync failed", exc_info=True)
 
-        _, coverage_after = self._load_sector_mapping_dataset(universe_rows)
+        metrics_after = self._sector_mapping_coverage_metrics(universe_rows, current_map, source_origin)
+        coverage_after = float(metrics_after.get("coverage_pct", 0.0) or 0.0)
         pending = max(0, scanned - min(scanned, fetches))
         return {
             "scanned": scanned,
@@ -3437,6 +3513,12 @@ class UniverseService:
             "pending": pending,
             "coveragePctBefore": coverage_before,
             "coveragePctAfter": coverage_after,
+            "eligible_universe_count": int(metrics_after.get("eligible_universe_count", 0) or 0),
+            "mapped_count": int(metrics_after.get("mapped_count", 0) or 0),
+            "unmapped_count": int(metrics_after.get("unmapped_count", 0) or 0),
+            "coverage_pct": coverage_after,
+            "source_breakdown_counts": dict(metrics_after.get("source_breakdown_counts") or {}),
+            "coverage_before_metrics": metrics_before,
             "apiCap": api_cap_i,
             "retryUnknown": bool(retry_unknown),
             "scopeSymbols": (len(only_set) if only_set else -1),
@@ -4268,6 +4350,11 @@ class UniverseService:
                 seed=phase2_selected,
             )
 
+        phase2_used_count = sum(1 for r in intraday_selected if str(r.get("source") or "").upper() == "PHASE2_INPLAY")
+        phase1_fallback_count = max(0, len(intraday_selected) - phase2_used_count)
+        phase2_eligible_count = len(intraday_phase2)
+        phase2_eligible_pct = (phase2_eligible_count * 100.0 / len(intraday_phase1)) if intraday_phase1 else 0.0
+
         swing_rows: list[list[object]] = []
         for i, r in enumerate(swing_selected, start=1):
             swing_rows.append(
@@ -4377,6 +4464,13 @@ class UniverseService:
             "ready": bool(len(swing_rows) > 0 or len(intraday_rows) > 0),
             "eligiblePool": len(intraday_candidates),
             "regimeV2": regime_v2,
+            "intradayPhaseStats": {
+                "phase2UsedCount": int(phase2_used_count),
+                "phase1FallbackCount": int(phase1_fallback_count),
+                "phase2EligibleCount": int(phase2_eligible_count),
+                "phase2EligiblePct": float(round(phase2_eligible_pct, 2)),
+                "intradaySelectedCount": int(len(intraday_rows)),
+            },
         }
         logger.info(
             "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f",
