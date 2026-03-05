@@ -51,12 +51,15 @@ create_job "autotrader-upstox-token-request" "35 3 * * 1-5" "$SERVICE_URL/jobs/u
 UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1200&intraday_lookback_trading_days=60"
 create_job "autotrader-universe-v2-refresh-0615" "15 6 * * 1-5" "$UNIVERSE_PIPELINE_URI" "{}" "30m"
 
-# Morning latest-1D update (Upstox daily candle expected after ~07:00 IST). Multiple spaced retries, no provisional intraday storage.
-CLOSE_UPDATE_URI="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
-create_job "autotrader-score-cache-update-close-0705" "5 7 * * 1-5" "$CLOSE_UPDATE_URI"
-create_job "autotrader-score-cache-update-close-0725" "25 7 * * 1-5" "$CLOSE_UPDATE_URI"
-create_job "autotrader-score-cache-update-close-0745" "45 7 * * 1-5" "$CLOSE_UPDATE_URI"
-create_job "autotrader-score-cache-update-close-0805" "5 8 * * 1-5" "$CLOSE_UPDATE_URI"
+# Morning latest 1D/5m update:
+# - early passes retry stale terminals to catch same-day provider catch-up
+# - final pass terminalizes no-progress stale rows so downstream score/watchlist runs don't stall
+CLOSE_UPDATE_URI_RETRY="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
+CLOSE_UPDATE_URI_TERMINAL="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=false&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
+create_job "autotrader-score-cache-update-close-0705" "5 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
+create_job "autotrader-score-cache-update-close-0725" "25 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
+create_job "autotrader-score-cache-update-close-0745" "45 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
+create_job "autotrader-score-cache-update-close-0805" "5 8 * * 1-5" "$CLOSE_UPDATE_URI_TERMINAL"
 
 # Score refresh after latest daily candle update window:
 # - computes v1 scoring
