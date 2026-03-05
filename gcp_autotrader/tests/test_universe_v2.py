@@ -817,3 +817,55 @@ def test_symbol_exchange_conflict_resolution_prefers_existing_instrument_key():
     assert conflicts == 1
     assert len(deduped) == 1
     assert deduped[0].primary_instrument_key == "NSE_EQ|INE732I01021"
+
+
+def test_sync_sector_mapping_to_universe_updates_targeted_symbols_only():
+    class FakeSheets:
+        def __init__(self):
+            self.rows = [
+                ["1", "AAA", "NSE", "CASH", "BOTH", "AUTO", "UNKNOWN", "1.0", "Y", "0", "", "", "", ""],
+                ["2", "BBB", "NSE", "CASH", "BOTH", "AUTO", "UNKNOWN", "1.0", "Y", "0", "", "", "", ""],
+            ]
+            self.writes: list[tuple[str, list[list[object]]]] = []
+
+        @staticmethod
+        def read_sheet_headers(sheet_name: str, header_row: int = 3) -> list[str]:
+            del sheet_name, header_row
+            return SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
+
+        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
+            del sheet_name, start_row
+            return [list(r) for r in self.rows]
+
+        @staticmethod
+        def col_to_a1(col: int) -> str:
+            letters = ""
+            c = int(col)
+            while c > 0:
+                c, rem = divmod(c - 1, 26)
+                letters = chr(65 + rem) + letters
+            return letters
+
+        def update_values(self, rng: str, values: list[list[object]]) -> None:
+            self.writes.append((rng, values))
+
+    svc = UniverseService(FakeSheets(), object(), object(), StrategySettings())
+    mapping = {
+        ("AAA", "NSE"): {
+            "sector": "IT",
+            "source": "nse_quote_equity",
+            "updatedAt": "2026-03-05 09:00:00",
+        }
+    }
+    out = svc._sync_sector_mapping_to_universe(mapping, only_symbols={"AAA"})
+    assert out["targeted"] == 1
+    assert out["updated"] == 1
+    assert len(svc.sheets.writes) == 3
+
+    sector_col = svc.sheets.writes[0][1]
+    source_col = svc.sheets.writes[1][1]
+    updated_col = svc.sheets.writes[2][1]
+    assert sector_col[0][0] == "IT"
+    assert source_col[0][0] == "nse_quote_equity"
+    assert updated_col[0][0] == "2026-03-05 09:00:00"
+    assert sector_col[1][0] == "UNKNOWN"

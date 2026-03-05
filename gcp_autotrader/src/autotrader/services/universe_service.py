@@ -10,6 +10,9 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
+
+import httpx
 
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
@@ -75,6 +78,23 @@ class UniverseService:
         "UNIVERSE_AGGRESSIVE_MAX_ATR_PCT_INTRADAY": "0.12",
         "UNIVERSE_AGGRESSIVE_MAX_GAP_RISK_MODE": "0.08",
     }
+    WATCHLIST_SECTOR_MAPPING_HEADERS: list[str] = [
+        "Symbol",
+        "Exchange",
+        "MacroSector",
+        "Sector",
+        "Industry",
+        "BasicIndustry",
+        "Source",
+        "UpdatedAt",
+    ]
+    WATCHLIST_SECTOR_COVERAGE_MIN_PCT: float = 85.0
+    WATCHLIST_DIVERSIFICATION_CAP_SHARE: float = 0.20
+    WATCHLIST_CORR_THRESHOLD: float = 0.85
+    PHASE2_BASELINE_DAYS: int = 60
+    PHASE2_MIN_SLOT_DAYS: int = 45
+    PHASE2_MIN_SLOT_COVERAGE_PCT: float = 75.0
+    PHASE2_MAX_ZERO_VOLUME_PCT: float = 10.0
 
     def __init__(
         self,
@@ -973,6 +993,8 @@ class UniverseService:
                 row.extend([""] * (min_cols - len(row)))
 
         existing_by_canonical: dict[str, int] = {}
+        existing_by_symbol_exchange: dict[tuple[str, str], int] = {}
+        enabled_seen_symbol_exchange: dict[tuple[str, str], int] = {}
         preferred_by_symbol_exchange: dict[tuple[str, str], str] = {}
         existing_symbols_count = 0
         duplicate_existing_canonical = 0
@@ -1003,6 +1025,19 @@ class UniverseService:
                     row[col_notes - 1] = f"{note_text}|{dedupe_note}".strip("|")
                 continue
             existing_by_canonical[canonical] = i
+            existing_by_symbol_exchange.setdefault((sym, exch), i)
+            sym_ex = (sym, exch)
+            is_enabled = str(row[col_enabled - 1]).strip().upper() == "Y"
+            if is_enabled and sym_ex in enabled_seen_symbol_exchange:
+                # Symbol/exchange should be unique among active universe rows.
+                primary_row = enabled_seen_symbol_exchange[sym_ex] + 4
+                row[col_enabled - 1] = "N"
+                note_text = row[col_notes - 1].strip() if len(row) >= col_notes else ""
+                dedupe_note = f"duplicate_symbol_exchange={sym}|{exch}|primary_row={primary_row}"
+                if dedupe_note not in note_text:
+                    row[col_notes - 1] = f"{note_text}|{dedupe_note}".strip("|")
+            elif is_enabled:
+                enabled_seen_symbol_exchange[sym_ex] = i
             ik = row[col_instrument_key - 1].strip().upper() if len(row) >= col_instrument_key else ""
             if ik and str(row[col_enabled - 1]).strip().upper() == "Y":
                 preferred_by_symbol_exchange.setdefault((sym, exch), ik)
@@ -1084,9 +1119,12 @@ class UniverseService:
         for m in masters:
             canonical = str(m.canonical_id).strip().upper()
             existing_idx = existing_by_canonical.get(canonical)
+            if existing_idx is None:
+                existing_idx = existing_by_symbol_exchange.get((str(m.symbol).upper(), str(m.primary_exchange).upper()))
             if existing_idx is not None:
                 row = existing_rows[existing_idx]
                 prev = list(row)
+                old_canonical = row[col_canonical - 1].strip().upper() if len(row) >= col_canonical else ""
                 row[col_symbol - 1] = str(m.symbol).upper()
                 row[col_exchange - 1] = str(m.primary_exchange).upper()
                 row[col_provider - 1] = "UPSTOX"
@@ -1099,6 +1137,10 @@ class UniverseService:
                 row[col_secondary_key - 1] = str(m.secondary_instrument_key)
                 if row[col_notes - 1].strip() == "":
                     row[col_notes - 1] = f"isin={m.isin}|name={m.name}|source=upstox_bod"
+                if old_canonical and old_canonical != canonical and existing_by_canonical.get(old_canonical) == existing_idx:
+                    del existing_by_canonical[old_canonical]
+                existing_by_canonical[canonical] = existing_idx
+                existing_by_symbol_exchange[(str(m.symbol).upper(), str(m.primary_exchange).upper())] = existing_idx
                 if row != prev:
                     updated_existing += 1
                 continue
@@ -1130,6 +1172,7 @@ class UniverseService:
             appended_rows.append(row)
             appended_symbols.append(str(m.symbol).upper())
             existing_by_canonical[canonical] = len(existing_rows) + len(appended_rows) - 1
+            existing_by_symbol_exchange[(str(m.symbol).upper(), str(m.primary_exchange).upper())] = len(existing_rows) + len(appended_rows) - 1
             next_idx += 1
 
         if replace:
@@ -1334,6 +1377,13 @@ class UniverseService:
         window_start = td_window[0] if td_window else expected
         only_set = {str(s).strip().upper() for s in (only_symbols or []) if str(s).strip()}
         filter_enabled = bool(only_symbols is not None)
+
+        existing_index_rows: list[list[str]] = []
+        if filter_enabled:
+            try:
+                existing_index_rows = self.sheets.read_sheet_rows(SheetNames.SCORE_CACHE_5M, 4)
+            except Exception:
+                existing_index_rows = []
 
         scanned = 0
         fetches = 0
@@ -1541,9 +1591,40 @@ class UniverseService:
                 )
             )
 
+        write_rows: list[list[object]] = index_rows
+        if filter_enabled and existing_index_rows:
+            def _row_key(r: list[object]) -> tuple[str, str, str]:
+                symbol = str(r[0]).strip().upper() if len(r) > 0 else ""
+                exchange = str(r[1]).strip().upper() if len(r) > 1 else "NSE"
+                segment = str(r[2]).strip().upper() if len(r) > 2 else "CASH"
+                return (symbol, exchange, segment)
+
+            upd_by_key: dict[tuple[str, str, str], list[object]] = {}
+            for r in index_rows:
+                k = _row_key(r)
+                if k[0]:
+                    upd_by_key[k] = r
+
+            merged: list[list[object]] = []
+            seen: set[tuple[str, str, str]] = set()
+            for er in existing_index_rows:
+                k = _row_key(er)
+                if not k[0]:
+                    continue
+                if k in upd_by_key:
+                    merged.append(upd_by_key[k])
+                else:
+                    merged.append(list(er))
+                seen.add(k)
+            for k, r in upd_by_key.items():
+                if k in seen:
+                    continue
+                merged.append(r)
+            write_rows = merged
+
         sheet_write_error = ""
         try:
-            self.sheets.replace_score_cache_5m_index(index_rows)
+            self.sheets.replace_score_cache_5m_index(write_rows)
         except Exception as exc:
             # Do not fail the whole backfill run on transient Sheets transport errors.
             # Cache files are already written to GCS and should keep progressing.
@@ -2002,7 +2083,7 @@ class UniverseService:
         cache_out = self._update_universe_v2_cache_and_stats(
             api_cap=max(0, candle_api_cap),
             run_full_backfill=bool(run_full_backfill),
-            priority_symbols=(list(appended_symbols) if isinstance(appended_symbols, list) else None),
+            priority_symbols=None,
             fetch_only_symbols=fetch_only_symbols,
         )
         if write_v2_eligibility:
@@ -2719,6 +2800,650 @@ class UniverseService:
             return "INTRA_FINAL"
         return "INTRA_ADHOC"
 
+    @staticmethod
+    def _watchlist_volatility_bucket(atr_pct: float) -> str:
+        x = float(atr_pct or 0.0)
+        if x < 0.01:
+            return "LOW"
+        if x < 0.02:
+            return "MID"
+        if x < 0.035:
+            return "HIGH"
+        return "EXTREME"
+
+    @staticmethod
+    def _watchlist_gap_bucket(gap_risk: float) -> str:
+        x = float(gap_risk or 0.0)
+        if x < 0.01:
+            return "LOW"
+        if x < 0.02:
+            return "MID"
+        if x < 0.04:
+            return "HIGH"
+        return "EXTREME"
+
+    @staticmethod
+    def _watchlist_cap_count(target: int, cap_share: float) -> int:
+        return max(1, int(math.floor(max(1, int(target)) * max(0.05, float(cap_share)))))
+
+    @staticmethod
+    def _daily_returns_by_date(candles: list[list[object]], *, lookback: int = 60) -> dict[str, float]:
+        norm = UniverseService._candles_sorted_unique(candles)
+        if len(norm) < 2:
+            return {}
+        vals: list[tuple[str, float]] = []
+        for i in range(1, len(norm)):
+            ts = parse_any_ts(norm[i][0])
+            if ts is None:
+                continue
+            prev_close = float(norm[i - 1][4] or 0.0)
+            close = float(norm[i][4] or 0.0)
+            if prev_close <= 0:
+                continue
+            vals.append((ts.astimezone(IST).date().isoformat(), (close / prev_close) - 1.0))
+        if lookback > 0:
+            vals = vals[-int(lookback):]
+        return {k: float(v) for k, v in vals}
+
+    @staticmethod
+    def _returns_corr(a: dict[str, float], b: dict[str, float]) -> float:
+        if not a or not b:
+            return 0.0
+        common = sorted(set(a.keys()) & set(b.keys()))
+        if len(common) < 20:
+            return 0.0
+        xa = [float(a[k]) for k in common]
+        xb = [float(b[k]) for k in common]
+        ma = float(statistics.mean(xa))
+        mb = float(statistics.mean(xb))
+        da = [x - ma for x in xa]
+        db = [x - mb for x in xb]
+        va = float(sum(x * x for x in da))
+        vb = float(sum(x * x for x in db))
+        if va <= 1e-12 or vb <= 1e-12:
+            return 0.0
+        cov = float(sum(x * y for x, y in zip(da, db)))
+        return float(cov / math.sqrt(va * vb))
+
+    def _select_with_diversification_and_corr(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        target: int,
+        sector_coverage_pct: float,
+        seed: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if target <= 0:
+            return []
+        ordered = sorted(candidates, key=lambda x: (-float(x.get("score", 0.0)), str(x.get("symbol", ""))))
+        cap = self._watchlist_cap_count(target, self.WATCHLIST_DIVERSIFICATION_CAP_SHARE)
+        coverage_good = float(sector_coverage_pct) >= float(self.WATCHLIST_SECTOR_COVERAGE_MIN_PCT)
+        bucket_counts: dict[str, int] = defaultdict(int)
+        picked: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for base in (seed or []):
+            if len(picked) >= target:
+                break
+            sym = str(base.get("symbol") or "")
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            picked.append(dict(base))
+            existing_bucket = str(base.get("diversificationBucket") or "").strip()
+            if existing_bucket:
+                bucket_counts[existing_bucket] += 1
+            else:
+                sector = str(base.get("sector") or "").strip().upper()
+                mapped = bool(sector and sector != "UNKNOWN")
+                if mapped:
+                    bucket_counts[f"SECTOR:{sector}"] += 1
+                elif coverage_good:
+                    bucket_counts["SECTOR:UNKNOWN"] += 1
+                else:
+                    liq = str(base.get("liquidityBucket") or "UNK").strip().upper() or "UNK"
+                    vb = self._watchlist_volatility_bucket(float(base.get("atrPct14D") or 0.0))
+                    gb = self._watchlist_gap_bucket(float(base.get("gapRisk60D") or 0.0))
+                    bucket_counts[f"PROXY:{liq}|{vb}|{gb}"] += 1
+        if len(picked) >= target:
+            return picked[:target]
+        for row in ordered:
+            if len(picked) >= target:
+                break
+            sym = str(row.get("symbol") or "")
+            if not sym or sym in seen:
+                continue
+            sector = str(row.get("sector") or "").strip().upper()
+            mapped = bool(sector and sector != "UNKNOWN")
+            if mapped:
+                bucket_key = f"SECTOR:{sector}"
+            elif coverage_good:
+                bucket_key = "SECTOR:UNKNOWN"
+            else:
+                liq = str(row.get("liquidityBucket") or "UNK").strip().upper() or "UNK"
+                vb = self._watchlist_volatility_bucket(float(row.get("atrPct14D") or 0.0))
+                gb = self._watchlist_gap_bucket(float(row.get("gapRisk60D") or 0.0))
+                bucket_key = f"PROXY:{liq}|{vb}|{gb}"
+
+            if bucket_counts.get(bucket_key, 0) >= cap:
+                continue
+
+            cur_rets = row.get("returnsByDate") or {}
+            max_corr = 0.0
+            violated = False
+            for p in picked:
+                corr = abs(self._returns_corr(cur_rets, p.get("returnsByDate") or {}))
+                if corr > max_corr:
+                    max_corr = corr
+                if corr >= float(self.WATCHLIST_CORR_THRESHOLD):
+                    violated = True
+                    break
+            if violated:
+                continue
+
+            new_row = dict(row)
+            new_row["maxCorrToSelected"] = float(round(max_corr, 6))
+            new_row["diversificationBucket"] = bucket_key
+            picked.append(new_row)
+            seen.add(sym)
+            bucket_counts[bucket_key] += 1
+            if len(picked) >= target:
+                break
+        return picked
+
+    def _phase2_required_slots(
+        self,
+        *,
+        today_bars: list[list[object]],
+        interval_min: int,
+    ) -> list[str]:
+        if not today_bars:
+            return []
+        slots = []
+        for c in today_bars:
+            ts = parse_any_ts(c[0])
+            if ts is None:
+                continue
+            slots.append(ts.astimezone(IST).strftime("%H:%M"))
+        unique_slots = sorted(set(slots))
+        if not unique_slots:
+            return []
+        required = set(unique_slots[-4:])  # VWAP slope / reversal use last bars.
+        if int(interval_min) == 5:
+            required.update({"09:15", "09:20", "09:25"})  # ORB first 15m.
+        return sorted(required)
+
+    def _phase2_eligibility(
+        self,
+        *,
+        bars: list[list[object]],
+        now_i: datetime,
+        interval_min: int,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "eligible": False,
+            "reason": "UNKNOWN",
+            "phase2BaselineCoveragePct": 0.0,
+            "requiredSlots": 0,
+            "slotsWithBaseline": 0,
+            "currentSlot": "",
+            "currentVolume": 0.0,
+            "baselineMedianVolume": 0.0,
+        }
+        if not bars:
+            out["reason"] = "TODAY_BARS_MISSING"
+            return out
+        today = now_i.astimezone(IST).date()
+        today_bars: list[list[object]] = []
+        hist_by_day_slot: dict[str, dict[str, float]] = defaultdict(dict)
+        for c in bars:
+            ts = parse_any_ts(c[0])
+            if ts is None:
+                continue
+            ti = ts.astimezone(IST)
+            slot = ti.strftime("%H:%M")
+            vol = float(c[5] or 0.0)
+            if ti.date() == today:
+                today_bars.append(c)
+            elif ti.date() < today:
+                hist_by_day_slot[ti.date().isoformat()][slot] = vol
+        today_bars = self._candles_sorted_unique(today_bars)
+        if len(today_bars) < 4:
+            out["reason"] = "TODAY_BARS_MISSING"
+            return out
+
+        required_slots = self._phase2_required_slots(today_bars=today_bars, interval_min=interval_min)
+        out["requiredSlots"] = len(required_slots)
+        today_slot_set: set[str] = set()
+        for c in today_bars:
+            ts = parse_any_ts(c[0])
+            if ts is None:
+                continue
+            today_slot_set.add(ts.astimezone(IST).strftime("%H:%M"))
+        if any(s not in today_slot_set for s in required_slots):
+            out["reason"] = "TODAY_BARS_MISSING"
+            return out
+
+        hist_days_desc = sorted(hist_by_day_slot.keys(), reverse=True)
+        hist_days_desc = hist_days_desc[: int(self.PHASE2_BASELINE_DAYS)]
+        if not hist_days_desc:
+            out["reason"] = "BASELINE_INCOMPLETE"
+            return out
+
+        slots_with_baseline = 0
+        zero_pct_max = 0.0
+        current_slot = required_slots[-1] if required_slots else ""
+        last_ts = parse_any_ts(today_bars[-1][0])
+        if last_ts is not None:
+            current_slot = last_ts.astimezone(IST).strftime("%H:%M")
+        out["currentSlot"] = current_slot
+        out["currentVolume"] = float(today_bars[-1][5] or 0.0)
+        current_slot_median = 0.0
+
+        for slot in required_slots:
+            vals: list[float] = []
+            weights: list[float] = []
+            zero_count = 0
+            for i, d in enumerate(hist_days_desc):
+                slot_vol = hist_by_day_slot.get(d, {}).get(slot)
+                if slot_vol is None:
+                    continue
+                v = float(slot_vol)
+                vals.append(v)
+                weights.append(2.0 if i < 20 else 1.0)
+                if v <= 0:
+                    zero_count += 1
+            if len(vals) >= int(self.PHASE2_MIN_SLOT_DAYS):
+                slots_with_baseline += 1
+            if vals:
+                zero_pct = (zero_count * 100.0) / float(len(vals))
+                zero_pct_max = max(zero_pct_max, zero_pct)
+            med = self._weighted_median(vals, weights) if vals else 0.0
+            if slot == current_slot:
+                current_slot_median = float(med)
+
+        out["slotsWithBaseline"] = int(slots_with_baseline)
+        coverage_pct = (slots_with_baseline * 100.0 / len(required_slots)) if required_slots else 0.0
+        out["phase2BaselineCoveragePct"] = float(round(coverage_pct, 2))
+        out["baselineMedianVolume"] = float(current_slot_median)
+
+        if coverage_pct < float(self.PHASE2_MIN_SLOT_COVERAGE_PCT):
+            out["reason"] = "BASELINE_INCOMPLETE"
+            return out
+        if slots_with_baseline < len(required_slots):
+            out["reason"] = "BASELINE_INCOMPLETE"
+            return out
+        if current_slot_median <= 0:
+            out["reason"] = "BASELINE_NONPOSITIVE"
+            return out
+        if zero_pct_max > float(self.PHASE2_MAX_ZERO_VOLUME_PCT):
+            out["reason"] = "BASELINE_ZERO_VOL_HIGH"
+            return out
+
+        out["eligible"] = True
+        out["reason"] = ""
+        return out
+
+    def _load_sector_mapping_dataset(self, universe_rows: list[dict[str, Any]]) -> tuple[dict[tuple[str, str], dict[str, str]], float]:
+        mapping: dict[tuple[str, str], dict[str, str]] = {}
+        try:
+            self.sheets.ensure_sheet_headers_append(
+                SheetNames.SECTOR_MAPPING,
+                self.WATCHLIST_SECTOR_MAPPING_HEADERS,
+                header_row=3,
+            )
+            rows = self.sheets.read_sheet_rows(SheetNames.SECTOR_MAPPING, 4)
+        except Exception:
+            rows = []
+
+        for row in rows:
+            symbol = row[0].strip().upper() if len(row) > 0 else ""
+            exchange = row[1].strip().upper() if len(row) > 1 else "NSE"
+            if not symbol:
+                continue
+            mapping[(symbol, exchange)] = {
+                "macroSector": row[2].strip().upper() if len(row) > 2 else "UNKNOWN",
+                "sector": row[3].strip().upper() if len(row) > 3 else "UNKNOWN",
+                "industry": row[4].strip().upper() if len(row) > 4 else "UNKNOWN",
+                "basicIndustry": row[5].strip().upper() if len(row) > 5 else "UNKNOWN",
+                "source": row[6].strip() if len(row) > 6 else "unknown",
+                "updatedAt": row[7].strip() if len(row) > 7 else "",
+            }
+
+        if not mapping:
+            try:
+                payload = self.gcs.read_json("reference/sector_mapping/nse_symbol_classification.json", default=[])
+            except Exception:
+                payload = []
+            items = payload if isinstance(payload, list) else (payload.get("rows", []) if isinstance(payload, dict) else [])
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                symbol = str(item.get("symbol") or "").strip().upper()
+                exchange = str(item.get("exchange") or "NSE").strip().upper()
+                if not symbol:
+                    continue
+                mapping[(symbol, exchange)] = {
+                    "macroSector": str(item.get("macro_sector") or item.get("macroSector") or "UNKNOWN").strip().upper(),
+                    "sector": str(item.get("sector") or "UNKNOWN").strip().upper(),
+                    "industry": str(item.get("industry") or "UNKNOWN").strip().upper(),
+                    "basicIndustry": str(item.get("basic_industry") or item.get("basicIndustry") or "UNKNOWN").strip().upper(),
+                    "source": str(item.get("source") or "nse").strip() or "nse",
+                    "updatedAt": str(item.get("updated_at") or item.get("updatedAt") or ""),
+                }
+
+        if not mapping:
+            for row in universe_rows:
+                symbol = str(row.get("symbol") or "").strip().upper()
+                exchange = str(row.get("exchange") or "NSE").strip().upper()
+                if not symbol:
+                    continue
+                sector = str(row.get("sector") or "UNKNOWN").strip().upper() or "UNKNOWN"
+                mapping[(symbol, exchange)] = {
+                    "macroSector": "UNKNOWN",
+                    "sector": sector,
+                    "industry": "UNKNOWN",
+                    "basicIndustry": "UNKNOWN",
+                    "source": str(row.get("sectorSource") or "unknown").strip() or "unknown",
+                    "updatedAt": str(row.get("sectorUpdatedAt") or ""),
+                }
+            try:
+                rows_to_write = [
+                    [
+                        sym,
+                        ex,
+                        v.get("macroSector", "UNKNOWN"),
+                        v.get("sector", "UNKNOWN"),
+                        v.get("industry", "UNKNOWN"),
+                        v.get("basicIndustry", "UNKNOWN"),
+                        v.get("source", "unknown"),
+                        v.get("updatedAt", ""),
+                    ]
+                    for (sym, ex), v in sorted(mapping.items())
+                    if sym
+                ]
+                self.sheets.replace_sector_mapping(rows_to_write)
+            except Exception:
+                logger.debug("sector_mapping replace failed", exc_info=True)
+
+        eligible = [
+            r
+            for r in universe_rows
+            if bool(r.get("enabled")) and bool(r.get("fresh")) and (bool(r.get("eligibleSwing")) or bool(r.get("eligibleIntraday")))
+        ]
+        mapped = 0
+        for r in eligible:
+            key = (str(r.get("symbol") or "").strip().upper(), str(r.get("exchange") or "NSE").strip().upper())
+            m = mapping.get(key) or {}
+            if str(m.get("sector") or "").strip().upper() not in {"", "UNKNOWN"}:
+                mapped += 1
+        coverage_pct = (mapped * 100.0 / len(eligible)) if eligible else 0.0
+        return mapping, float(round(coverage_pct, 2))
+
+    @staticmethod
+    def _normalize_sector_mapping_row(raw: dict[str, Any], *, source: str) -> dict[str, str]:
+        macro = str(raw.get("macroSector") or raw.get("macro_sector") or raw.get("macro") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        sector = str(raw.get("sector") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        industry = str(raw.get("industry") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        basic = str(raw.get("basicIndustry") or raw.get("basic_industry") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        return {
+            "macroSector": macro,
+            "sector": sector,
+            "industry": industry,
+            "basicIndustry": basic,
+            "source": str(source or raw.get("source") or "unknown").strip() or "unknown",
+            "updatedAt": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @staticmethod
+    def _extract_sector_from_nse_quote(payload: dict[str, Any]) -> dict[str, str] | None:
+        info = payload.get("industryInfo")
+        if not isinstance(info, dict):
+            info = {}
+        md = payload.get("metadata")
+        if not isinstance(md, dict):
+            md = {}
+        out = {
+            "macroSector": str(info.get("macro") or info.get("macroSector") or md.get("macro_sector") or "UNKNOWN").strip().upper(),
+            "sector": str(info.get("sector") or md.get("sector") or "UNKNOWN").strip().upper(),
+            "industry": str(info.get("industry") or md.get("industry") or "UNKNOWN").strip().upper(),
+            "basicIndustry": str(info.get("basicIndustry") or info.get("basic_industry") or md.get("basicIndustry") or "UNKNOWN").strip().upper(),
+        }
+        if all(v in {"", "UNKNOWN"} for v in out.values()):
+            return None
+        return out
+
+    def _fetch_nse_quote_sector(self, client: httpx.Client, symbol: str) -> dict[str, str] | None:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return None
+        api_url = f"https://www.nseindia.com/api/quote-equity?symbol={quote(sym, safe='')}"
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://www.nseindia.com/get-quotes/equity?symbol=" + quote(sym, safe=""),
+            "Origin": "https://www.nseindia.com",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        for _ in range(3):
+            resp = client.get(api_url, headers=headers)
+            if resp.status_code in {401, 403}:
+                client.get("https://www.nseindia.com", headers={"User-Agent": "Mozilla/5.0"})
+                time.sleep(0.15)
+                continue
+            if resp.status_code == 404:
+                return None
+            if resp.status_code < 200 or resp.status_code >= 300:
+                return None
+            try:
+                payload = resp.json()
+            except Exception:
+                return None
+            if not isinstance(payload, dict):
+                return None
+            return self._extract_sector_from_nse_quote(payload)
+        return None
+
+    def _sync_sector_mapping_to_universe(
+        self,
+        mapping: dict[tuple[str, str], dict[str, str]],
+        *,
+        only_symbols: set[str] | None = None,
+    ) -> dict[str, int]:
+        headers = self.sheets.read_sheet_headers(SheetNames.UNIVERSE, header_row=3)
+        h2i: dict[str, int] = {}
+        for i, h in enumerate(headers, start=1):
+            key = str(h).strip()
+            if key and key not in h2i:
+                h2i[key] = i
+
+        col_symbol = int(h2i.get("Symbol", 2))
+        col_exchange = int(h2i.get("Exchange", 3))
+        col_sector = int(h2i.get("Sector", 7))
+        col_sector_source = int(h2i.get("Sector Source", 13))
+        col_sector_updated = int(h2i.get("Sector Updated At", 14))
+
+        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        if not rows:
+            return {"targeted": 0, "updated": 0}
+
+        end_row = 3 + len(rows)
+        sector_vals: list[list[Any]] = []
+        source_vals: list[list[Any]] = []
+        updated_vals: list[list[Any]] = []
+        targeted = 0
+        updated = 0
+
+        for row in rows:
+            symbol = row[col_symbol - 1].strip().upper() if len(row) >= col_symbol else ""
+            exchange = row[col_exchange - 1].strip().upper() if len(row) >= col_exchange else "NSE"
+            old_sector = row[col_sector - 1].strip().upper() if len(row) >= col_sector else "UNKNOWN"
+            old_source = row[col_sector_source - 1].strip() if len(row) >= col_sector_source else ""
+            old_updated = row[col_sector_updated - 1].strip() if len(row) >= col_sector_updated else ""
+
+            new_sector = old_sector or "UNKNOWN"
+            new_source = old_source
+            new_updated = old_updated
+            if symbol and (not only_symbols or symbol in only_symbols):
+                targeted += 1
+                mapped = mapping.get((symbol, exchange)) or {}
+                m_sector = str(mapped.get("sector") or "").strip().upper()
+                m_source = str(mapped.get("source") or "").strip()
+                m_updated = str(mapped.get("updatedAt") or "").strip()
+                if m_sector:
+                    new_sector = m_sector
+                if m_source:
+                    new_source = m_source
+                if m_updated:
+                    new_updated = m_updated
+
+            if (new_sector != (old_sector or "UNKNOWN")) or (new_source != old_source) or (new_updated != old_updated):
+                updated += 1
+
+            sector_vals.append([new_sector or "UNKNOWN"])
+            source_vals.append([new_source])
+            updated_vals.append([new_updated])
+
+        if updated > 0:
+            self.sheets.update_values(
+                f"'{SheetNames.UNIVERSE}'!{self.sheets.col_to_a1(col_sector)}4:{self.sheets.col_to_a1(col_sector)}{end_row}",
+                sector_vals,
+            )
+            self.sheets.update_values(
+                f"'{SheetNames.UNIVERSE}'!{self.sheets.col_to_a1(col_sector_source)}4:{self.sheets.col_to_a1(col_sector_source)}{end_row}",
+                source_vals,
+            )
+            self.sheets.update_values(
+                f"'{SheetNames.UNIVERSE}'!{self.sheets.col_to_a1(col_sector_updated)}4:{self.sheets.col_to_a1(col_sector_updated)}{end_row}",
+                updated_vals,
+            )
+
+        return {"targeted": int(targeted), "updated": int(updated)}
+
+    def refresh_sector_mapping(
+        self,
+        *,
+        api_cap: int = 600,
+        retry_unknown: bool = False,
+        only_symbols: list[str] | None = None,
+        sync_universe: bool = True,
+    ) -> dict[str, Any]:
+        expected_lcd = self._expected_latest_daily_candle_date(now_ist()).strftime("%Y-%m-%d")
+        universe_rows = self._watchlist_v2_candidates(expected_lcd)
+        current_map, coverage_before = self._load_sector_mapping_dataset(universe_rows)
+        only_set = {str(s).strip().upper() for s in (only_symbols or []) if str(s).strip()}
+
+        candidates: list[tuple[str, str]] = []
+        for r in universe_rows:
+            symbol = str(r.get("symbol") or "").strip().upper()
+            exchange = str(r.get("exchange") or "NSE").strip().upper()
+            if not symbol or exchange != "NSE":
+                continue
+            if only_set and symbol not in only_set:
+                continue
+            cur = current_map.get((symbol, exchange)) or {}
+            cur_sector = str(cur.get("sector") or "").strip().upper()
+            if cur_sector and cur_sector != "UNKNOWN" and not bool(retry_unknown):
+                continue
+            candidates.append((symbol, exchange))
+
+        scanned = len(candidates)
+        fetches = 0
+        updated = 0
+        unresolved = 0
+        api_cap_i = max(0, int(api_cap))
+        client = httpx.Client(timeout=20.0, follow_redirects=True)
+        try:
+            try:
+                client.get("https://www.nseindia.com", headers={"User-Agent": "Mozilla/5.0"})
+            except Exception:
+                pass
+            for symbol, exchange in candidates:
+                if fetches >= api_cap_i:
+                    break
+                fetches += 1
+                mapped = None
+                try:
+                    mapped = self._fetch_nse_quote_sector(client, symbol)
+                except Exception:
+                    mapped = None
+                if not mapped:
+                    unresolved += 1
+                    continue
+                norm = self._normalize_sector_mapping_row(mapped, source="nse_quote_equity")
+                existing = current_map.get((symbol, exchange)) or {}
+                if (
+                    str(existing.get("sector") or "").strip().upper() != str(norm.get("sector") or "").strip().upper()
+                    or str(existing.get("industry") or "").strip().upper() != str(norm.get("industry") or "").strip().upper()
+                    or str(existing.get("basicIndustry") or "").strip().upper() != str(norm.get("basicIndustry") or "").strip().upper()
+                ):
+                    updated += 1
+                current_map[(symbol, exchange)] = norm
+                time.sleep(0.05)
+        finally:
+            client.close()
+
+        out_rows = [
+            [
+                sym,
+                ex,
+                v.get("macroSector", "UNKNOWN"),
+                v.get("sector", "UNKNOWN"),
+                v.get("industry", "UNKNOWN"),
+                v.get("basicIndustry", "UNKNOWN"),
+                v.get("source", "unknown"),
+                v.get("updatedAt", ""),
+            ]
+            for (sym, ex), v in sorted(current_map.items())
+            if sym
+        ]
+        self.sheets.replace_sector_mapping(out_rows)
+
+        # Persist a reusable JSON snapshot for future runs.
+        try:
+            self.gcs.write_json(
+                "reference/sector_mapping/nse_symbol_classification.json",
+                [
+                    {
+                        "symbol": r[0],
+                        "exchange": r[1],
+                        "macro_sector": r[2],
+                        "sector": r[3],
+                        "industry": r[4],
+                        "basic_industry": r[5],
+                        "source": r[6],
+                        "updated_at": r[7],
+                    }
+                    for r in out_rows
+                    if len(r) >= 8
+                ],
+            )
+        except Exception:
+            logger.debug("sector mapping GCS snapshot write failed", exc_info=True)
+
+        universe_sync = {"targeted": 0, "updated": 0}
+        if bool(sync_universe):
+            try:
+                universe_sync = self._sync_sector_mapping_to_universe(current_map, only_symbols=(only_set if only_set else None))
+            except Exception:
+                logger.warning("sector mapping -> universe sync failed", exc_info=True)
+
+        _, coverage_after = self._load_sector_mapping_dataset(universe_rows)
+        pending = max(0, scanned - min(scanned, fetches))
+        return {
+            "scanned": scanned,
+            "fetches": fetches,
+            "updated": updated,
+            "unresolved": unresolved,
+            "pending": pending,
+            "coveragePctBefore": coverage_before,
+            "coveragePctAfter": coverage_after,
+            "apiCap": api_cap_i,
+            "retryUnknown": bool(retry_unknown),
+            "scopeSymbols": (len(only_set) if only_set else -1),
+            "universeSyncTargeted": int(universe_sync.get("targeted", 0) or 0),
+            "universeSyncUpdated": int(universe_sync.get("updated", 0) or 0),
+        }
+
     def _watchlist_index_daily_cache_path(self, instrument_key: str) -> str:
         safe = self._safe_key_fragment(instrument_key)
         return f"cache/watchlist_v2/index_daily/{safe}.json"
@@ -2939,6 +3664,11 @@ class UniverseService:
         header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
         rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
         col = {k: int(v) for k, v in header_map.items()}
+        sector_col = col.get("Sector")
+        sector_source_col = col.get("Sector Source")
+        sector_updated_col = col.get("Sector Updated At")
+        turnover_med_col = col.get("Turnover Med 60D")
+        atr14_col = col.get("ATR 14")
         out: list[dict[str, Any]] = []
         for row in rows:
             symbol = row[col["Symbol"] - 1].strip().upper() if len(row) >= col["Symbol"] else ""
@@ -2948,9 +3678,14 @@ class UniverseService:
             segment = row[col["Segment"] - 1].strip().upper() if len(row) >= col["Segment"] else "CASH"
             enabled = row[col["Enabled"] - 1].strip().upper() if len(row) >= col["Enabled"] else "Y"
             instrument_key = row[col["Instrument Key"] - 1].strip() if len(row) >= col["Instrument Key"] else ""
+            sector = row[sector_col - 1].strip().upper() if sector_col and len(row) >= sector_col else "UNKNOWN"
+            sector_source = row[sector_source_col - 1].strip() if sector_source_col and len(row) >= sector_source_col else ""
+            sector_updated_at = row[sector_updated_col - 1].strip() if sector_updated_col and len(row) >= sector_updated_col else ""
             eligible_swing = row[col["Eligible Swing"] - 1].strip().upper() == "Y" if len(row) >= col["Eligible Swing"] else False
             eligible_intraday = row[col["Eligible Intraday"] - 1].strip().upper() == "Y" if len(row) >= col["Eligible Intraday"] else False
             turnover_rank = row[col["Turnover Rank 60D"] - 1].strip() if len(row) >= col["Turnover Rank 60D"] else ""
+            turnover_med = row[turnover_med_col - 1].strip() if turnover_med_col and len(row) >= turnover_med_col else ""
+            atr_14 = row[atr14_col - 1].strip() if atr14_col and len(row) >= atr14_col else ""
             liquidity_bucket = row[col["Liquidity Bucket"] - 1].strip().upper() if len(row) >= col["Liquidity Bucket"] else ""
             atr_pct = row[col["ATR Pct 14D"] - 1].strip() if len(row) >= col["ATR Pct 14D"] else ""
             gap_risk = row[col["Gap Risk 60D"] - 1].strip() if len(row) >= col["Gap Risk 60D"] else ""
@@ -2969,10 +3704,15 @@ class UniverseService:
                     "segment": segment,
                     "enabled": enabled == "Y",
                     "instrumentKey": instrument_key,
+                    "sector": sector or "UNKNOWN",
+                    "sectorSource": sector_source,
+                    "sectorUpdatedAt": sector_updated_at,
                     "eligibleSwing": eligible_swing,
                     "eligibleIntraday": eligible_intraday,
                     "turnoverRank60D": int(float(turnover_rank)) if turnover_rank else None,
+                    "turnoverMed60D": float(turnover_med) if turnover_med else 0.0,
                     "liquidityBucket": liquidity_bucket,
+                    "atr14": float(atr_14) if atr_14 else 0.0,
                     "atrPct14D": float(atr_pct) if atr_pct else 0.0,
                     "gapRisk60D": float(gap_risk) if gap_risk else 0.0,
                     "priceLast": float(price_last) if price_last else 0.0,
@@ -3019,7 +3759,7 @@ class UniverseService:
                 logger.warning("watchlist_v2 symbol intraday fetch failed symbol=%s key=%s", symbol, key, exc_info=True)
         return self._completed_intraday_bars(merged, now_i, interval_min=interval)
 
-    def _watchlist_volume_shock(self, bars: list[list[object]], now_i: datetime) -> tuple[float, float]:
+    def _watchlist_volume_shock(self, bars: list[list[object]], now_i: datetime, *, baseline_override: float | None = None) -> tuple[float, float]:
         if not bars:
             return 1.0, 1.0
         today = now_i.astimezone(IST).date()
@@ -3028,6 +3768,10 @@ class UniverseService:
             return 1.0, 1.0
         slot = ts_last.astimezone(IST).strftime("%H:%M")
         current_vol = float(bars[-1][5] or 0.0)
+        if baseline_override is not None and float(baseline_override) > 0:
+            ratio = float(current_vol / float(baseline_override))
+            component = self._norm_minmax_clip(ratio, 0.5, 3.0)
+            return ratio, component
         per_day: dict[str, float] = {}
         for c in bars:
             ts = parse_any_ts(c[0])
@@ -3173,16 +3917,27 @@ class UniverseService:
         del regime
         now_i = now_ist()
         expected_lcd = self._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
-        # Force a stable, locale-independent timestamp text for sheet auditability.
         run_ts = now_i.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
         run_date = now_i.astimezone(IST).strftime("%Y-%m-%d")
         run_block = self._run_time_block(now_i, premarket=premarket)
         timeframe = "5m" if str(intraday_timeframe or "").strip().lower() != "15m" else "15m"
+        interval_min = 5 if timeframe == "5m" else 15
 
         controls = self._build_universe_v2_controls()
         mode_thresholds = controls.active_thresholds()
 
         all_rows = self._watchlist_v2_candidates(expected_lcd)
+        sector_map, sector_mapping_coverage_pct = self._load_sector_mapping_dataset(all_rows)
+        for row in all_rows:
+            key = (str(row.get("symbol") or "").strip().upper(), str(row.get("exchange") or "NSE").strip().upper())
+            mapped = sector_map.get(key) or {}
+            fallback_sector = str(row.get("sector") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            row["macroSector"] = str(mapped.get("macroSector") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            row["sector"] = str(mapped.get("sector") or fallback_sector or "UNKNOWN").strip().upper() or "UNKNOWN"
+            row["industry"] = str(mapped.get("industry") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            row["basicIndustry"] = str(mapped.get("basicIndustry") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            row["sectorMapSource"] = str(mapped.get("source") or row.get("sectorSource") or "unknown").strip() or "unknown"
+
         enabled_rows = [r for r in all_rows if bool(r.get("enabled"))]
         classified_rows = [r for r in enabled_rows if bool(r.get("decisionPresent"))]
         today_classified_rows = [r for r in classified_rows if bool(r.get("fresh"))]
@@ -3226,6 +3981,7 @@ class UniverseService:
                         "runTimeBlock": run_block,
                         "timeframe": timeframe,
                         "expectedLCD": expected_lcd,
+                        "sectorMappingCoveragePct": sector_mapping_coverage_pct,
                     },
                     "ready": False,
                     "reason": reason,
@@ -3239,6 +3995,7 @@ class UniverseService:
             now_i=now_i,
             premarket=bool(premarket),
         )
+
         swing_candidates = [r for r in all_rows if r.get("enabled") and r.get("eligibleSwing") and r.get("fresh")]
         intraday_candidates = [
             r
@@ -3282,9 +4039,10 @@ class UniverseService:
                     "ema50": ema50,
                     "ema200": ema200,
                     "ema50Prev": ema50_prev,
-                    "atr14": atr14,
+                    "atr14": atr14 if atr14 > 0 else float(r.get("atr14") or 0.0),
                     "high20": high_20,
                     "low20": low_20,
+                    "returnsByDate": self._daily_returns_by_date(daily, lookback=60),
                 }
             )
 
@@ -3337,11 +4095,7 @@ class UniverseService:
             else:
                 final_score = (0.50 * breakout) + (0.20 * pullback) + (0.30 * mean_rev)
 
-            setup_scores = {
-                "BREAKOUT": breakout,
-                "PULLBACK": pullback,
-                "MEAN_REVERSION": mean_rev,
-            }
+            setup_scores = {"BREAKOUT": breakout, "PULLBACK": pullback, "MEAN_REVERSION": mean_rev}
             setup_label = max(setup_scores.items(), key=lambda kv: kv[1])[0]
             swing_scored.append(
                 {
@@ -3361,7 +4115,11 @@ class UniverseService:
         else:
             swing_target = max(1, int(target_size or 150))
         swing_target = min(swing_target, 150)
-        swing_selected = sorted(swing_scored, key=lambda x: (-float(x["score"]), str(x["symbol"])))[:swing_target]
+        swing_selected = self._select_with_diversification_and_corr(
+            swing_scored,
+            target=swing_target,
+            sector_coverage_pct=sector_mapping_coverage_pct,
+        )
 
         intraday_phase1: list[dict[str, Any]] = []
         for r in intraday_candidates:
@@ -3386,15 +4144,22 @@ class UniverseService:
                     "momentumComponent": momentum_component,
                     "liquidityComponent": liquidity_component,
                     "volSanityComponent": vol_sanity_component,
+                    "returnsByDate": self._daily_returns_by_date(daily, lookback=60),
                 }
             )
 
         intraday_phase1 = [r for r in intraday_phase1 if float(r.get("score") or 0.0) >= float(max(1, int(min_score)))]
-
         intraday_phase2: list[dict[str, Any]] = []
+        phase2_fail_by_symbol: dict[str, dict[str, Any]] = {}
+
         if not premarket:
             for r in intraday_phase1:
                 bars = self._watchlist_intraday_candles(r, timeframe=timeframe, now_i=now_i)
+                phase2_chk = self._phase2_eligibility(bars=bars, now_i=now_i, interval_min=interval_min)
+                sym = str(r.get("symbol") or "")
+                if not bool(phase2_chk.get("eligible")):
+                    phase2_fail_by_symbol[sym] = phase2_chk
+                    continue
                 today_bars = []
                 for c in bars:
                     ts = parse_any_ts(c[0])
@@ -3403,6 +4168,11 @@ class UniverseService:
                     if ts.astimezone(IST).date() == now_i.astimezone(IST).date():
                         today_bars.append(c)
                 if len(today_bars) < 4:
+                    phase2_fail_by_symbol[sym] = {
+                        "eligible": False,
+                        "reason": "TODAY_BARS_MISSING",
+                        "phase2BaselineCoveragePct": float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                    }
                     continue
 
                 vwap_series: list[float] = []
@@ -3424,7 +4194,11 @@ class UniverseService:
                 vwap_slope_raw = abs((vwap_series[-1] - vwap_series[-4]) / base_vwap) if len(vwap_series) >= 4 else 0.0
                 vwap_slope_component = self._norm_minmax_clip(vwap_slope_raw, 0.0, 0.005)
 
-                vol_ratio, volume_shock_component = self._watchlist_volume_shock(bars, now_i)
+                vol_ratio, volume_shock_component = self._watchlist_volume_shock(
+                    bars,
+                    now_i,
+                    baseline_override=float(phase2_chk.get("baselineMedianVolume") or 0.0),
+                )
                 orb_label, orb_component = self._watchlist_orb_signal(today_bars, now_i)
                 trend_score = self._clip01((0.40 * vwap_slope_component) + (0.35 * volume_shock_component) + (0.25 * orb_component))
 
@@ -3446,21 +4220,53 @@ class UniverseService:
                         "orbSignal": orb_label,
                         "reversalSignal": float(round(reversal_signal, 4)),
                         "confidence": float(round(phase2_score, 2)),
+                        "phase2Eligibility": True,
+                        "phase2BaselineCoveragePct": float(round(float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0), 2)),
+                        "fallbackReason": "",
                     }
                 )
 
+        intraday_phase1_fallback: list[dict[str, Any]] = []
+        for r in intraday_phase1:
+            sym = str(r.get("symbol") or "")
+            fail = phase2_fail_by_symbol.get(sym) or {}
+            fallback_reason = "PREMARKET_NO_INPLAY" if premarket else str(fail.get("reason") or "PHASE2_NOT_SELECTED")
+            intraday_phase1_fallback.append(
+                {
+                    **r,
+                    "source": "PHASE1_DAILY_FALLBACK",
+                    "vwapBias": "N/A",
+                    "volumeShock": 1.0,
+                    "orbSignal": "N/A",
+                    "reversalSignal": 0.0,
+                    "confidence": float(r.get("score") or 0.0),
+                    "phase2Eligibility": False,
+                    "phase2BaselineCoveragePct": float(round(float(fail.get("phase2BaselineCoveragePct") or 0.0), 2)),
+                    "fallbackReason": fallback_reason,
+                }
+            )
+
         intraday_target = min(150, max(1, int(target_size or 150)))
         if premarket:
-            intraday_selected = sorted(intraday_phase1, key=lambda x: (-float(x["score"]), str(x["symbol"])))[:intraday_target]
-            for r in intraday_selected:
-                r["source"] = "PHASE1_DAILY_FALLBACK"
-                r["vwapBias"] = "N/A"
-                r["volumeShock"] = 1.0
-                r["orbSignal"] = "N/A"
-                r["reversalSignal"] = 0.0
-                r["confidence"] = float(r.get("score") or 0.0)
+            intraday_selected = self._select_with_diversification_and_corr(
+                intraday_phase1_fallback,
+                target=intraday_target,
+                sector_coverage_pct=sector_mapping_coverage_pct,
+            )
         else:
-            intraday_selected = self._merge_intraday_v2(intraday_phase2, [{**r, "source": "PHASE1_DAILY_FALLBACK", "vwapBias": "N/A", "volumeShock": 1.0, "orbSignal": "N/A", "reversalSignal": 0.0, "confidence": float(r.get("score") or 0.0)} for r in intraday_phase1], intraday_target)
+            phase2_selected = self._select_with_diversification_and_corr(
+                intraday_phase2,
+                target=intraday_target,
+                sector_coverage_pct=sector_mapping_coverage_pct,
+            )
+            selected_symbols = {str(r.get("symbol") or "") for r in phase2_selected}
+            phase1_remaining = [r for r in intraday_phase1_fallback if str(r.get("symbol") or "") not in selected_symbols]
+            intraday_selected = self._select_with_diversification_and_corr(
+                phase1_remaining,
+                target=intraday_target,
+                sector_coverage_pct=sector_mapping_coverage_pct,
+                seed=phase2_selected,
+            )
 
         swing_rows: list[list[object]] = []
         for i, r in enumerate(swing_selected, start=1):
@@ -3484,12 +4290,21 @@ class UniverseService:
                     r.get("last1DDate", ""),
                     "Y",
                     "SELECTED_SWING_V2",
-                    f"B={round(float(r.get('breakout') or 0.0),2)}|P={round(float(r.get('pullback') or 0.0),2)}|MR={round(float(r.get('meanRev') or 0.0),2)}",
+                    f"SETUP={r.get('setupLabel','')}|B={round(float(r.get('breakout') or 0.0),2)}|P={round(float(r.get('pullback') or 0.0),2)}|MR={round(float(r.get('meanRev') or 0.0),2)}",
+                    r.get("macroSector", "UNKNOWN"),
+                    r.get("sector", "UNKNOWN"),
+                    r.get("industry", "UNKNOWN"),
+                    r.get("basicIndustry", "UNKNOWN"),
+                    r.get("sectorMapSource", "unknown"),
+                    float(round(float(r.get("maxCorrToSelected") or 0.0), 6)),
+                    float(round(float(r.get("turnoverMed60D") or 0.0), 2)),
+                    float(round(float(r.get("atr14") or 0.0), 6)),
                 ]
             )
 
         intraday_rows: list[list[object]] = []
         for i, r in enumerate(intraday_selected, start=1):
+            src = str(r.get("source") or "PHASE1_DAILY_FALLBACK").upper()
             intraday_rows.append(
                 [
                     run_ts,
@@ -3500,7 +4315,7 @@ class UniverseService:
                     r.get("instrumentKey", ""),
                     r.get("exchange", "NSE"),
                     float(round(float(r.get("score") or 0.0), 2)),
-                    r.get("source", "PHASE1_DAILY_FALLBACK"),
+                    src,
                     r.get("setupLabel", ""),
                     regime_v2["regimeDaily"],
                     regime_v2["regimeIntraday"],
@@ -3516,8 +4331,22 @@ class UniverseService:
                     float(round(float(r.get("priceLast") or 0.0), 4)),
                     r.get("last1DDate", ""),
                     "Y",
-                    ("SELECTED_PHASE2_INPLAY" if str(r.get("source") or "").upper() == "PHASE2_INPLAY" else "SELECTED_PHASE1_FALLBACK"),
-                    f"m={round(float(r.get('momentumComponent') or 0.0),3)}|liq={round(float(r.get('liquidityComponent') or 0.0),3)}|vol={round(float(r.get('volSanityComponent') or 0.0),3)}",
+                    ("SELECTED_PHASE2_INPLAY" if src == "PHASE2_INPLAY" else "SELECTED_PHASE1_FALLBACK"),
+                    (
+                        f"m={round(float(r.get('momentumComponent') or 0.0),3)}|liq={round(float(r.get('liquidityComponent') or 0.0),3)}|"
+                        f"vol={round(float(r.get('volSanityComponent') or 0.0),3)}"
+                    ),
+                    "Y" if bool(r.get("phase2Eligibility")) else "N",
+                    float(round(float(r.get("phase2BaselineCoveragePct") or 0.0), 2)),
+                    str(r.get("fallbackReason") or ""),
+                    r.get("macroSector", "UNKNOWN"),
+                    r.get("sector", "UNKNOWN"),
+                    r.get("industry", "UNKNOWN"),
+                    r.get("basicIndustry", "UNKNOWN"),
+                    r.get("sectorMapSource", "unknown"),
+                    float(round(float(r.get("maxCorrToSelected") or 0.0), 6)),
+                    float(round(float(r.get("turnoverMed60D") or 0.0), 2)),
+                    float(round(float(r.get("atr14") or 0.0), 6)),
                 ]
             )
 
@@ -3525,11 +4354,7 @@ class UniverseService:
         if swing_written:
             self.sheets.replace_watchlist_swing_v2(swing_rows)
         else:
-            logger.info(
-                "build_watchlist_v2 swing write skipped premarket=%s runBlock=%s",
-                premarket,
-                run_block,
-            )
+            logger.info("build_watchlist_v2 swing write skipped premarket=%s runBlock=%s", premarket, run_block)
         self.sheets.replace_watchlist_intraday_v2(intraday_rows)
 
         out = {
@@ -3547,13 +4372,14 @@ class UniverseService:
                 "runTimeBlock": run_block,
                 "timeframe": timeframe,
                 "expectedLCD": expected_lcd,
+                "sectorMappingCoveragePct": sector_mapping_coverage_pct,
             },
             "ready": bool(len(swing_rows) > 0 or len(intraday_rows) > 0),
             "eligiblePool": len(intraday_candidates),
             "regimeV2": regime_v2,
         }
         logger.info(
-            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s",
+            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f",
             len(swing_rows),
             len(intraday_rows),
             len(swing_candidates),
@@ -3564,6 +4390,7 @@ class UniverseService:
             regime_v2["regimeDaily"],
             regime_v2["regimeIntraday"],
             expected_lcd,
+            sector_mapping_coverage_pct,
         )
         return out
 

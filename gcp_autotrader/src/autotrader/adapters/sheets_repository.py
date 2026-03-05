@@ -26,6 +26,7 @@ class SheetNames:
     WATCHLIST_SWING_V2 = "Watchlist_Swing_V2"
     WATCHLIST_INTRADAY_V2 = "Watchlist_Intraday_V2"
     UNIVERSE = "🧾 Universe Instruments"
+    SECTOR_MAPPING = "🗂️ Sector Mapping"
     CANDLE_CACHE = "🗄️ Candle Cache"
     SCORE_CACHE_1D = "History Candle 1D"
     SCORE_CACHE_5M = "History Candle 5m"
@@ -83,6 +84,14 @@ SHEET_LAYOUTS: dict[str, SheetLayout] = {
             "Enabled",
             "Reason",
             "Notes",
+            "MacroSector",
+            "Sector",
+            "Industry",
+            "BasicIndustry",
+            "SectorMapSource",
+            "MaxCorrToSelected",
+            "TurnoverMed60D",
+            "ATR14",
         ],
     ),
     SheetNames.WATCHLIST_INTRADAY_V2: SheetLayout(
@@ -115,6 +124,31 @@ SHEET_LAYOUTS: dict[str, SheetLayout] = {
             "Enabled",
             "Reason",
             "Notes",
+            "Phase2Eligibility",
+            "Phase2BaselineCoveragePct",
+            "FallbackReason",
+            "MacroSector",
+            "Sector",
+            "Industry",
+            "BasicIndustry",
+            "SectorMapSource",
+            "MaxCorrToSelected",
+            "TurnoverMed60D",
+            "ATR14",
+        ],
+    ),
+    SheetNames.SECTOR_MAPPING: SheetLayout(
+        title="Sector Mapping - NSE symbol to 4-tier sector taxonomy",
+        tab_name=SheetNames.SECTOR_MAPPING,
+        headers=[
+            "Symbol",
+            "Exchange",
+            "MacroSector",
+            "Sector",
+            "Industry",
+            "BasicIndustry",
+            "Source",
+            "UpdatedAt",
         ],
     ),
     SheetNames.UNIVERSE: SheetLayout(
@@ -422,7 +456,7 @@ class GoogleSheetsRepository:
         for name in [
             SheetNames.CONFIG, SheetNames.WATCHLIST_SWING_V2, SheetNames.WATCHLIST_INTRADAY_V2, SheetNames.MARKET, SheetNames.SCAN, SheetNames.SIGNALS,
             SheetNames.ORDERS, SheetNames.POSITIONS, SheetNames.PNL, SheetNames.RISK,
-            SheetNames.UNIVERSE, SheetNames.SCORE_CACHE_1D, SheetNames.SCORE_CACHE_5M, SheetNames.SCORE_CACHE_1D_DATA,
+            SheetNames.UNIVERSE, SheetNames.SECTOR_MAPPING, SheetNames.SCORE_CACHE_1D, SheetNames.SCORE_CACHE_5M, SheetNames.SCORE_CACHE_1D_DATA,
             SheetNames.DECISIONS, SheetNames.ACTIONS,
         ]:
             if name not in existing:
@@ -613,6 +647,11 @@ class GoogleSheetsRepository:
         self.clear_range(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4:ZZ")
         if rows:
             self.update_values(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4", rows)
+
+    def replace_sector_mapping(self, rows: list[list[Any]]) -> None:
+        self.clear_range(f"'{SheetNames.SECTOR_MAPPING}'!A4:ZZ")
+        if rows:
+            self.update_values(f"'{SheetNames.SECTOR_MAPPING}'!A4", rows)
 
     def replace_score_cache_1d_index(self, rows: list[list[Any]], *, chunk_size: int = 500) -> None:
         self.ensure_sheet_headers_append(

@@ -10,6 +10,7 @@ BACKFILL_MAX_PASSES="${BACKFILL_MAX_PASSES:-20}"
 CLOSE_MAX_PASSES="${CLOSE_MAX_PASSES:-20}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-45}"
 AUTO_REQUEST_TOKEN="${AUTO_REQUEST_TOKEN:-false}"
+SECTOR_MAPPING_API_CAP="${SECTOR_MAPPING_API_CAP:-600}"
 
 post_job() {
   local path="$1"
@@ -42,7 +43,7 @@ if [[ "${AUTO_REQUEST_TOKEN}" == "true" ]]; then
 fi
 
 echo "== 1) Universe V2 rebuild (replace=true) =="
-post_job "/jobs/universe-v2-refresh?build_limit=0&replace=true&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1200&intraday_lookback_trading_days=60"
+post_job "/jobs/universe-v2-refresh?build_limit=0&replace=true&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1200&intraday_lookback_trading_days=60&run_sector_mapping_appended=true&sector_mapping_api_cap=${SECTOR_MAPPING_API_CAP}"
 echo
 
 echo "== 1b) Backfill completion loop =="

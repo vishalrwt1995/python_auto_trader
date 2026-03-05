@@ -896,6 +896,8 @@ def run_universe_v2_refresh(
     run_intraday_appended_backfill: bool = True,
     intraday_api_cap: int = 1200,
     intraday_lookback_trading_days: int = 60,
+    run_sector_mapping_appended: bool = True,
+    sector_mapping_api_cap: int = 600,
     x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
     x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
 ) -> dict[str, Any]:
@@ -913,6 +915,8 @@ def run_universe_v2_refresh(
     ]
     if run_intraday_appended_backfill:
         lock_names.append("intraday_cache_backfill_appended_5m")
+    if run_sector_mapping_appended:
+        lock_names.append("sector_mapping_refresh")
     leases, blocked_lock = _acquire_named_locks(c.state, lock_names, ttl_seconds=7200)
     if blocked_lock is not None:
         sink.action(
@@ -931,6 +935,8 @@ def run_universe_v2_refresh(
                 "runIntradayAppendedBackfill": run_intraday_appended_backfill,
                 "intradayApiCap": intraday_api_cap,
                 "intradayLookbackTradingDays": intraday_lookback_trading_days,
+                "runSectorMappingAppended": run_sector_mapping_appended,
+                "sectorMappingApiCap": sector_mapping_api_cap,
             },
         )
         sink.flush_all()
@@ -952,6 +958,8 @@ def run_universe_v2_refresh(
                 "runIntradayAppendedBackfill": run_intraday_appended_backfill,
                 "intradayApiCap": intraday_api_cap,
                 "intradayLookbackTradingDays": intraday_lookback_trading_days,
+                "runSectorMappingAppended": run_sector_mapping_appended,
+                "sectorMappingApiCap": sector_mapping_api_cap,
             },
         )
         out = c.universe_service().run_universe_v2_pipeline(
@@ -971,9 +979,9 @@ def run_universe_v2_refresh(
                 c.state.set_runtime_prop("runtime:universe_v2_last_appended_symbols", json.dumps(payload, separators=(",", ":")))
         except Exception:
             logger.warning("failed to persist runtime:universe_v2_last_appended_symbols", exc_info=True)
+        appended_symbols = (out.get("build") or {}).get("appendedSymbols") if isinstance(out, dict) else []
+        appended_set = [str(s).strip().upper() for s in (appended_symbols or []) if str(s).strip()]
         if run_intraday_appended_backfill:
-            appended_symbols = (out.get("build") or {}).get("appendedSymbols") if isinstance(out, dict) else []
-            appended_set = [str(s).strip().upper() for s in (appended_symbols or []) if str(s).strip()]
             if appended_set:
                 intraday_appended = c.universe_service().prefetch_intraday_cache_5m_batch(
                     api_cap=max(0, int(intraday_api_cap)),
@@ -984,6 +992,17 @@ def run_universe_v2_refresh(
                 out = {**out, "intradayAppended5m": intraday_appended}
             else:
                 out = {**out, "intradayAppended5m": {"skipped": "no_appended_symbols", "symbols": 0}}
+        if run_sector_mapping_appended:
+            if appended_set:
+                sector_appended = c.universe_service().refresh_sector_mapping(
+                    api_cap=max(0, int(sector_mapping_api_cap)),
+                    retry_unknown=False,
+                    only_symbols=appended_set,
+                    sync_universe=True,
+                )
+                out = {**out, "sectorAppended": sector_appended}
+            else:
+                out = {**out, "sectorAppended": {"skipped": "no_appended_symbols", "symbols": 0}}
         raw_ok = bool((out.get("raw") or {}).get("ok", True))
         cache_summary = out.get("cache") if isinstance(out.get("cache"), dict) else {}
         eligibility = out.get("eligibility") if isinstance(out.get("eligibility"), dict) else {}
@@ -1069,6 +1088,8 @@ def run_universe_v2_refresh(
                 "runIntradayAppendedBackfill": run_intraday_appended_backfill,
                 "intradayApiCap": intraday_api_cap,
                 "intradayLookbackTradingDays": intraday_lookback_trading_days,
+                "runSectorMappingAppended": run_sector_mapping_appended,
+                "sectorMappingApiCap": sector_mapping_api_cap,
             },
         )
         sink.flush_all()
@@ -1162,6 +1183,63 @@ def run_intraday_cache_backfill_full(
             "ERROR",
             f"{type(e).__name__}: {e}",
             {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap, "lookbackTradingDays": lookback_trading_days},
+        )
+        sink.flush_all()
+        raise
+    finally:
+        c.state.release_lock(lease)
+
+
+@app.post("/jobs/sector-mapping-refresh")
+def run_sector_mapping_refresh(
+    x_job_token: str | None = Header(default=None),
+    api_cap: int = 600,
+    retry_unknown: bool = False,
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    c.sheets.ensure_core_sheets()
+    sink = LogSink(c.sheets)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    lease = c.state.try_acquire_lock("sector_mapping_refresh", ttl_seconds=3600)
+    if lease is None:
+        sink.action(
+            "Universe",
+            "sector_mapping_refresh",
+            "LOCK_BUSY",
+            "skipped: lock busy",
+            {**sched_ctx, "apiCap": api_cap, "retryUnknown": bool(retry_unknown)},
+        )
+        sink.flush_all()
+        return {"skipped": "lock_busy"}
+    started_perf = time.perf_counter()
+    try:
+        sink.action(
+            "Universe",
+            "sector_mapping_refresh",
+            "START",
+            "",
+            {**sched_ctx, "apiCap": api_cap, "retryUnknown": bool(retry_unknown)},
+        )
+        out = c.universe_service().refresh_sector_mapping(api_cap=api_cap, retry_unknown=bool(retry_unknown))
+        sink.action(
+            "Universe",
+            "sector_mapping_refresh",
+            "DONE",
+            "sector mapping refresh complete",
+            {**sched_ctx, **_duration_ctx(started_perf), **out},
+        )
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action(
+            "Universe",
+            "sector_mapping_refresh",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "apiCap": api_cap},
         )
         sink.flush_all()
         raise

@@ -12,6 +12,7 @@ REPLACE_MODE="${REPLACE_MODE:-false}"  # true = rebuild from scratch, false = ap
 CANDLE_API_CAP="${CANDLE_API_CAP:-600}"
 INTRADAY_API_CAP="${INTRADAY_API_CAP:-1200}"
 INTRADAY_LOOKBACK_TRADING_DAYS="${INTRADAY_LOOKBACK_TRADING_DAYS:-60}"
+SECTOR_MAPPING_API_CAP="${SECTOR_MAPPING_API_CAP:-600}"
 
 post_job() {
   local path="$1"
@@ -22,7 +23,7 @@ post_job() {
 }
 
 echo "== Universe V2 refresh (replace=${REPLACE_MODE}) =="
-post_job "/jobs/universe-v2-refresh?build_limit=0&replace=${REPLACE_MODE}&candle_api_cap=${CANDLE_API_CAP}&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=${INTRADAY_API_CAP}&intraday_lookback_trading_days=${INTRADAY_LOOKBACK_TRADING_DAYS}"
+post_job "/jobs/universe-v2-refresh?build_limit=0&replace=${REPLACE_MODE}&candle_api_cap=${CANDLE_API_CAP}&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=${INTRADAY_API_CAP}&intraday_lookback_trading_days=${INTRADAY_LOOKBACK_TRADING_DAYS}&run_sector_mapping_appended=true&sector_mapping_api_cap=${SECTOR_MAPPING_API_CAP}"
 echo
 
 echo "== Backfill loop until prefillComplete=true =="

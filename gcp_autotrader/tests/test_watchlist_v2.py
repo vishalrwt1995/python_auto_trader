@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Any
 
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
 from autotrader.services.universe_service import UniverseService
@@ -72,12 +73,70 @@ class _FakeSheets:
     def __init__(self):
         self.swing_rows: list[list[object]] = []
         self.intraday_rows: list[list[object]] = []
+        self.sector_rows: list[list[object]] = []
 
     def replace_watchlist_swing_v2(self, rows: list[list[object]]) -> None:
         self.swing_rows = list(rows)
 
     def replace_watchlist_intraday_v2(self, rows: list[list[object]]) -> None:
         self.intraday_rows = list(rows)
+
+    def replace_sector_mapping(self, rows: list[list[object]]) -> None:
+        self.sector_rows = list(rows)
+
+
+class _FakeSheetsSector(_FakeSheets):
+    def __init__(self, sector_rows: list[list[str]]):
+        super().__init__()
+        self._sector_rows = sector_rows
+
+    def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], header_row: int = 3) -> dict[str, int]:
+        del header_row
+        if sheet_name == SheetNames.SECTOR_MAPPING:
+            return {h: i + 1 for i, h in enumerate(required_headers)}
+        return {}
+
+    def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
+        del start_row
+        if sheet_name == SheetNames.SECTOR_MAPPING:
+            return [list(r) for r in self._sector_rows]
+        return []
+
+
+def _intraday_5m_history_with_today(days: int, *, today_bars: int = 18) -> list[list[object]]:
+    now_i = now_ist().astimezone(IST)
+    today = now_i.date()
+    offsets = [5 * i for i in range(today_bars)]
+    bars: list[list[object]] = []
+    prev_days: list[datetime] = []
+    d = today - timedelta(days=1)
+    while len(prev_days) < days:
+        if d.weekday() < 5:
+            prev_days.append(datetime(d.year, d.month, d.day, 9, 15, tzinfo=IST))
+        d -= timedelta(days=1)
+    prev_days.sort()
+    px = 100.0
+    for base in prev_days:
+        for j, off in enumerate(offsets):
+            ts = base + timedelta(minutes=off)
+            o = px
+            c = px + 0.05
+            h = max(o, c) + 0.08
+            l = min(o, c) - 0.08
+            v = 7000 + (j * 100)
+            bars.append([ts.isoformat(), o, h, l, c, v])
+            px = c
+    today_base = datetime(today.year, today.month, today.day, 9, 15, tzinfo=IST)
+    for j, off in enumerate(offsets):
+        ts = today_base + timedelta(minutes=off)
+        o = px
+        c = px + 0.09
+        h = max(o, c) + 0.09
+        l = min(o, c) - 0.09
+        v = 8500 + (j * 120)
+        bars.append([ts.isoformat(), o, h, l, c, v])
+        px = c
+    return bars
 
 
 def test_watchlist_v2_regime_classification():
@@ -238,6 +297,157 @@ def test_watchlist_v2_phase2_first_merge():
     ]
     merged = UniverseService._merge_intraday_v2(phase2, phase1, target=3)
     assert [x["symbol"] for x in merged] == ["P2A", "P2B", "P1A"]
+
+
+def test_watchlist_v2_phase2_eligibility_fails_and_forces_fallback():
+    sheets = _FakeSheets()
+    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    now_i = now_ist()
+    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    candidate = {
+        "symbol": "AAA",
+        "exchange": "NSE",
+        "segment": "CASH",
+        "enabled": True,
+        "instrumentKey": "NSE_EQ|AAA",
+        "eligibleSwing": True,
+        "eligibleIntraday": True,
+        "turnoverRank60D": 10,
+        "turnoverMed60D": 12_000_000.0,
+        "liquidityBucket": "A",
+        "atr14": 1.4,
+        "atrPct14D": 0.018,
+        "gapRisk60D": 0.012,
+        "priceLast": 120.0,
+        "bars1D": 260,
+        "last1DDate": expected_lcd,
+        "fresh": True,
+        "disableReason": "",
+        "decisionPresent": True,
+        "sector": "FINANCIALS",
+        "sectorSource": "nse",
+        "sectorUpdatedAt": "",
+    }
+    svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
+    svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
+        "regimeDaily": "RANGE",
+        "regimeIntraday": "CHOPPY",
+        "source": {},
+    }
+    svc._watchlist_v2_candidates = lambda expected_lcd: [dict(candidate)]  # type: ignore[method-assign]
+    svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
+    svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_history_with_today(20)  # type: ignore[method-assign]
+
+    out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
+    assert out["ready"] is True
+    assert len(sheets.intraday_rows) == 1
+    row = sheets.intraday_rows[0]
+    assert row[8] == "PHASE1_DAILY_FALLBACK"
+    assert row[26] == "N"
+    assert row[28] == "BASELINE_INCOMPLETE"
+
+
+def test_watchlist_v2_phase2_eligibility_fails_when_today_bars_missing():
+    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    bars = _intraday_5m_history_with_today(60, today_bars=0)
+    chk = svc._phase2_eligibility(bars=bars, now_i=now_ist(), interval_min=5)
+    assert chk["eligible"] is False
+    assert chk["reason"] == "TODAY_BARS_MISSING"
+
+
+def test_watchlist_v2_phase2_eligibility_passes_with_complete_baseline():
+    sheets = _FakeSheets()
+    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    now_i = now_ist()
+    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    candidate = {
+        "symbol": "AAA",
+        "exchange": "NSE",
+        "segment": "CASH",
+        "enabled": True,
+        "instrumentKey": "NSE_EQ|AAA",
+        "eligibleSwing": True,
+        "eligibleIntraday": True,
+        "turnoverRank60D": 10,
+        "turnoverMed60D": 12_000_000.0,
+        "liquidityBucket": "A",
+        "atr14": 1.4,
+        "atrPct14D": 0.018,
+        "gapRisk60D": 0.012,
+        "priceLast": 120.0,
+        "bars1D": 260,
+        "last1DDate": expected_lcd,
+        "fresh": True,
+        "disableReason": "",
+        "decisionPresent": True,
+        "sector": "FINANCIALS",
+        "sectorSource": "nse",
+        "sectorUpdatedAt": "",
+    }
+    svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
+    svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
+        "regimeDaily": "RANGE",
+        "regimeIntraday": "CHOPPY",
+        "source": {},
+    }
+    svc._watchlist_v2_candidates = lambda expected_lcd: [dict(candidate)]  # type: ignore[method-assign]
+    svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
+    svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_history_with_today(60)  # type: ignore[method-assign]
+
+    out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
+    assert out["ready"] is True
+    assert len(sheets.intraday_rows) == 1
+    row = sheets.intraday_rows[0]
+    assert row[8] == "PHASE2_INPLAY"
+    assert row[26] == "Y"
+    assert float(row[27]) >= 75.0
+
+
+def test_watchlist_v2_correlation_guard_blocks_high_corr_duplicate():
+    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    rets = {f"2026-01-{i:02d}": (0.004 + (i * 0.0002)) for i in range(1, 31)}
+    selected = svc._select_with_diversification_and_corr(
+        [
+            {
+                "symbol": "AAA",
+                "score": 99.0,
+                "sector": "IT",
+                "liquidityBucket": "A",
+                "atrPct14D": 0.02,
+                "gapRisk60D": 0.01,
+                "returnsByDate": dict(rets),
+            },
+            {
+                "symbol": "BBB",
+                "score": 98.0,
+                "sector": "BANK",
+                "liquidityBucket": "A",
+                "atrPct14D": 0.02,
+                "gapRisk60D": 0.01,
+                "returnsByDate": dict(rets),
+            },
+        ],
+        target=2,
+        sector_coverage_pct=100.0,
+    )
+    assert [r["symbol"] for r in selected] == ["AAA"]
+
+
+def test_watchlist_v2_sector_mapping_join_and_coverage_computed():
+    sheets = _FakeSheetsSector(
+        [
+            ["AAA", "NSE", "ECONOMY", "FINANCIALS", "BANKS", "PRIVATE BANKS", "nse", "2026-03-01 09:00:00"],
+        ]
+    )
+    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    universe_rows: list[dict[str, Any]] = [
+        {"symbol": "AAA", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "UNKNOWN"},
+        {"symbol": "BBB", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "UNKNOWN"},
+    ]
+    mapping, coverage = svc._load_sector_mapping_dataset(universe_rows)
+    assert ("AAA", "NSE") in mapping
+    assert mapping[("AAA", "NSE")]["sector"] == "FINANCIALS"
+    assert coverage == 50.0
 
 
 def test_watchlist_v2_no_lookahead_daily_filter():
