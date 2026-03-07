@@ -18,7 +18,7 @@ from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
 from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
 from autotrader.domain.indicators import calc_atr
-from autotrader.domain.models import RegimeSnapshot, UniverseRow
+from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot, UniverseRow
 from autotrader.services.universe_v2 import (
     UNIVERSE_V2_HEADERS,
     CanonicalListing,
@@ -113,6 +113,10 @@ class UniverseService:
         self._holiday_date_probe_cache: dict[str, bool] = {}
         self._holiday_api_fallback_day: str | None = None
         self._expected_lcd_ctx_by_day: dict[str, dict[str, Any]] = {}
+        self.market_brain_service: Any | None = None
+
+    def set_market_brain_service(self, svc: Any | None) -> None:
+        self.market_brain_service = svc
 
     @staticmethod
     def _cfg_int(cfg: dict[str, str], key: str, default: int) -> int:
@@ -3987,7 +3991,7 @@ class UniverseService:
 
     def build_watchlist(
         self,
-        regime: RegimeSnapshot | None,
+        regime: RegimeSnapshot | MarketBrainState | None,
         target_size: int = 150,
         *,
         min_score: int = 1,
@@ -3996,7 +4000,6 @@ class UniverseService:
         premarket: bool = False,
         intraday_timeframe: str = "5m",
     ) -> dict[str, object]:
-        del regime
         now_i = now_ist()
         expected_lcd = self._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
         run_ts = now_i.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
@@ -4004,6 +4007,23 @@ class UniverseService:
         run_block = self._run_time_block(now_i, premarket=premarket)
         timeframe = "5m" if str(intraday_timeframe or "").strip().lower() != "15m" else "15m"
         interval_min = 5 if timeframe == "5m" else 15
+        market_state: MarketBrainState | None = regime if isinstance(regime, MarketBrainState) else None
+        market_policy: MarketPolicy | None = None
+        if self.market_brain_service is not None:
+            try:
+                if market_state is None:
+                    if premarket:
+                        market_state = self.market_brain_service.build_premarket_market_brain(now_i.isoformat())
+                    else:
+                        market_state = self.market_brain_service.build_post_open_market_brain(now_i.isoformat())
+                market_policy = self.market_brain_service.derive_market_policy(market_state)
+            except Exception:
+                logger.warning("build_watchlist market_brain_v2_fallback_to_local_regime", exc_info=True)
+                market_state = None
+                market_policy = None
+        min_score_eff = max(1, int(min_score))
+        if market_policy is not None:
+            min_score_eff = max(1, int(min_score_eff + int(market_policy.watchlist_min_score_boost or 0)))
 
         controls = self._build_universe_v2_controls()
         mode_thresholds = controls.active_thresholds()
@@ -4071,12 +4091,15 @@ class UniverseService:
                     "regimeV2": {},
                 }
 
-        regime_v2 = self._build_watchlist_v2_regime(
-            timeframe=timeframe,
-            expected_lcd=expected_lcd,
-            now_i=now_i,
-            premarket=bool(premarket),
-        )
+        if market_state is not None and self.market_brain_service is not None:
+            regime_v2 = self.market_brain_service.watchlist_regime_payload(market_state)
+        else:
+            regime_v2 = self._build_watchlist_v2_regime(
+                timeframe=timeframe,
+                expected_lcd=expected_lcd,
+                now_i=now_i,
+                premarket=bool(premarket),
+            )
 
         swing_candidates = [r for r in all_rows if r.get("enabled") and r.get("eligibleSwing") and r.get("fresh")]
         intraday_candidates = [
@@ -4190,12 +4213,16 @@ class UniverseService:
                 }
             )
 
-        swing_scored = [r for r in swing_scored if float(r.get("score") or 0.0) >= float(max(1, int(min_score)))]
+        swing_scored = [r for r in swing_scored if float(r.get("score") or 0.0) >= float(min_score_eff)]
+        if market_policy is not None and self.market_brain_service is not None:
+            swing_scored = self.market_brain_service.adjust_watchlist_rows(swing_scored, market_policy, section="swing")
         if regime_v2["regimeDaily"] == "RISK_OFF":
             swing_scored = [r for r in swing_scored if str(r.get("liquidityBucket") or "").upper() == "A"]
             swing_target = max(1, math.floor(int(target_size or 150) * 0.7))
         else:
             swing_target = max(1, int(target_size or 150))
+        if market_policy is not None:
+            swing_target = max(1, math.floor(float(swing_target) * float(market_policy.watchlist_target_multiplier or 1.0)))
         swing_target = min(swing_target, 150)
         swing_selected = self._select_with_diversification_and_corr(
             swing_scored,
@@ -4230,11 +4257,13 @@ class UniverseService:
                 }
             )
 
-        intraday_phase1 = [r for r in intraday_phase1 if float(r.get("score") or 0.0) >= float(max(1, int(min_score)))]
+        intraday_phase1 = [r for r in intraday_phase1 if float(r.get("score") or 0.0) >= float(min_score_eff)]
+        if market_policy is not None and self.market_brain_service is not None:
+            intraday_phase1 = self.market_brain_service.adjust_watchlist_rows(intraday_phase1, market_policy, section="intraday")
         intraday_phase2: list[dict[str, Any]] = []
         phase2_fail_by_symbol: dict[str, dict[str, Any]] = {}
 
-        if not premarket:
+        if not premarket and not (market_policy is not None and not bool(market_policy.intraday_phase2_enabled)):
             for r in intraday_phase1:
                 bars = self._watchlist_intraday_candles(r, timeframe=timeframe, now_i=now_i)
                 phase2_chk = self._phase2_eligibility(bars=bars, now_i=now_i, interval_min=interval_min)
@@ -4307,6 +4336,8 @@ class UniverseService:
                         "fallbackReason": "",
                     }
                 )
+            if market_policy is not None and self.market_brain_service is not None:
+                intraday_phase2 = self.market_brain_service.adjust_watchlist_rows(intraday_phase2, market_policy, section="intraday")
 
         intraday_phase1_fallback: list[dict[str, Any]] = []
         for r in intraday_phase1:
@@ -4329,6 +4360,8 @@ class UniverseService:
             )
 
         intraday_target = min(150, max(1, int(target_size or 150)))
+        if market_policy is not None:
+            intraday_target = max(1, math.floor(float(intraday_target) * float(market_policy.watchlist_target_multiplier or 1.0)))
         if premarket:
             intraday_selected = self._select_with_diversification_and_corr(
                 intraday_phase1_fallback,
@@ -4464,6 +4497,8 @@ class UniverseService:
             "ready": bool(len(swing_rows) > 0 or len(intraday_rows) > 0),
             "eligiblePool": len(intraday_candidates),
             "regimeV2": regime_v2,
+            "marketBrainState": (market_state.__dict__ if market_state is not None else {}),
+            "marketPolicy": (market_policy.__dict__ if market_policy is not None else {}),
             "intradayPhaseStats": {
                 "phase2UsedCount": int(phase2_used_count),
                 "phase1FallbackCount": int(phase1_fallback_count),
@@ -4473,7 +4508,7 @@ class UniverseService:
             },
         }
         logger.info(
-            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f",
+            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f marketRegime=%s riskMode=%s",
             len(swing_rows),
             len(intraday_rows),
             len(swing_candidates),
@@ -4485,13 +4520,22 @@ class UniverseService:
             regime_v2["regimeIntraday"],
             expected_lcd,
             sector_mapping_coverage_pct,
+            (market_state.regime if market_state is not None else "NA"),
+            (market_state.risk_mode if market_state is not None else "NA"),
         )
         return out
 
     def run_premarket_pipeline(self, regime: RegimeSnapshot, target_size: int = 150) -> UniversePipelineResult:
-        del regime
+        market_state = None
+        if isinstance(regime, MarketBrainState):
+            market_state = regime
+        elif self.market_brain_service is not None:
+            try:
+                market_state = self.market_brain_service.build_premarket_market_brain(now_ist().isoformat())
+            except Exception:
+                logger.warning("run_premarket_pipeline market_brain_v2 fallback", exc_info=True)
         v2_out = self.recompute_universe_v2_from_cache()
-        wl_out = self.build_watchlist(None, target_size=target_size, premarket=True)
+        wl_out = self.build_watchlist(market_state, target_size=target_size, premarket=True)
         cov = wl_out.get("coverage", {}) if isinstance(wl_out, dict) else {}
         return UniversePipelineResult(
             synced=0,

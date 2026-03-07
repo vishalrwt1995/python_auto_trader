@@ -17,6 +17,7 @@ from autotrader.domain.risk import calc_position_size
 from autotrader.domain.scoring import determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
 from autotrader.services.order_service import OrderService
+from autotrader.services.market_brain_service import MarketBrainService
 from autotrader.services.regime_service import MarketRegimeService
 from autotrader.settings import AppSettings
 from autotrader.time_utils import is_entry_window_open_ist, is_market_open_ist, now_ist, now_ist_str
@@ -37,8 +38,30 @@ class TradingService:
     groww: GrowwClient
     upstox: UpstoxClient
     regime_service: MarketRegimeService
+    market_brain_service: MarketBrainService
     order_service: OrderService
     log_sink: LogSink
+
+    @staticmethod
+    def _strategy_allowed(strategy: str, allowed: list[str]) -> bool:
+        s = str(strategy or "").strip().upper()
+        if not s or s in {"AUTO", "DEFAULT"}:
+            return True
+        allow = {str(x or "").strip().upper() for x in allowed}
+        if not allow:
+            return True
+        if s in allow:
+            return True
+        # Preserve backward compatibility with existing strategy labels.
+        if "BREAKOUT" in s and "BREAKOUT" in allow:
+            return True
+        if "OPEN" in s and ("OPEN_DRIVE" in allow or "VWAP_TREND" in allow):
+            return True
+        if "MEAN" in s and ("MEAN_REVERSION" in allow or "VWAP_REVERSAL" in allow):
+            return True
+        if "PULLBACK" in s and "PULLBACK" in allow:
+            return True
+        return False
 
     def _slice_watchlist_for_scan(self, watchlist: list[Any]) -> tuple[list[Any], dict[str, int | bool]]:
         total = len(watchlist)
@@ -141,12 +164,57 @@ class TradingService:
             if recon.get("filled", 0) or recon.get("failed", 0):
                 self.log_sink.log("INFO", "OrderRecon", f"Pending entries reconciled {recon}")
 
+            brain_state = None
+            market_policy = None
+            try:
+                brain_state = self.market_brain_service.build_post_open_market_brain(now_ist().isoformat())
+                market_policy = self.market_brain_service.derive_market_policy(brain_state)
+            except Exception:
+                logger.warning("scan_once market_brain_v2 unavailable; falling back to legacy regime-only behavior", exc_info=True)
+
             regime = self.regime_service.get_market_regime()
+            if brain_state is not None:
+                regime = self.market_brain_service.align_legacy_regime(regime, brain_state)
             try:
                 self.sheets.write_market_brain(regime)
+                if brain_state is not None and market_policy is not None and hasattr(self.sheets, "write_market_brain_v2"):
+                    self.sheets.write_market_brain_v2(brain_state, market_policy)
             except Exception:
                 logger.exception("market_brain_write_failed")
             self.log_sink.decision("REGIME", "NIFTY", regime.regime, f"bias={regime.bias}", {"vix": regime.vix, "pcr": regime.pcr.pcr})
+            if brain_state is not None:
+                self.log_sink.decision(
+                    "MARKET_BRAIN_V2",
+                    "NIFTY",
+                    brain_state.regime,
+                    f"risk={brain_state.risk_mode}",
+                    {
+                        "phase": brain_state.phase,
+                        "intradayState": brain_state.intraday_state,
+                        "trendScore": brain_state.trend_score,
+                        "breadthScore": brain_state.breadth_score,
+                        "leadershipScore": brain_state.leadership_score,
+                        "volStressScore": brain_state.volatility_stress_score,
+                        "liqHealthScore": brain_state.liquidity_health_score,
+                        "dataQualityScore": brain_state.data_quality_score,
+                    },
+                )
+            if market_policy is not None and brain_state is not None and brain_state.risk_mode == "LOCKDOWN" and not force:
+                self.log_sink.action(
+                    "TradingService",
+                    "run_scan_once",
+                    "SKIP",
+                    "market brain lockdown",
+                    {"regime": brain_state.regime, "riskMode": brain_state.risk_mode},
+                )
+                return {"skipped": "market_brain_lockdown", "regime": brain_state.regime, "riskMode": brain_state.risk_mode}
+
+            max_signals_allowed = self.settings.strategy.max_positions
+            if brain_state is not None:
+                max_signals_allowed = self.market_brain_service.policy_service.max_positions_limit(
+                    self.settings.strategy.max_positions,
+                    brain_state,
+                )
 
             watchlist = self.sheets.read_watchlist()
             subset, scan_meta = self._slice_watchlist_for_scan(watchlist)
@@ -205,12 +273,30 @@ class TradingService:
                     continue
                 direction = determine_direction(ind, regime)
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy)
+                adjusted_score = int(meta.score)
+                if brain_state is not None:
+                    adjusted_score = self.market_brain_service.adjust_signal(meta.score, brain_state)
                 ltp = ind.close
                 pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy)
+                if brain_state is not None:
+                    setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
+                    liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
+                    dq_mult = max(0.6, min(1.1, brain_state.data_quality_score / 100.0))
+                    pos = self.market_brain_service.size_position_with_market_brain(
+                        pos,
+                        brain_state,
+                        self.settings.strategy,
+                        setup_confidence_multiplier=setup_conf,
+                        liquidity_multiplier=liq_mult,
+                        data_quality_multiplier=dq_mult,
+                    )
 
                 change_pct = ((ltp - ind.prev_close) / ind.prev_close * 100) if ind.prev_close else 0
                 ema_state = "BULL_STACK" if ind.ema_stack else ("BEAR_STACK" if ind.ema_flip else "MIXED")
                 macd_view = ind.macd.crossed or ("POS" if ind.macd.hist >= 0 else "NEG")
+                policy_tag = f"{regime.regime}|{regime.bias}"
+                if brain_state is not None:
+                    policy_tag = f"{policy_tag}|{brain_state.regime}|{brain_state.risk_mode}"
                 scan_rows.append([
                     w.symbol,
                     round(ltp, 2),
@@ -218,8 +304,8 @@ class TradingService:
                     int(ind.volume.curr),
                     round(ind.volume.ratio, 2),
                     direction,
-                    int(meta.score),
-                    f"{regime.regime}|{regime.bias}",
+                    int(adjusted_score),
+                    policy_tag,
                     round(meta.breakdown.options, 0),
                     round(meta.breakdown.technical, 0),
                     round(meta.breakdown.volume, 0),
@@ -229,13 +315,28 @@ class TradingService:
                     "UP" if ind.supertrend.dir == 1 else "DOWN",
                 ])
 
+                policy_block_reason = ""
+                if direction == "BUY" and market_policy is not None and not bool(market_policy.long_enabled):
+                    policy_block_reason = "policy_long_disabled"
+                elif direction == "SELL" and market_policy is not None and not bool(market_policy.short_enabled):
+                    policy_block_reason = "policy_short_disabled"
+                elif market_policy is not None and not self._strategy_allowed(w.strategy, market_policy.allowed_strategies):
+                    policy_block_reason = "policy_strategy_blocked"
+                elif qualified >= max_signals_allowed:
+                    policy_block_reason = "policy_max_positions_reached"
+
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
-                if direction != "HOLD" and meta.score >= self.settings.strategy.min_signal_score and is_entry_window_open_ist():
+                if direction != "HOLD" and adjusted_score >= self.settings.strategy.min_signal_score and is_entry_window_open_ist() and not policy_block_reason:
                     qualified += 1
-                    reason = f"Score={meta.score} RSI={ind.rsi.curr:.1f} VolR={ind.volume.ratio:.2f} Reg={regime.bias}"
-                    self.log_sink.decision("SIGNAL", w.symbol, direction, "entry_qualified", {"score": meta.score, "reason": reason})
+                    reason = (
+                        f"Score={adjusted_score} RSI={ind.rsi.curr:.1f} VolR={ind.volume.ratio:.2f} "
+                        f"Reg={regime.bias}"
+                    )
+                    if brain_state is not None:
+                        reason += f" MB={brain_state.regime}/{brain_state.risk_mode}"
+                    self.log_sink.decision("SIGNAL", w.symbol, direction, "entry_qualified", {"score": adjusted_score, "reason": reason})
                     signal_rows.append([
-                        now_ist_str(), w.symbol, direction, meta.score,
+                        now_ist_str(), w.symbol, direction, adjusted_score,
                         round(ltp, 2), round(pos.sl_price, 2), round(pos.target, 2),
                         pos.qty, round(pos.max_loss, 2), round(pos.max_gain, 2),
                         w.strategy, regime.regime, regime.bias, "QUALIFIED",
@@ -251,17 +352,20 @@ class TradingService:
                         target=pos.target,
                         atr=ind.atr,
                         product=w.product,
-                        score=meta.score,
+                        score=adjusted_score,
                         reason=reason,
                         allow_live_orders=allow_live_orders,
                     )
                 else:
-                    why = (
-                        "direction_hold"
-                        if direction == "HOLD"
-                        else ("score_below_min" if meta.score < self.settings.strategy.min_signal_score else "entry_window_closed_or_blocked")
-                    )
-                    self.log_sink.decision("SIGNAL", w.symbol, direction, why, {"score": meta.score, "min": self.settings.strategy.min_signal_score})
+                    if direction == "HOLD":
+                        why = "direction_hold"
+                    elif adjusted_score < self.settings.strategy.min_signal_score:
+                        why = "score_below_min"
+                    elif policy_block_reason:
+                        why = policy_block_reason
+                    else:
+                        why = "entry_window_closed_or_blocked"
+                    self.log_sink.decision("SIGNAL", w.symbol, direction, why, {"score": adjusted_score, "min": self.settings.strategy.min_signal_score})
 
                 time.sleep(0.08)
 
@@ -273,9 +377,32 @@ class TradingService:
                 "run_scan_once",
                 "DONE",
                 "scan complete",
-                {"rows": len(scan_rows), "qualified": qualified, **scan_meta},
+                {
+                    "rows": len(scan_rows),
+                    "qualified": qualified,
+                    "maxSignalsAllowed": max_signals_allowed,
+                    **scan_meta,
+                    **(
+                        {
+                            "marketBrainRegime": brain_state.regime,
+                            "marketBrainRiskMode": brain_state.risk_mode,
+                        }
+                        if brain_state is not None
+                        else {}
+                    ),
+                },
             )
-            return {"rows": len(scan_rows), "qualified": qualified, **scan_meta}
+            return {
+                "rows": len(scan_rows),
+                "qualified": qualified,
+                "maxSignalsAllowed": max_signals_allowed,
+                **scan_meta,
+                **(
+                    {"marketBrainRegime": brain_state.regime, "marketBrainRiskMode": brain_state.risk_mode}
+                    if brain_state is not None
+                    else {}
+                ),
+            }
         finally:
             self.state.release_lock(lease)
             self.log_sink.flush_all()

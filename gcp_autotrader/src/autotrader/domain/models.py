@@ -8,6 +8,12 @@ Candle = tuple[str, float, float, float, float, float]
 Direction = Literal["BUY", "SELL", "HOLD"]
 RegimeKind = Literal["TREND", "RANGE", "AVOID"]
 Bias = Literal["BULLISH", "BEARISH", "NEUTRAL"]
+MarketPhase = Literal["PREMARKET", "POST_OPEN", "LIVE", "EOD"]
+MarketRegimeV2 = Literal["TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"]
+ParticipationKind = Literal["STRONG", "MODERATE", "WEAK"]
+RiskModeKind = Literal["AGGRESSIVE", "NORMAL", "DEFENSIVE", "LOCKDOWN"]
+IntradayStateKind = Literal["PREOPEN", "OPEN_DRIVE", "OPEN_FADE", "TREND_DAY", "CHOP_DAY", "EVENT_RISK"]
+PermissionKind = Literal["ENABLED", "REDUCED", "DISABLED"]
 
 
 @dataclass
@@ -267,3 +273,45 @@ class WatchlistRow:
     beta: float = 1.0
     enabled: bool = True
     note: str = ""
+
+
+@dataclass
+class MarketBrainState:
+    asof_ts: str
+    phase: MarketPhase = "PREMARKET"
+    regime: MarketRegimeV2 = "RANGE"
+    participation: ParticipationKind = "MODERATE"
+    risk_mode: RiskModeKind = "NORMAL"
+    intraday_state: IntradayStateKind = "PREOPEN"
+    long_bias: float = 0.5
+    short_bias: float = 0.5
+    size_multiplier: float = 1.0
+    max_positions_multiplier: float = 1.0
+    swing_permission: PermissionKind = "ENABLED"
+    allowed_strategies: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    trend_score: float = 50.0
+    breadth_score: float = 50.0
+    leadership_score: float = 50.0
+    volatility_stress_score: float = 50.0
+    liquidity_health_score: float = 50.0
+    data_quality_score: float = 50.0
+
+
+@dataclass
+class MarketPolicy:
+    regime: MarketRegimeV2 = "RANGE"
+    risk_mode: RiskModeKind = "NORMAL"
+    allowed_strategies: list[str] = field(default_factory=list)
+    swing_permission: PermissionKind = "ENABLED"
+    size_multiplier: float = 1.0
+    max_positions_multiplier: float = 1.0
+    watchlist_target_multiplier: float = 1.0
+    watchlist_min_score_boost: int = 0
+    intraday_phase2_enabled: bool = True
+    breakout_enabled: bool = True
+    open_drive_enabled: bool = True
+    long_enabled: bool = True
+    short_enabled: bool = True
+    liquidity_bucket_floor: str = "D"
+    reasons: list[str] = field(default_factory=list)

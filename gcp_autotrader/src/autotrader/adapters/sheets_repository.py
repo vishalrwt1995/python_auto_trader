@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from autotrader.domain.models import RegimeSnapshot, UniverseRow, WatchlistRow
+from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot, UniverseRow, WatchlistRow
 from autotrader.time_utils import now_ist_str
 
 logger = logging.getLogger(__name__)
@@ -1057,6 +1057,34 @@ class GoogleSheetsRepository:
             {"range": f"'{SheetNames.MARKET}'!E18:G18", "values": [["Data Health", "-", "Composite completeness + freshness + source quality for safe decisioning"]]},
         ]
         self.batch_update_values(data)
+
+    def write_market_brain_v2(self, state: MarketBrainState, policy: MarketPolicy) -> None:
+        self.ensure_sheet_grid_min(SheetNames.MARKET, min_rows=90, min_cols=9)
+        updates = [
+            ["Market Brain V2 Updated", str(state.asof_ts or "")],
+            ["MBV2 Phase", str(state.phase or "")],
+            ["MBV2 Regime", str(state.regime or "")],
+            ["MBV2 Participation", str(state.participation or "")],
+            ["MBV2 Risk Mode", str(state.risk_mode or "")],
+            ["MBV2 Intraday State", str(state.intraday_state or "")],
+            ["MBV2 Long Bias", round(float(state.long_bias or 0.0), 4)],
+            ["MBV2 Short Bias", round(float(state.short_bias or 0.0), 4)],
+            ["MBV2 Size Mult", round(float(state.size_multiplier or 0.0), 4)],
+            ["MBV2 MaxPos Mult", round(float(state.max_positions_multiplier or 0.0), 4)],
+            ["MBV2 Swing Permission", str(state.swing_permission or "")],
+            ["MBV2 Trend Score", round(float(state.trend_score or 0.0), 2)],
+            ["MBV2 Breadth Score", round(float(state.breadth_score or 0.0), 2)],
+            ["MBV2 Leadership Score", round(float(state.leadership_score or 0.0), 2)],
+            ["MBV2 Vol Stress Score", round(float(state.volatility_stress_score or 0.0), 2)],
+            ["MBV2 Liquidity Score", round(float(state.liquidity_health_score or 0.0), 2)],
+            ["MBV2 Data Quality Score", round(float(state.data_quality_score or 0.0), 2)],
+            ["MBV2 Allowed Strategies", ",".join(str(x) for x in (state.allowed_strategies or []))],
+            ["MBV2 Policy Target Mult", round(float(policy.watchlist_target_multiplier or 0.0), 4)],
+            ["MBV2 Policy MinScore Boost", int(policy.watchlist_min_score_boost or 0)],
+            ["MBV2 Policy Reasons", "|".join(str(x) for x in (policy.reasons or []))],
+            ["MBV2 Reasons", "|".join(str(x) for x in (state.reasons or []))],
+        ]
+        self.update_values(f"'{SheetNames.MARKET}'!H4", updates, value_input_option="RAW")
 
     def read_universe_rows(self) -> list[UniverseRow]:
         header_map = self.read_sheet_headers(SheetNames.UNIVERSE, header_row=3)

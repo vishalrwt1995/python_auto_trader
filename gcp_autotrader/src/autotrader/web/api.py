@@ -10,7 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 
 from autotrader.container import get_container
 from autotrader.services.log_sink import LogSink
-from autotrader.time_utils import now_utc, parse_any_ts
+from autotrader.time_utils import now_ist, now_utc, parse_any_ts
 
 app = FastAPI(title="GCP AutoTrader", version="0.1.0")
 logger = logging.getLogger(__name__)
@@ -82,9 +82,11 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
     }
 
 
-def _write_market_brain_best_effort(c, regime: Any) -> None:
+def _write_market_brain_best_effort(c, regime: Any, market_state: Any | None = None, market_policy: Any | None = None) -> None:
     try:
         c.sheets.write_market_brain(regime)
+        if market_state is not None and market_policy is not None and hasattr(c.sheets, "write_market_brain_v2"):
+            c.sheets.write_market_brain_v2(market_state, market_policy)
     except Exception:
         logger.exception("market_brain_write_failed")
 
@@ -372,11 +374,13 @@ def run_premarket_precompute(
                 "minWatchlistScore": min_watchlist_score,
             },
         )
-        regime = c.regime_service().get_market_regime()
-        _write_market_brain_best_effort(c, regime)
+        market_state = c.market_brain_service().build_premarket_market_brain(now_ist().isoformat())
+        market_policy = c.market_brain_service().derive_market_policy(market_state)
+        regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
+        _write_market_brain_best_effort(c, regime, market_state, market_policy)
         v2_out = c.universe_service().recompute_universe_v2_from_cache()
         wl_out = c.universe_service().build_watchlist(
-            regime,
+            market_state,
             target_size=target_size,
             min_score=max(1, min_watchlist_score),
             require_today_scored=require_today_scored,
@@ -393,7 +397,13 @@ def run_premarket_precompute(
             {**sched_ctx, **_duration_ctx(started_perf), "universeV2": v2_out, "watchlist": wl_out},
         )
         sink.flush_all()
-        return {"regime": regime.__dict__, "universeV2": v2_out, "watchlist": wl_out}
+        return {
+            "regime": regime.__dict__,
+            "marketBrainState": market_state.__dict__,
+            "marketPolicy": market_policy.__dict__,
+            "universeV2": v2_out,
+            "watchlist": wl_out,
+        }
     except Exception as e:
         sink.action(
             "Universe",
@@ -467,8 +477,16 @@ def run_watchlist_refresh(
                 "intradayTimeframe": str(intraday_timeframe),
             },
         )
+        market_state = (
+            c.market_brain_service().build_premarket_market_brain(now_ist().isoformat())
+            if bool(premarket)
+            else c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
+        )
+        market_policy = c.market_brain_service().derive_market_policy(market_state)
+        regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
+        _write_market_brain_best_effort(c, regime, market_state, market_policy)
         wl_out = c.universe_service().build_watchlist(
-            None,
+            market_state,
             target_size=target_size,
             min_score=max(1, min_watchlist_score),
             require_today_scored=require_today_scored,
@@ -493,7 +511,13 @@ def run_watchlist_refresh(
             },
         )
         sink.flush_all()
-        return {"regime": wl_out.get("regimeV2", {}), "regimeV2": wl_out.get("regimeV2", {}), "watchlist": wl_out}
+        return {
+            "regime": wl_out.get("regimeV2", {}),
+            "regimeV2": wl_out.get("regimeV2", {}),
+            "marketBrainState": market_state.__dict__,
+            "marketPolicy": market_policy.__dict__,
+            "watchlist": wl_out,
+        }
     except Exception as e:
         sink.action(
             "Universe",
@@ -560,18 +584,32 @@ def run_score_refresh(
                 "requireFreshCache": require_fresh_cache,
             },
         )
-        regime = c.regime_service().get_market_regime()
-        _write_market_brain_best_effort(c, regime)
+        market_state = c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
+        market_policy = c.market_brain_service().derive_market_policy(market_state)
+        regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
+        _write_market_brain_best_effort(c, regime, market_state, market_policy)
         v2_out = c.universe_service().recompute_universe_v2_from_cache()
         sink.action(
             "Universe",
             "score_refresh",
             "DONE",
             "universe v2 recompute complete",
-            {**sched_ctx, **_duration_ctx(started_perf), "regime": regime.__dict__, "universeV2": v2_out},
+            {
+                **sched_ctx,
+                **_duration_ctx(started_perf),
+                "regime": regime.__dict__,
+                "marketBrainState": market_state.__dict__,
+                "marketPolicy": market_policy.__dict__,
+                "universeV2": v2_out,
+            },
         )
         sink.flush_all()
-        return {"regime": regime.__dict__, "universeV2": v2_out}
+        return {
+            "regime": regime.__dict__,
+            "marketBrainState": market_state.__dict__,
+            "marketPolicy": market_policy.__dict__,
+            "universeV2": v2_out,
+        }
     except Exception as e:
         sink.action(
             "Universe",

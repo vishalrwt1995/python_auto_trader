@@ -7,6 +7,7 @@ import typer
 
 from autotrader.container import get_container
 from autotrader.services.log_sink import LogSink
+from autotrader.time_utils import now_ist
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode=None)
 
@@ -136,11 +137,16 @@ def premarket_precompute(
     c = get_container()
     c.sheets.ensure_core_sheets()
     sink = LogSink(c.sheets)
-    regime = c.regime_service().get_market_regime()
+    market_state = c.market_brain_service().build_premarket_market_brain(now_ist().isoformat())
+    market_policy = c.market_brain_service().derive_market_policy(market_state)
+    regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
+    c.sheets.write_market_brain(regime)
+    if hasattr(c.sheets, "write_market_brain_v2"):
+        c.sheets.write_market_brain_v2(market_state, market_policy)
     sink.action("Universe", "premarket_precompute", "START", "", {"targetSize": target_size})
     v2_out = c.universe_service().recompute_universe_v2_from_cache()
     wl_out = c.universe_service().build_watchlist(
-        regime,
+        market_state,
         target_size=target_size,
         min_score=max(1, min_watchlist_score),
         require_today_scored=require_today_scored,
@@ -148,7 +154,15 @@ def premarket_precompute(
     )
     sink.action("Universe", "premarket_precompute", "DONE", "watchlist ready", {"universeV2": v2_out, "watchlist": wl_out})
     sink.flush_all()
-    _print({"regime": regime.__dict__, "universeV2": v2_out, "watchlist": wl_out})
+    _print(
+        {
+            "regime": regime.__dict__,
+            "marketBrainState": market_state.__dict__,
+            "marketPolicy": market_policy.__dict__,
+            "universeV2": v2_out,
+            "watchlist": wl_out,
+        }
+    )
 
 
 @app.command("score-cache-prefetch")
