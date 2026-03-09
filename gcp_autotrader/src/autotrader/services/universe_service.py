@@ -95,6 +95,19 @@ class UniverseService:
     PHASE2_MIN_SLOT_DAYS: int = 45
     PHASE2_MIN_SLOT_COVERAGE_PCT: float = 75.0
     PHASE2_MAX_ZERO_VOLUME_PCT: float = 10.0
+    PHASE2_REJECTION_KEYS: tuple[str, ...] = (
+        "INSUFFICIENT_INTRADAY_BARS",
+        "STALE_INTRADAY_CACHE",
+        "LCD_MISMATCH",
+        "LOW_SLOT_COVERAGE",
+        "ZERO_VOLUME_RATE_HIGH",
+        "LIQUIDITY_GATE_FAIL",
+        "SETUP_GATE_FAIL",
+        "MARKET_POLICY_BLOCKED",
+        "PHASE2_WINDOW_CLOSED",
+        "NOT_IN_PHASE1_CARRY_SET",
+        "UNKNOWN",
+    )
 
     def __init__(
         self,
@@ -2805,6 +2818,55 @@ class UniverseService:
         return "INTRA_ADHOC"
 
     @staticmethod
+    def _phase2_window_open(now_i: datetime, *, premarket: bool, run_block: str = "") -> bool:
+        if premarket:
+            return False
+        rb = str(run_block or "").strip().upper()
+        if rb:
+            return rb != "INTRA_FINAL"
+        ti = now_i.astimezone(IST)
+        if ti.weekday() >= 5:
+            return False
+        hm = ti.hour * 60 + ti.minute
+        return (9 * 60 + 30) <= hm <= (15 * 60 + 10)
+
+    @classmethod
+    def _phase2_rejection_summary_template(cls) -> dict[str, int]:
+        return {k: 0 for k in cls.PHASE2_REJECTION_KEYS}
+
+    @classmethod
+    def _phase2_rejection_reason(cls, raw_reason: str | None) -> str:
+        reason = str(raw_reason or "").strip().upper()
+        if not reason:
+            return "UNKNOWN"
+        direct = {
+            "INSUFFICIENT_INTRADAY_BARS",
+            "STALE_INTRADAY_CACHE",
+            "LCD_MISMATCH",
+            "LOW_SLOT_COVERAGE",
+            "ZERO_VOLUME_RATE_HIGH",
+            "LIQUIDITY_GATE_FAIL",
+            "SETUP_GATE_FAIL",
+            "MARKET_POLICY_BLOCKED",
+            "PHASE2_WINDOW_CLOSED",
+            "NOT_IN_PHASE1_CARRY_SET",
+            "UNKNOWN",
+        }
+        if reason in direct:
+            return reason
+        alias = {
+            "TODAY_BARS_MISSING": "INSUFFICIENT_INTRADAY_BARS",
+            "BASELINE_INCOMPLETE": "LOW_SLOT_COVERAGE",
+            "BASELINE_NONPOSITIVE": "ZERO_VOLUME_RATE_HIGH",
+            "BASELINE_ZERO_VOL_HIGH": "ZERO_VOLUME_RATE_HIGH",
+            "POLICY_BLOCKED": "MARKET_POLICY_BLOCKED",
+            "POLICY_INTRADAY_PHASE2_DISABLED": "MARKET_POLICY_BLOCKED",
+            "PREMARKET_NO_INPLAY": "PHASE2_WINDOW_CLOSED",
+            "PHASE2_NOT_SELECTED": "NOT_IN_PHASE1_CARRY_SET",
+        }
+        return alias.get(reason, "UNKNOWN")
+
+    @staticmethod
     def _watchlist_volatility_bucket(atr_pct: float) -> str:
         x = float(atr_pct or 0.0)
         if x < 0.01:
@@ -2994,16 +3056,18 @@ class UniverseService:
             "baselineMedianVolume": 0.0,
         }
         if not bars:
-            out["reason"] = "TODAY_BARS_MISSING"
+            out["reason"] = "STALE_INTRADAY_CACHE"
             return out
         today = now_i.astimezone(IST).date()
         today_bars: list[list[object]] = []
         hist_by_day_slot: dict[str, dict[str, float]] = defaultdict(dict)
+        latest_ts: datetime | None = None
         for c in bars:
             ts = parse_any_ts(c[0])
             if ts is None:
                 continue
             ti = ts.astimezone(IST)
+            latest_ts = ti if latest_ts is None or ti > latest_ts else latest_ts
             slot = ti.strftime("%H:%M")
             vol = float(c[5] or 0.0)
             if ti.date() == today:
@@ -3012,7 +3076,10 @@ class UniverseService:
                 hist_by_day_slot[ti.date().isoformat()][slot] = vol
         today_bars = self._candles_sorted_unique(today_bars)
         if len(today_bars) < 4:
-            out["reason"] = "TODAY_BARS_MISSING"
+            if latest_ts is not None and latest_ts.date() < today:
+                out["reason"] = "STALE_INTRADAY_CACHE"
+            else:
+                out["reason"] = "INSUFFICIENT_INTRADAY_BARS"
             return out
 
         required_slots = self._phase2_required_slots(today_bars=today_bars, interval_min=interval_min)
@@ -3024,13 +3091,13 @@ class UniverseService:
                 continue
             today_slot_set.add(ts.astimezone(IST).strftime("%H:%M"))
         if any(s not in today_slot_set for s in required_slots):
-            out["reason"] = "TODAY_BARS_MISSING"
+            out["reason"] = "INSUFFICIENT_INTRADAY_BARS"
             return out
 
         hist_days_desc = sorted(hist_by_day_slot.keys(), reverse=True)
         hist_days_desc = hist_days_desc[: int(self.PHASE2_BASELINE_DAYS)]
         if not hist_days_desc:
-            out["reason"] = "BASELINE_INCOMPLETE"
+            out["reason"] = "LOW_SLOT_COVERAGE"
             return out
 
         slots_with_baseline = 0
@@ -3071,16 +3138,16 @@ class UniverseService:
         out["baselineMedianVolume"] = float(current_slot_median)
 
         if coverage_pct < float(self.PHASE2_MIN_SLOT_COVERAGE_PCT):
-            out["reason"] = "BASELINE_INCOMPLETE"
+            out["reason"] = "LOW_SLOT_COVERAGE"
             return out
         if slots_with_baseline < len(required_slots):
-            out["reason"] = "BASELINE_INCOMPLETE"
+            out["reason"] = "LOW_SLOT_COVERAGE"
             return out
         if current_slot_median <= 0:
-            out["reason"] = "BASELINE_NONPOSITIVE"
+            out["reason"] = "ZERO_VOLUME_RATE_HIGH"
             return out
         if zero_pct_max > float(self.PHASE2_MAX_ZERO_VOLUME_PCT):
-            out["reason"] = "BASELINE_ZERO_VOL_HIGH"
+            out["reason"] = "ZERO_VOLUME_RATE_HIGH"
             return out
 
         out["eligible"] = True
@@ -3116,24 +3183,48 @@ class UniverseService:
         mapping: dict[tuple[str, str], dict[str, str]],
         source_origin: dict[tuple[str, str], str],
     ) -> dict[str, Any]:
+        def _rows_coverage(rows: list[dict[str, Any]]) -> tuple[int, int, int, dict[str, int], float]:
+            total_count = int(len(rows))
+            mapped_count_local = 0
+            breakdown_local = {"sheet": 0, "gcs": 0, "universe_fallback": 0, "unknown": 0}
+            for row in rows:
+                key = self._sector_map_key(str(row.get("symbol") or ""), str(row.get("exchange") or "NSE"))
+                mapped = mapping.get(key) or {}
+                if not self._sector_is_mapped(str(mapped.get("sector") or "")):
+                    continue
+                mapped_count_local += 1
+                bucket = self._sector_source_bucket(source_origin.get(key, "unknown"))
+                breakdown_local[bucket] = int(breakdown_local.get(bucket, 0) or 0) + 1
+            unmapped_count_local = max(0, total_count - mapped_count_local)
+            coverage_pct_local = (mapped_count_local * 100.0 / total_count) if total_count else 0.0
+            return total_count, mapped_count_local, unmapped_count_local, breakdown_local, coverage_pct_local
+
         eligible = self._eligible_universe_for_sector_mapping(universe_rows)
-        eligible_count = int(len(eligible))
-        mapped_count = 0
-        breakdown = {"sheet": 0, "gcs": 0, "universe_fallback": 0, "unknown": 0}
+        enabled_rows = [r for r in universe_rows if bool(r.get("enabled"))]
 
-        for row in eligible:
-            key = self._sector_map_key(str(row.get("symbol") or ""), str(row.get("exchange") or "NSE"))
-            mapped = mapping.get(key) or {}
-            if not self._sector_is_mapped(str(mapped.get("sector") or "")):
-                continue
-            mapped_count += 1
-            bucket = self._sector_source_bucket(source_origin.get(key, "unknown"))
-            breakdown[bucket] = int(breakdown.get(bucket, 0) or 0) + 1
+        eligible_count_raw, eligible_mapped_raw, eligible_unmapped_raw, eligible_breakdown_raw, eligible_cov_raw = _rows_coverage(eligible)
+        enabled_count, enabled_mapped, enabled_unmapped, enabled_breakdown, enabled_cov = _rows_coverage(enabled_rows)
 
-        unmapped_count = max(0, eligible_count - mapped_count)
-        coverage_pct = (mapped_count * 100.0 / eligible_count) if eligible_count else 0.0
+        # Operationally, eligibility columns may not be populated yet when sector-mapping refresh runs.
+        # Fall back to enabled-universe scope so telemetry remains actionable instead of reporting zeros.
+        if eligible_count_raw > 0:
+            coverage_scope = "eligible"
+            effective_count = eligible_count_raw
+            mapped_count = eligible_mapped_raw
+            unmapped_count = eligible_unmapped_raw
+            breakdown = eligible_breakdown_raw
+            coverage_pct = eligible_cov_raw
+        else:
+            coverage_scope = "enabled_fallback"
+            effective_count = enabled_count
+            mapped_count = enabled_mapped
+            unmapped_count = enabled_unmapped
+            breakdown = enabled_breakdown
+            coverage_pct = enabled_cov
+
         return {
-            "eligible_universe_count": eligible_count,
+            # Backward-compatible top-level fields now reflect the effective coverage scope.
+            "eligible_universe_count": int(effective_count),
             "mapped_count": int(mapped_count),
             "unmapped_count": int(unmapped_count),
             "coverage_pct": float(round(coverage_pct, 2)),
@@ -3143,6 +3234,10 @@ class UniverseService:
                 "universe_fallback": int(breakdown["universe_fallback"]),
                 "unknown": int(breakdown["unknown"]),
             },
+            "coverage_scope": str(coverage_scope),
+            "eligible_universe_count_raw": int(eligible_count_raw),
+            "enabled_universe_count": int(enabled_count),
+            "eligible_coverage_pct_raw": float(round(eligible_cov_raw, 2)),
         }
 
     def _load_sector_mapping_dataset(
@@ -3521,6 +3616,10 @@ class UniverseService:
             "mapped_count": int(metrics_after.get("mapped_count", 0) or 0),
             "unmapped_count": int(metrics_after.get("unmapped_count", 0) or 0),
             "coverage_pct": coverage_after,
+            "coverage_scope": str(metrics_after.get("coverage_scope", "eligible")),
+            "eligible_universe_count_raw": int(metrics_after.get("eligible_universe_count_raw", 0) or 0),
+            "enabled_universe_count": int(metrics_after.get("enabled_universe_count", 0) or 0),
+            "eligible_coverage_pct_raw": float(metrics_after.get("eligible_coverage_pct_raw", 0.0) or 0.0),
             "source_breakdown_counts": dict(metrics_after.get("source_breakdown_counts") or {}),
             "coverage_before_metrics": metrics_before,
             "apiCap": api_cap_i,
@@ -4002,7 +4101,7 @@ class UniverseService:
     ) -> dict[str, object]:
         now_i = now_ist()
         expected_lcd = self._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
-        run_ts = now_i.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+        run_ts = now_i.astimezone(IST).isoformat(timespec="seconds")
         run_date = now_i.astimezone(IST).strftime("%Y-%m-%d")
         run_block = self._run_time_block(now_i, premarket=premarket)
         timeframe = "5m" if str(intraday_timeframe or "").strip().lower() != "15m" else "15m"
@@ -4262,14 +4361,52 @@ class UniverseService:
             intraday_phase1 = self.market_brain_service.adjust_watchlist_rows(intraday_phase1, market_policy, section="intraday")
         intraday_phase2: list[dict[str, Any]] = []
         phase2_fail_by_symbol: dict[str, dict[str, Any]] = {}
+        phase2_rejection_summary = self._phase2_rejection_summary_template()
+        phase2_branch_entered = False
+        phase2_branch_completed = False
+        phase2_candidates_seen = 0
+        phase2_global_skip_reason = ""
+        phase2_window_open = self._phase2_window_open(now_i, premarket=bool(premarket), run_block=run_block)
+        phase2_policy_enabled = not (market_policy is not None and not bool(market_policy.intraday_phase2_enabled))
 
-        if not premarket and not (market_policy is not None and not bool(market_policy.intraday_phase2_enabled)):
+        def _record_phase2_rejection(symbol: str, reason: str, *, baseline_coverage: float = 0.0) -> None:
+            norm_reason = self._phase2_rejection_reason(reason)
+            phase2_rejection_summary[norm_reason] = int(phase2_rejection_summary.get(norm_reason, 0) or 0) + 1
+            if symbol:
+                phase2_fail_by_symbol[symbol] = {
+                    "eligible": False,
+                    "reason": norm_reason,
+                    "phase2BaselineCoveragePct": float(baseline_coverage or 0.0),
+                }
+
+        if not premarket and not phase2_window_open:
+            phase2_global_skip_reason = "PHASE2_WINDOW_CLOSED"
+            phase2_candidates_seen = len(intraday_phase1)
+            if intraday_phase1:
+                phase2_rejection_summary["PHASE2_WINDOW_CLOSED"] += len(intraday_phase1)
+        elif not premarket and not phase2_policy_enabled:
+            phase2_global_skip_reason = "MARKET_POLICY_BLOCKED"
+            phase2_candidates_seen = len(intraday_phase1)
+            if intraday_phase1:
+                phase2_rejection_summary["MARKET_POLICY_BLOCKED"] += len(intraday_phase1)
+        elif not premarket:
+            phase2_branch_entered = True
+            phase2_candidates_seen = len(intraday_phase1)
+            liq_rank = {"A": 4, "B": 3, "C": 2, "D": 1}
+            liq_floor = liq_rank.get(str(market_policy.liquidity_bucket_floor).upper(), 1) if market_policy is not None else 1
             for r in intraday_phase1:
+                sym = str(r.get("symbol") or "")
+                if str(r.get("last1DDate") or "").strip() and str(r.get("last1DDate") or "").strip() != expected_lcd:
+                    _record_phase2_rejection(sym, "LCD_MISMATCH")
+                    continue
                 bars = self._watchlist_intraday_candles(r, timeframe=timeframe, now_i=now_i)
                 phase2_chk = self._phase2_eligibility(bars=bars, now_i=now_i, interval_min=interval_min)
-                sym = str(r.get("symbol") or "")
                 if not bool(phase2_chk.get("eligible")):
-                    phase2_fail_by_symbol[sym] = phase2_chk
+                    _record_phase2_rejection(
+                        sym,
+                        str(phase2_chk.get("reason") or ""),
+                        baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                    )
                     continue
                 today_bars = []
                 for c in bars:
@@ -4279,11 +4416,20 @@ class UniverseService:
                     if ts.astimezone(IST).date() == now_i.astimezone(IST).date():
                         today_bars.append(c)
                 if len(today_bars) < 4:
-                    phase2_fail_by_symbol[sym] = {
-                        "eligible": False,
-                        "reason": "TODAY_BARS_MISSING",
-                        "phase2BaselineCoveragePct": float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
-                    }
+                    _record_phase2_rejection(
+                        sym,
+                        "INSUFFICIENT_INTRADAY_BARS",
+                        baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                    )
+                    continue
+
+                liq = str(r.get("liquidityBucket") or "D").upper()
+                if liq_rank.get(liq, 0) < liq_floor:
+                    _record_phase2_rejection(
+                        sym,
+                        "LIQUIDITY_GATE_FAIL",
+                        baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                    )
                     continue
 
                 vwap_series: list[float] = []
@@ -4320,6 +4466,28 @@ class UniverseService:
 
                 phase2_score = max(trend_score, reversal_score) * 100.0
                 setup_label = "VWAP_TREND" if trend_score >= reversal_score else "VWAP_REVERSAL"
+                if float(phase2_score) < float(min_score_eff):
+                    _record_phase2_rejection(
+                        sym,
+                        "SETUP_GATE_FAIL",
+                        baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                    )
+                    continue
+                if market_policy is not None:
+                    if (not bool(market_policy.breakout_enabled)) and setup_label in {"VWAP_TREND", "BREAKOUT"}:
+                        _record_phase2_rejection(
+                            sym,
+                            "MARKET_POLICY_BLOCKED",
+                            baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                        )
+                        continue
+                    if (not bool(market_policy.open_drive_enabled)) and "OPEN" in setup_label:
+                        _record_phase2_rejection(
+                            sym,
+                            "MARKET_POLICY_BLOCKED",
+                            baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                        )
+                        continue
                 intraday_phase2.append(
                     {
                         **r,
@@ -4336,14 +4504,27 @@ class UniverseService:
                         "fallbackReason": "",
                     }
                 )
-            if market_policy is not None and self.market_brain_service is not None:
-                intraday_phase2 = self.market_brain_service.adjust_watchlist_rows(intraday_phase2, market_policy, section="intraday")
+            phase2_branch_completed = True
+
+        if (not premarket) and (not phase2_global_skip_reason):
+            phase2_symbols = {str(r.get("symbol") or "") for r in intraday_phase2 if str(r.get("symbol") or "")}
+            for r in intraday_phase1:
+                sym = str(r.get("symbol") or "")
+                if not sym or sym in phase2_symbols or sym in phase2_fail_by_symbol:
+                    continue
+                _record_phase2_rejection(sym, "NOT_IN_PHASE1_CARRY_SET")
 
         intraday_phase1_fallback: list[dict[str, Any]] = []
         for r in intraday_phase1:
             sym = str(r.get("symbol") or "")
             fail = phase2_fail_by_symbol.get(sym) or {}
-            fallback_reason = "PREMARKET_NO_INPLAY" if premarket else str(fail.get("reason") or "PHASE2_NOT_SELECTED")
+            if premarket:
+                fallback_reason = "PHASE2_WINDOW_CLOSED"
+            elif phase2_global_skip_reason:
+                fallback_reason = phase2_global_skip_reason
+            else:
+                fallback_reason = str(fail.get("reason") or "NOT_IN_PHASE1_CARRY_SET")
+            fallback_reason = self._phase2_rejection_reason(fallback_reason)
             intraday_phase1_fallback.append(
                 {
                     **r,
@@ -4388,6 +4569,7 @@ class UniverseService:
         phase2_eligible_count = len(intraday_phase2)
         phase2_eligible_pct = (phase2_eligible_count * 100.0 / len(intraday_phase1)) if intraday_phase1 else 0.0
 
+        swing_selected_count = len(swing_selected)
         swing_rows: list[list[object]] = []
         for i, r in enumerate(swing_selected, start=1):
             swing_rows.append(
@@ -4419,6 +4601,46 @@ class UniverseService:
                     float(round(float(r.get("maxCorrToSelected") or 0.0), 6)),
                     float(round(float(r.get("turnoverMed60D") or 0.0), 2)),
                     float(round(float(r.get("atr14") or 0.0), 6)),
+                ]
+            )
+        if premarket and not swing_rows and market_policy is not None and str(market_policy.swing_permission or "").upper() == "DISABLED":
+            if market_state is not None and (str(market_state.regime or "").upper() == "PANIC" or str(market_state.risk_mode or "").upper() == "LOCKDOWN"):
+                swing_reason = "PANIC_LOCKDOWN"
+            elif market_state is not None and str(market_state.regime or "").upper() == "TREND_DOWN":
+                swing_reason = "TREND_DOWN_SWING_DISABLED"
+            elif market_state is not None and str(market_state.participation or "").upper() == "WEAK":
+                swing_reason = "LOW_PARTICIPATION_SWING_DISABLED"
+            else:
+                swing_reason = "LOW_PARTICIPATION_SWING_DISABLED"
+            swing_rows.append(
+                [
+                    run_ts,
+                    run_date,
+                    1,
+                    "__SWING_POLICY__",
+                    "",
+                    "NSE",
+                    0.0,
+                    "",
+                    regime_v2["regimeDaily"],
+                    regime_v2["regimeIntraday"],
+                    "",
+                    "",
+                    0.0,
+                    0.0,
+                    0.0,
+                    expected_lcd,
+                    "N",
+                    "DISABLED_BY_MARKET_BRAIN",
+                    swing_reason,
+                    "UNKNOWN",
+                    "UNKNOWN",
+                    "UNKNOWN",
+                    "UNKNOWN",
+                    "policy",
+                    0.0,
+                    0.0,
+                    0.0,
                 ]
             )
 
@@ -4476,11 +4698,32 @@ class UniverseService:
         else:
             logger.info("build_watchlist_v2 swing write skipped premarket=%s runBlock=%s", premarket, run_block)
         self.sheets.replace_watchlist_intraday_v2(intraday_rows)
+        phase2_diag_payload = {
+            "phase2BranchEntered": bool(phase2_branch_entered),
+            "phase2BranchCompleted": bool(phase2_branch_completed),
+            "phase2CandidatesSeen": int(phase2_candidates_seen),
+            "phase2EligibleCount": int(phase2_eligible_count),
+            "phase2UsedCount": int(phase2_used_count),
+            "phase2RejectionSummary": {k: int(phase2_rejection_summary.get(k, 0) or 0) for k in self.PHASE2_REJECTION_KEYS},
+        }
+        try:
+            runtime_state = getattr(self.market_brain_service, "state", None) if self.market_brain_service is not None else None
+            if runtime_state is not None and hasattr(runtime_state, "set_runtime_prop"):
+                runtime_state.set_runtime_prop("runtime:watchlist_last_run_ts", str(run_ts))
+                runtime_state.set_runtime_prop("runtime:watchlist_last_block", str(run_block))
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_branch_entered", "Y" if phase2_branch_entered else "N")
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_branch_completed", "Y" if phase2_branch_completed else "N")
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_candidates_seen", str(int(phase2_candidates_seen)))
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_eligible_count", str(int(phase2_eligible_count)))
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_used_count", str(int(phase2_used_count)))
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_rejections", json.dumps(phase2_diag_payload["phase2RejectionSummary"], separators=(",", ":")))
+        except Exception:
+            logger.warning("watchlist_phase2_runtime_diag_write_failed", exc_info=True)
 
         out = {
             "selected": len(intraday_rows),
-            "swingSelected": len(swing_rows) if swing_written else 0,
-            "swingComputed": len(swing_rows),
+            "swingSelected": int(swing_selected_count) if swing_written else 0,
+            "swingComputed": int(swing_selected_count),
             "intradaySelected": len(intraday_rows),
             "coverage": {
                 **coverage_v2,
@@ -4505,16 +4748,24 @@ class UniverseService:
                 "phase2EligibleCount": int(phase2_eligible_count),
                 "phase2EligiblePct": float(round(phase2_eligible_pct, 2)),
                 "intradaySelectedCount": int(len(intraday_rows)),
+                "phase2BranchEntered": bool(phase2_branch_entered),
+                "phase2BranchCompleted": bool(phase2_branch_completed),
+                "phase2CandidatesSeen": int(phase2_candidates_seen),
+                "phase2RejectionSummary": {k: int(phase2_rejection_summary.get(k, 0) or 0) for k in self.PHASE2_REJECTION_KEYS},
             },
+            "intradayPhaseDiagnostics": phase2_diag_payload,
         }
         logger.info(
-            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f marketRegime=%s riskMode=%s",
-            len(swing_rows),
+            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s phase2BranchEntered=%s phase2BranchCompleted=%s phase2Seen=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f marketRegime=%s riskMode=%s",
+            swing_selected_count,
             len(intraday_rows),
             len(swing_candidates),
             len(intraday_candidates),
             len(intraday_phase1),
             len(intraday_phase2),
+            bool(phase2_branch_entered),
+            bool(phase2_branch_completed),
+            int(phase2_candidates_seen),
             run_block,
             regime_v2["regimeDaily"],
             regime_v2["regimeIntraday"],

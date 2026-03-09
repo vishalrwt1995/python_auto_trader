@@ -22,11 +22,15 @@ def test_watchlist_done_log_fields_include_required_premarket_audit_keys():
             },
         },
         "intradayPhaseStats": {
+            "phase2BranchEntered": True,
+            "phase2BranchCompleted": True,
+            "phase2CandidatesSeen": 150,
             "phase2UsedCount": 0,
             "phase1FallbackCount": 150,
             "phase2EligibleCount": 0,
             "phase2EligiblePct": 0.0,
             "intradaySelectedCount": 150,
+            "phase2RejectionSummary": {"MARKET_POLICY_BLOCKED": 150},
         },
     }
 
@@ -39,6 +43,10 @@ def test_watchlist_done_log_fields_include_required_premarket_audit_keys():
     assert ctx["regimeDaily"] == "RANGE"
     assert ctx["regimeIntraday"] == "NA"
     assert ctx["phase2_used_count"] + ctx["phase1_fallback_count"] == ctx["intraday_selected_count"]
+    assert ctx["phase2_branch_entered"] is True
+    assert ctx["phase2_branch_completed"] is True
+    assert ctx["phase2_candidates_seen"] == 150
+    assert ctx["phase2_rejection_summary"]["MARKET_POLICY_BLOCKED"] == 150
 
 
 class _SheetsStub:

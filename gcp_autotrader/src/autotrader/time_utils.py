@@ -16,7 +16,8 @@ def now_ist() -> datetime:
 
 
 def now_ist_str() -> str:
-    return now_ist().strftime("%d-%m-%Y %H:%M:%S")
+    # Operational logs/sheets must use ISO-8601 IST to avoid locale/date-serial ambiguity.
+    return now_ist().isoformat(timespec="seconds")
 
 
 def today_ist() -> str:
@@ -75,4 +76,3 @@ class MarketWindow:
         if self.start_minutes <= self.end_minutes:
             return self.start_minutes <= m <= self.end_minutes
         return m >= self.start_minutes or m <= self.end_minutes
-

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
+from autotrader.domain.models import MarketBrainState, MarketPolicy
 from autotrader.services.universe_service import UniverseService
 from autotrader.services.universe_v2 import ModeThresholds, UniverseControls
 from autotrader.settings import StrategySettings
@@ -103,6 +104,30 @@ class _FakeSheetsSector(_FakeSheets):
         return []
 
 
+class _MarketBrainStub:
+    def __init__(self, state: MarketBrainState, policy: MarketPolicy):
+        self._state = state
+        self._policy = policy
+        self.state = None
+
+    def derive_market_policy(self, state: MarketBrainState) -> MarketPolicy:
+        del state
+        return self._policy
+
+    def watchlist_regime_payload(self, state: MarketBrainState) -> dict[str, Any]:
+        del state
+        return {
+            "regimeDaily": "RISK_OFF",
+            "regimeIntraday": "CHOPPY",
+            "source": {"dailySource": "cache_only", "intradaySource": "premarket_skip"},
+        }
+
+    def adjust_watchlist_rows(self, rows: list[dict[str, Any]], policy: MarketPolicy, *, section: str) -> list[dict[str, Any]]:
+        if section == "swing" and str(policy.swing_permission).upper() == "DISABLED":
+            return []
+        return list(rows)
+
+
 def _intraday_5m_history_with_today(days: int, *, today_bars: int = 18) -> list[list[object]]:
     now_i = now_ist().astimezone(IST)
     today = now_i.date()
@@ -178,7 +203,7 @@ def test_watchlist_v2_score_bounds_zero_to_hundred():
     sheets = _FakeSheets()
     svc = UniverseService(sheets, object(), object(), StrategySettings())
     now_i = now_ist()
-    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
     candidates = [
         {
@@ -244,7 +269,7 @@ def test_watchlist_v2_intraday_run_does_not_overwrite_swing_sheet():
     sheets.swing_rows = [["KEEP_SWING_ROW"]]
     svc = UniverseService(sheets, object(), object(), StrategySettings())
     now_i = now_ist()
-    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
     candidates = [
         {
@@ -303,7 +328,7 @@ def test_watchlist_v2_phase2_eligibility_fails_and_forces_fallback():
     sheets = _FakeSheets()
     svc = UniverseService(sheets, object(), object(), StrategySettings())
     now_i = now_ist()
-    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
     candidate = {
         "symbol": "AAA",
         "exchange": "NSE",
@@ -344,7 +369,7 @@ def test_watchlist_v2_phase2_eligibility_fails_and_forces_fallback():
     row = sheets.intraday_rows[0]
     assert row[8] == "PHASE1_DAILY_FALLBACK"
     assert row[26] == "N"
-    assert row[28] == "BASELINE_INCOMPLETE"
+    assert row[28] == "LOW_SLOT_COVERAGE"
 
 
 def test_watchlist_v2_phase2_eligibility_fails_when_today_bars_missing():
@@ -352,14 +377,14 @@ def test_watchlist_v2_phase2_eligibility_fails_when_today_bars_missing():
     bars = _intraday_5m_history_with_today(60, today_bars=0)
     chk = svc._phase2_eligibility(bars=bars, now_i=now_ist(), interval_min=5)
     assert chk["eligible"] is False
-    assert chk["reason"] == "TODAY_BARS_MISSING"
+    assert chk["reason"] == "STALE_INTRADAY_CACHE"
 
 
 def test_watchlist_v2_phase2_eligibility_passes_with_complete_baseline():
     sheets = _FakeSheets()
     svc = UniverseService(sheets, object(), object(), StrategySettings())
     now_i = now_ist()
-    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
     candidate = {
         "symbol": "AAA",
         "exchange": "NSE",
@@ -401,6 +426,127 @@ def test_watchlist_v2_phase2_eligibility_passes_with_complete_baseline():
     assert row[8] == "PHASE2_INPLAY"
     assert row[26] == "Y"
     assert float(row[27]) >= 75.0
+
+
+def test_watchlist_v2_phase2_diagnostics_present_when_phase2_runs():
+    sheets = _FakeSheets()
+    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    now_i = now_ist()
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
+    candidate = {
+        "symbol": "AAA",
+        "exchange": "NSE",
+        "segment": "CASH",
+        "enabled": True,
+        "instrumentKey": "NSE_EQ|AAA",
+        "eligibleSwing": True,
+        "eligibleIntraday": True,
+        "turnoverRank60D": 10,
+        "turnoverMed60D": 12_000_000.0,
+        "liquidityBucket": "A",
+        "atr14": 1.4,
+        "atrPct14D": 0.018,
+        "gapRisk60D": 0.012,
+        "priceLast": 120.0,
+        "bars1D": 260,
+        "last1DDate": expected_lcd,
+        "fresh": True,
+        "disableReason": "",
+        "decisionPresent": True,
+        "sector": "FINANCIALS",
+        "sectorSource": "nse",
+        "sectorUpdatedAt": "",
+    }
+    svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
+    svc._run_time_block = lambda now_i, premarket=False: "INTRA_5M"  # type: ignore[method-assign]
+    svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
+        "regimeDaily": "RANGE",
+        "regimeIntraday": "CHOPPY",
+        "source": {},
+    }
+    svc._watchlist_v2_candidates = lambda expected_lcd: [dict(candidate)]  # type: ignore[method-assign]
+    svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
+    svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_history_with_today(20)  # type: ignore[method-assign]
+
+    out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
+    stats = out["intradayPhaseStats"]
+    assert stats["phase2BranchEntered"] is True
+    assert stats["phase2BranchCompleted"] is True
+    assert int(stats["phase2CandidatesSeen"]) >= 1
+    assert "phase2RejectionSummary" in stats
+    summary = stats["phase2RejectionSummary"]
+    assert isinstance(summary, dict)
+    assert "LOW_SLOT_COVERAGE" in summary
+
+
+def test_watchlist_v2_writes_explicit_swing_disabled_state():
+    sheets = _FakeSheets()
+    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    now_i = now_ist()
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
+    candidate = {
+        "symbol": "AAA",
+        "exchange": "NSE",
+        "segment": "CASH",
+        "enabled": True,
+        "instrumentKey": "NSE_EQ|AAA",
+        "eligibleSwing": True,
+        "eligibleIntraday": True,
+        "turnoverRank60D": 10,
+        "turnoverMed60D": 12_000_000.0,
+        "liquidityBucket": "A",
+        "atr14": 1.4,
+        "atrPct14D": 0.018,
+        "gapRisk60D": 0.012,
+        "priceLast": 120.0,
+        "bars1D": 260,
+        "last1DDate": expected_lcd,
+        "fresh": True,
+        "disableReason": "",
+        "decisionPresent": True,
+        "sector": "FINANCIALS",
+        "sectorSource": "nse",
+        "sectorUpdatedAt": "",
+    }
+    state = MarketBrainState(
+        asof_ts=now_i.isoformat(),
+        phase="PREMARKET",
+        regime="PANIC",
+        participation="WEAK",
+        risk_mode="LOCKDOWN",
+        intraday_state="PREOPEN",
+        swing_permission="DISABLED",
+    )
+    policy = MarketPolicy(
+        regime="PANIC",
+        risk_mode="LOCKDOWN",
+        swing_permission="DISABLED",
+        intraday_phase2_enabled=False,
+        breakout_enabled=False,
+        open_drive_enabled=False,
+        long_enabled=False,
+        short_enabled=True,
+        watchlist_target_multiplier=0.4,
+        watchlist_min_score_boost=18,
+        liquidity_bucket_floor="A",
+        reasons=["regime=PANIC", "riskMode=LOCKDOWN"],
+    )
+    svc.market_brain_service = _MarketBrainStub(state, policy)  # type: ignore[assignment]
+    svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
+    svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
+        "regimeDaily": "RISK_OFF",
+        "regimeIntraday": "CHOPPY",
+        "source": {},
+    }
+    svc._watchlist_v2_candidates = lambda expected_lcd: [dict(candidate)]  # type: ignore[method-assign]
+    svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
+    svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_history_with_today(60)  # type: ignore[method-assign]
+
+    out = svc.build_watchlist(state, target_size=20, premarket=True, intraday_timeframe="5m")
+    assert out["swingSelected"] == 0
+    assert len(sheets.swing_rows) == 1
+    assert sheets.swing_rows[0][17] == "DISABLED_BY_MARKET_BRAIN"
+    assert "PANIC_LOCKDOWN" in str(sheets.swing_rows[0][18])
 
 
 def test_watchlist_v2_correlation_guard_blocks_high_corr_duplicate():
@@ -521,7 +667,7 @@ def test_watchlist_v2_require_full_coverage_blocks_when_unclassified_enabled_row
     sheets = _FakeSheets()
     svc = UniverseService(sheets, object(), object(), StrategySettings())
     now_i = now_ist()
-    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
     svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
     svc._watchlist_v2_candidates = lambda expected_lcd: [  # type: ignore[method-assign]
@@ -578,7 +724,7 @@ def test_watchlist_v2_require_today_scored_blocks_when_today_coverage_incomplete
     sheets = _FakeSheets()
     svc = UniverseService(sheets, object(), object(), StrategySettings())
     now_i = now_ist()
-    expected_lcd = (now_i - timedelta(days=1)).strftime("%Y-%m-%d")
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
     svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
     svc._watchlist_v2_candidates = lambda expected_lcd: [  # type: ignore[method-assign]

@@ -146,22 +146,83 @@ class MarketBrainService:
         eligible = [r for r in rows if bool(r.get("fresh")) and (bool(r.get("eligibleIntraday")) or bool(r.get("eligibleSwing")))]
         if not eligible:
             return 35.0, {"eligible": 0, "topLiqPassPct": 0.0, "weakLiqConcentrationPct": 100.0}
-        top = [r for r in eligible if int(r.get("turnoverRank60D") or 999999) <= 500]
-        top_liq = [r for r in top if str(r.get("liquidityBucket") or "").upper() in {"A", "B"}]
+        top_ranked = [r for r in eligible if int(r.get("turnoverRank60D") or 999999) <= 500]
+        top_liq = [r for r in top_ranked if str(r.get("liquidityBucket") or "").upper() in {"A", "B"}]
         weak = [r for r in eligible if str(r.get("liquidityBucket") or "").upper() in {"C", "D", ""}]
-        top_pass = (len(top_liq) * 100.0 / max(1, len(top))) if top else 0.0
+        top_pass = (len(top_liq) * 100.0 / max(1, len(top_ranked))) if top_ranked else 0.0
         weak_conc = (len(weak) * 100.0 / max(1, len(eligible)))
-        quality = statistics.median([float(r.get("turnoverMed60D") or 0.0) for r in top_liq]) if top_liq else 0.0
-        score01 = (
-            0.45 * self._norm(top_pass, 35.0, 90.0)
-            + 0.35 * (1.0 - self._norm(weak_conc, 20.0, 75.0))
-            + 0.20 * self._norm(quality, 1e7, 5e8)
+
+        turnover_vals = sorted([float(r.get("turnoverMed60D") or 0.0) for r in eligible if float(r.get("turnoverMed60D") or 0.0) > 0])
+        if turnover_vals:
+            p20 = turnover_vals[min(len(turnover_vals) - 1, max(0, int(math.floor(0.20 * (len(turnover_vals) - 1)))))]
+            p50 = statistics.median(turnover_vals)
+            p80 = turnover_vals[min(len(turnover_vals) - 1, max(0, int(math.floor(0.80 * (len(turnover_vals) - 1)))))]
+        else:
+            p20 = p50 = p80 = 0.0
+
+        ranked_by_turnover = sorted(
+            eligible,
+            key=lambda x: float(x.get("turnoverMed60D") or 0.0),
+            reverse=True,
         )
-        return float(round(score01 * 100.0, 2)), {
+        top_n = ranked_by_turnover[: max(10, min(30, len(ranked_by_turnover)))]
+        top5 = ranked_by_turnover[:5]
+        top_n_sum = sum(float(r.get("turnoverMed60D") or 0.0) for r in top_n)
+        top5_sum = sum(float(r.get("turnoverMed60D") or 0.0) for r in top5)
+        top5_conc = (top5_sum / max(1e-9, top_n_sum)) if top_n else 1.0
+
+        bucket_counts = {
+            "A": sum(1 for r in eligible if str(r.get("liquidityBucket") or "").upper() == "A"),
+            "B": sum(1 for r in eligible if str(r.get("liquidityBucket") or "").upper() == "B"),
+            "C": sum(1 for r in eligible if str(r.get("liquidityBucket") or "").upper() == "C"),
+            "D": sum(1 for r in eligible if str(r.get("liquidityBucket") or "").upper() in {"D", ""}),
+        }
+        entropy = 0.0
+        total = float(len(eligible))
+        if total > 0:
+            for c in bucket_counts.values():
+                if c <= 0:
+                    continue
+                p = c / total
+                entropy += -p * math.log(p)
+            entropy /= math.log(4.0)
+
+        fallback_only = [
+            r for r in eligible if bool(r.get("eligibleSwing")) and (not bool(r.get("eligibleIntraday")))
+        ]
+        fallback_only_pct = (len(fallback_only) * 100.0 / max(1, len(eligible)))
+
+        top_liq_component = self._norm(top_pass, 40.0, 92.0)
+        weak_component = 1.0 - self._norm(weak_conc, 18.0, 68.0)
+        turnover_component = (0.55 * self._norm(p50, 2.0e7, 7.0e8)) + (0.45 * self._norm(p20, 5.0e6, 1.5e8))
+        concentration_component = 1.0 - self._norm(top5_conc, 0.28, 0.70)
+        entropy_component = self._norm(entropy, 0.35, 0.95)
+        fallback_penalty = self._norm(fallback_only_pct, 12.0, 55.0)
+        stress_regime_execution_penalty = self._norm(weak_conc, 28.0, 75.0) * (1.0 - top_liq_component)
+
+        score01 = (
+            (0.27 * top_liq_component)
+            + (0.21 * weak_component)
+            + (0.20 * turnover_component)
+            + (0.16 * concentration_component)
+            + (0.16 * entropy_component)
+            - (0.11 * fallback_penalty)
+            - (0.09 * stress_regime_execution_penalty)
+        )
+        score = float(round(self._clip(score01 * 100.0, 0.0, 100.0), 2))
+        return score, {
             "eligible": len(eligible),
             "topLiqPassPct": round(top_pass, 2),
             "weakLiqConcentrationPct": round(weak_conc, 2),
-            "turnoverMedianTop": round(float(quality), 2),
+            "candidateTurnoverPercentiles": {
+                "p20": round(float(p20), 2),
+                "p50": round(float(p50), 2),
+                "p80": round(float(p80), 2),
+            },
+            "top5LiquidityConcentrationPct": round(float(top5_conc * 100.0), 2),
+            "liquidityDistributionEntropy": round(float(entropy), 4),
+            "fallbackOnlyCandidatePct": round(float(fallback_only_pct), 2),
+            "stressRegimeExecutionPenalty": round(float(stress_regime_execution_penalty), 4),
         }
 
     def _compute_data_quality(
@@ -187,7 +248,62 @@ class MarketBrainService:
             + 0.15 * self._norm(leaders_processed, 30.0, 120.0)
             + 0.10 * self._norm(intraday_bars, 0.0, 75.0)
         )
-        score = float(round(score01 * 100.0, 2))
+        base_quality_score = float(round(score01 * 100.0, 2))
+
+        now_i = now_ist()
+        phase_hint = str(regime_ctx.get("_phaseHint") or "").strip().upper()
+        if phase_hint in {"PREMARKET", "POST_OPEN", "LIVE", "EOD"}:
+            phase = phase_hint
+        else:
+            phase = self._phase_from_clock(now_i.astimezone(IST))
+        is_live_window = phase in {"POST_OPEN", "LIVE"}
+        watchlist_ts = parse_any_ts(self.state.get_runtime_prop("runtime:watchlist_last_run_ts", ""))
+        scanner_ts = parse_any_ts(self.state.get_runtime_prop("runtime:scanner_last_run_ts", ""))
+        signals_ts = parse_any_ts(self.state.get_runtime_prop("runtime:signals_last_write_ts", ""))
+        phase2_eligible_count = int(self.state.get_runtime_prop("runtime:watchlist_last_phase2_eligible_count", "0") or "0")
+        phase2_branch_entered = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_branch_entered", "")).strip().upper() in {"Y", "YES", "TRUE", "1"}
+
+        intraday_phase2_penalty = 0.0
+        pipeline_alignment_penalty = 0.0
+        stale_writer_penalty = 0.0
+        writer_age_min: dict[str, float | None] = {"watchlist": None, "scanner": None, "signals": None}
+
+        if is_live_window:
+            if intraday_bars < 6.0:
+                intraday_phase2_penalty += 7.0
+            if phase2_eligible_count <= 0:
+                intraday_phase2_penalty += 14.0 if (phase2_branch_entered or intraday_bars >= 6.0) else 8.0
+
+            writer_ts = [("watchlist", watchlist_ts), ("scanner", scanner_ts), ("signals", signals_ts)]
+            observed: list[datetime] = []
+            for name, ts in writer_ts:
+                if ts is None:
+                    continue
+                ti = ts.astimezone(IST)
+                observed.append(ti)
+                age_min = max(0.0, (now_i.astimezone(IST) - ti).total_seconds() / 60.0)
+                writer_age_min[name] = round(age_min, 2)
+                if name == "scanner":
+                    stale_writer_penalty += 16.0 * self._norm(age_min, 12.0, 90.0)
+                elif name == "watchlist":
+                    stale_writer_penalty += 10.0 * self._norm(age_min, 15.0, 120.0)
+                else:
+                    stale_writer_penalty += 8.0 * self._norm(age_min, 20.0, 120.0)
+            if scanner_ts is None:
+                stale_writer_penalty += 12.0
+
+            if len(observed) >= 2:
+                spread_min = max(0.0, (max(observed) - min(observed)).total_seconds() / 60.0)
+                pipeline_alignment_penalty += 12.0 * self._norm(spread_min, 5.0, 60.0)
+            elif len(observed) == 1:
+                pipeline_alignment_penalty += 4.0
+
+        score = self._clip(
+            base_quality_score - intraday_phase2_penalty - pipeline_alignment_penalty - stale_writer_penalty,
+            0.0,
+            100.0,
+        )
+        score = float(round(score, 2))
         return score, {
             "totalRows": total,
             "freshPct": round(fresh_pct, 2),
@@ -195,6 +311,13 @@ class MarketBrainService:
             "breadthProcessed": int(breadth_processed),
             "leadersProcessed": int(leaders_processed),
             "intradayBars": int(intraday_bars),
+            "baseQualityScore": round(base_quality_score, 2),
+            "intradayPhase2Penalty": round(float(intraday_phase2_penalty), 2),
+            "pipelineAlignmentPenalty": round(float(pipeline_alignment_penalty), 2),
+            "staleWriterPenalty": round(float(stale_writer_penalty), 2),
+            "phase2EligibleCount": int(phase2_eligible_count),
+            "phase2BranchEntered": bool(phase2_branch_entered),
+            "writerAgeMin": writer_age_min,
         }
 
     def _compute_trend_score(self, regime_ctx: dict[str, Any]) -> float:
@@ -415,11 +538,13 @@ class MarketBrainService:
                 logger.warning("market_brain_v2 live regime fetch failed", exc_info=True)
 
         volatility_stress_score, stress_ctx = self._compute_volatility_stress(regime_ctx=regime_ctx, live_regime=live_regime)
+        quality_regime_ctx = dict(regime_ctx)
+        quality_regime_ctx["_phaseHint"] = phase
         data_quality_score, quality_ctx = self._compute_data_quality(
             rows=rows,
             breadth=breadth,
             leadership=leadership,
-            regime_ctx=regime_ctx,
+            regime_ctx=quality_regime_ctx,
         )
 
         risk_appetite = (

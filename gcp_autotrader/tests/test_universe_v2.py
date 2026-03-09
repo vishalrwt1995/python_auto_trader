@@ -936,3 +936,32 @@ def test_sector_mapping_coverage_metrics_match_final_merged_mapping():
     assert metrics["source_breakdown_counts"]["gcs"] == 1
     assert metrics["source_breakdown_counts"]["universe_fallback"] == 1
     assert metrics["source_breakdown_counts"]["unknown"] == 0
+
+
+def test_sector_mapping_coverage_metrics_falls_back_to_enabled_scope_when_eligible_is_empty():
+    svc = UniverseService(object(), object(), object(), StrategySettings())
+    universe_rows = [
+        {"symbol": "AAA", "exchange": "NSE", "enabled": True, "fresh": False, "eligibleSwing": False, "eligibleIntraday": False},
+        {"symbol": "BBB", "exchange": "NSE", "enabled": True, "fresh": False, "eligibleSwing": False, "eligibleIntraday": False},
+        {"symbol": "CCC", "exchange": "NSE", "enabled": False, "fresh": True, "eligibleSwing": True, "eligibleIntraday": True},
+    ]
+    mapping = {
+        ("AAA", "NSE"): {"sector": "IT"},
+    }
+    source_origin = {
+        ("AAA", "NSE"): "sheet",
+    }
+
+    metrics = svc._sector_mapping_coverage_metrics(universe_rows, mapping, source_origin)
+    assert metrics["coverage_scope"] == "enabled_fallback"
+    # Top-level backward-compatible counts reflect effective scope in fallback mode.
+    assert metrics["eligible_universe_count"] == 2
+    assert metrics["mapped_count"] == 1
+    assert metrics["unmapped_count"] == 1
+    assert metrics["mapped_count"] + metrics["unmapped_count"] == metrics["eligible_universe_count"]
+    assert metrics["coverage_pct"] == pytest.approx(50.0, abs=0.1)
+    # Raw diagnostics preserve why fallback was used.
+    assert metrics["eligible_universe_count_raw"] == 0
+    assert metrics["enabled_universe_count"] == 2
+    assert metrics["eligible_coverage_pct_raw"] == pytest.approx(0.0, abs=0.1)
+    assert metrics["source_breakdown_counts"]["sheet"] == 1

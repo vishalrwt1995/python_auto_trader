@@ -599,3 +599,50 @@ def test_watchlist_and_scanner_use_same_canonical_state(monkeypatch: pytest.Monk
 
     scan_out = trade.run_scan_once(force=True)
     assert scan_out["marketBrainRegime"] == watchlist_out["marketBrainState"]["regime"]
+
+
+def test_market_brain_v2_data_quality_penalizes_live_phase2_absence_and_stale_writers(monkeypatch: pytest.MonkeyPatch):
+    svc = _make_brain_service(regime_ctx=_baseline_regime_ctx(), vix=16.0)
+    now_i = now_ist().astimezone(IST)
+    svc.state.set_runtime_prop("runtime:watchlist_last_run_ts", (now_i - timedelta(minutes=65)).isoformat())
+    svc.state.set_runtime_prop("runtime:signals_last_write_ts", (now_i - timedelta(minutes=135)).isoformat())
+    svc.state.set_runtime_prop("runtime:watchlist_last_phase2_eligible_count", "0")
+    svc.state.set_runtime_prop("runtime:watchlist_last_phase2_branch_entered", "Y")
+    monkeypatch.setattr(svc, "_phase_from_clock", lambda now_i: "LIVE")  # type: ignore[misc]
+
+    score, ctx = svc._compute_data_quality(
+        rows=[
+            {"fresh": True, "decisionPresent": True},
+            {"fresh": True, "decisionPresent": True},
+            {"fresh": False, "decisionPresent": True},
+        ],
+        breadth={"processedCount": 160},
+        leadership={"leadersProcessed": 72},
+        regime_ctx={"intraday": {"bars": 26}},
+    )
+    assert float(ctx["intradayPhase2Penalty"]) > 0.0
+    assert float(ctx["staleWriterPenalty"]) > 0.0
+    assert float(ctx["pipelineAlignmentPenalty"]) > 0.0
+    assert float(score) < float(ctx["baseQualityScore"])
+
+
+def test_market_brain_v2_liquidity_health_refinement_avoids_easy_saturation():
+    svc = _make_brain_service(regime_ctx=_baseline_regime_ctx(), vix=15.0)
+    rows = []
+    for i in range(30):
+        rows.append(
+            {
+                "fresh": True,
+                "eligibleIntraday": True,
+                "eligibleSwing": True,
+                "turnoverRank60D": i + 1,
+                "liquidityBucket": "A",
+                "turnoverMed60D": float(9.0e8 - (i * 2.5e7)),
+            }
+        )
+    score, ctx = svc._compute_liquidity_health(rows)
+    assert 0.0 <= score <= 100.0
+    assert score < 99.0
+    assert "candidateTurnoverPercentiles" in ctx
+    assert "top5LiquidityConcentrationPct" in ctx
+    assert "liquidityDistributionEntropy" in ctx

@@ -57,6 +57,8 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
     regime_v2 = wl_out.get("regimeV2", {}) if isinstance(wl_out.get("regimeV2"), dict) else {}
     source = regime_v2.get("source", {}) if isinstance(regime_v2.get("source"), dict) else {}
     phase_stats = wl_out.get("intradayPhaseStats", {}) if isinstance(wl_out.get("intradayPhaseStats"), dict) else {}
+    rejection_summary_raw = phase_stats.get("phase2RejectionSummary", {})
+    rejection_summary = rejection_summary_raw if isinstance(rejection_summary_raw, dict) else {}
 
     intraday_selected = int(
         phase_stats.get("intradaySelectedCount", wl_out.get("intradaySelected", wl_out.get("selected", 0))) or 0
@@ -65,6 +67,9 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
     phase1_fallback = int(phase_stats.get("phase1FallbackCount", max(0, intraday_selected - phase2_used)) or 0)
     phase2_eligible = int(phase_stats.get("phase2EligibleCount", coverage.get("phase2Candidates", 0)) or 0)
     phase2_eligible_pct = float(phase_stats.get("phase2EligiblePct", 0.0) or 0.0)
+    phase2_branch_entered = bool(phase_stats.get("phase2BranchEntered", False))
+    phase2_branch_completed = bool(phase_stats.get("phase2BranchCompleted", False))
+    phase2_candidates_seen = int(phase_stats.get("phase2CandidatesSeen", 0) or 0)
 
     return {
         "expectedLCD": str(coverage.get("expectedLCD") or ""),
@@ -79,6 +84,10 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
         "phase2_eligible_count": phase2_eligible,
         "phase2_eligible_pct": round(phase2_eligible_pct, 2),
         "intraday_selected_count": intraday_selected,
+        "phase2_branch_entered": phase2_branch_entered,
+        "phase2_branch_completed": phase2_branch_completed,
+        "phase2_candidates_seen": phase2_candidates_seen,
+        "phase2_rejection_summary": {str(k): int(v or 0) for k, v in rejection_summary.items()},
     }
 
 

@@ -374,8 +374,11 @@ class TradingService:
                 time.sleep(0.08)
 
             self.sheets.replace_scan_rows(scan_rows)
+            run_ts = now_ist_str()
+            self.state.set_runtime_prop("runtime:scanner_last_run_ts", run_ts)
             if signal_rows:
                 self.sheets.append_signals(signal_rows)
+                self.state.set_runtime_prop("runtime:signals_last_write_ts", run_ts)
             self.log_sink.action(
                 "TradingService",
                 "run_scan_once",
