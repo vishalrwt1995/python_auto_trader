@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import logging
 import math
 import statistics
@@ -587,25 +586,3 @@ class MarketBrainService:
 
     def watchlist_regime_payload(self, state: MarketBrainState) -> dict[str, Any]:
         return self._state_to_watchlist_regime(state)
-
-    def align_legacy_regime(self, regime: RegimeSnapshot, state: MarketBrainState) -> RegimeSnapshot:
-        out = copy.deepcopy(regime)
-        if state.regime in {"TREND_UP", "RECOVERY"}:
-            out.regime = "TREND"
-        elif state.regime in {"PANIC", "TREND_DOWN"}:
-            out.regime = "AVOID"
-        else:
-            out.regime = "RANGE"
-        if state.long_bias >= state.short_bias + 0.12:
-            out.bias = "BULLISH"
-        elif state.short_bias >= state.long_bias + 0.12:
-            out.bias = "BEARISH"
-        else:
-            out.bias = "NEUTRAL"
-        out.sub_regime = f"{state.regime}|{state.risk_mode}|{state.intraday_state}"
-        out.rationale = (
-            f"mbv2 phase={state.phase};reg={state.regime};risk={state.risk_mode};"
-            f"t={state.trend_score:.1f};b={state.breadth_score:.1f};l={state.leadership_score:.1f};"
-            f"v={state.volatility_stress_score:.1f};dq={state.data_quality_score:.1f}"
-        )
-        return out

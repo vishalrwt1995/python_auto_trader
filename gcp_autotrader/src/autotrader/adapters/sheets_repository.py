@@ -386,12 +386,12 @@ class GoogleSheetsRepository:
         )
         return res.get("values", [])
 
-    def update_values(self, a1_range: str, values: list[list[Any]]) -> None:
+    def update_values(self, a1_range: str, values: list[list[Any]], *, value_input_option: str = "USER_ENTERED") -> None:
         self._execute_with_retry(
             self._values().update(
                 spreadsheetId=self.spreadsheet_id,
                 range=a1_range,
-                valueInputOption="USER_ENTERED",
+                valueInputOption=value_input_option,
                 body={"values": values},
             ),
             op="values_update",
@@ -636,17 +636,17 @@ class GoogleSheetsRepository:
         # Legacy alias retained for compatibility: writes into intraday V2 tab.
         self.clear_range(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4:ZZ")
         if rows:
-            self.update_values(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4", rows)
+            self.update_values(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4", rows, value_input_option="RAW")
 
     def replace_watchlist_swing_v2(self, rows: list[list[Any]]) -> None:
         self.clear_range(f"'{SheetNames.WATCHLIST_SWING_V2}'!A4:ZZ")
         if rows:
-            self.update_values(f"'{SheetNames.WATCHLIST_SWING_V2}'!A4", rows)
+            self.update_values(f"'{SheetNames.WATCHLIST_SWING_V2}'!A4", rows, value_input_option="RAW")
 
     def replace_watchlist_intraday_v2(self, rows: list[list[Any]]) -> None:
         self.clear_range(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4:ZZ")
         if rows:
-            self.update_values(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4", rows)
+            self.update_values(f"'{SheetNames.WATCHLIST_INTRADAY_V2}'!A4", rows, value_input_option="RAW")
 
     def replace_sector_mapping(self, rows: list[list[Any]]) -> None:
         self.clear_range(f"'{SheetNames.SECTOR_MAPPING}'!A4:ZZ")
@@ -703,388 +703,98 @@ class GoogleSheetsRepository:
         if rows:
             self.update_values(f"'{SheetNames.SCAN}'!A4", rows)
 
-    def write_market_brain(self, regime: RegimeSnapshot) -> None:
-        """Best-effort write to the Market Brain dashboard cells (B4:B63).
+    @staticmethod
+    def _market_brain_bool(value: bool) -> str:
+        return "Y" if bool(value) else "N"
 
-        This mirrors the original Apps Script `MarketBrain.gs` dashboard layout so the
-        same sheet remains useful while the Python pipeline drives regime computation.
-        """
-        vix = float(getattr(regime, "vix", 0.0) or 0.0)
-        # Market Brain v2 uses rows up to 63 and columns up to G; many legacy sheets are smaller.
-        self.ensure_sheet_grid_min(SheetNames.MARKET, min_rows=70, min_cols=7)
-        nifty = getattr(regime, "nifty", None)
-        pcr = getattr(regime, "pcr", None)
-        fii = getattr(regime, "fii", None)
+    @staticmethod
+    def _market_brain_reason_value(reasons: list[str], key: str) -> str:
+        prefix = f"{str(key).strip()}="
+        for item in reasons:
+            token = str(item or "").strip()
+            if token.startswith(prefix):
+                return token.split("=", 1)[1].strip()
+        return ""
 
-        nifty_ltp = float(getattr(nifty, "ltp", 0.0) or 0.0)
-        nifty_change = float(getattr(nifty, "change_pct", 0.0) or 0.0)
-        nifty_open = float(getattr(nifty, "open", 0.0) or 0.0)
-        nifty_high = float(getattr(nifty, "high", 0.0) or 0.0)
-        nifty_low = float(getattr(nifty, "low", 0.0) or 0.0)
-        nifty_age_sec = float(getattr(nifty, "age_sec", 0.0) or 0.0)
-
-        pcr_val = float(getattr(pcr, "pcr", 1.0) or 1.0)
-        pcr_max_pain = float(getattr(pcr, "max_pain", 0.0) or 0.0)
-        pcr_call_oi = float(getattr(pcr, "call_oi", 0.0) or 0.0)
-        pcr_put_oi = float(getattr(pcr, "put_oi", 0.0) or 0.0)
-        pcr_weighted = float(getattr(pcr, "pcr_weighted", pcr_val) or pcr_val)
-        pcr_near = float(getattr(pcr, "pcr_near", pcr_val) or pcr_val)
-        pcr_next = float(getattr(pcr, "pcr_next", pcr_val) or pcr_val)
-        pcr_monthly = float(getattr(pcr, "pcr_monthly", pcr_val) or pcr_val)
-        pcr_term_slope = float(getattr(pcr, "pcr_term_slope", 0.0) or 0.0)
-        pcr_oi_change_pcr = float(getattr(pcr, "oi_change_pcr", 1.0) or 1.0)
-        pcr_oi_conc = float(getattr(pcr, "oi_concentration", 0.0) or 0.0)
-        pcr_call_wall = float(getattr(pcr, "call_wall", 0.0) or 0.0)
-        pcr_put_wall = float(getattr(pcr, "put_wall", 0.0) or 0.0)
-        pcr_call_wall_dist = float(getattr(pcr, "call_wall_dist_pct", 0.0) or 0.0)
-        pcr_put_wall_dist = float(getattr(pcr, "put_wall_dist_pct", 0.0) or 0.0)
-        pcr_max_pain_dist = float(getattr(pcr, "max_pain_dist_pct", 0.0) or 0.0)
-        pcr_exp_near = str(getattr(pcr, "expiry_near", "") or "")
-        pcr_exp_next = str(getattr(pcr, "expiry_next", "") or "")
-        pcr_exp_month = str(getattr(pcr, "expiry_monthly", "") or "")
-        pcr_exp_used = int(getattr(pcr, "expiries_used", 0) or 0)
-        pcr_conf = float(getattr(pcr, "confidence", 0.0) or 0.0)
-        fii_val = float(getattr(fii, "fii", 0.0) or 0.0)
-        dii_val = float(getattr(fii, "dii", 0.0) or 0.0)
-        fii_freshness = float(getattr(fii, "freshness_score", 0.0) or 0.0)
-        fii_as_of = str(getattr(fii, "as_of_date", "") or "")
-
-        freshness = getattr(regime, "freshness", None)
-        f_session = str(getattr(freshness, "session_phase", "UNKNOWN") or "UNKNOWN")
-        f_score = float(getattr(freshness, "score", 0.0) or 0.0)
-        f_nifty_age = float(getattr(freshness, "nifty_age_sec", nifty_age_sec) or nifty_age_sec)
-        f_vix_age = float(getattr(freshness, "vix_age_sec", 0.0) or 0.0)
-        f_pcr_age = float(getattr(freshness, "pcr_age_sec", 0.0) or 0.0)
-        f_fii_age = float(getattr(freshness, "fii_age_hours", 0.0) or 0.0)
-
-        struct = getattr(regime, "nifty_structure", None)
-        s_regime = str(getattr(struct, "structure_regime", "UNKNOWN") or "UNKNOWN")
-        s_trend = float(getattr(struct, "trend_strength", 0.0) or 0.0)
-        s_chop = float(getattr(struct, "chop_risk", 0.0) or 0.0)
-        s_adx = float(getattr(struct, "adx", 0.0) or 0.0)
-        s_atr_pct = float(getattr(struct, "atr_pct", 0.0) or 0.0)
-        s_ema_spread = float(getattr(struct, "ema_spread_pct", 0.0) or 0.0)
-        s_vwap_gap = float(getattr(struct, "vwap_gap_pct", 0.0) or 0.0)
-        s_gap = float(getattr(struct, "gap_pct", 0.0) or 0.0)
-        s_orb = str(getattr(struct, "opening_range_break", "NONE") or "NONE")
-        s_last_ts = str(getattr(struct, "last_candle_ts", "") or "")
-        s_timeframe = str(getattr(struct, "timeframe", "") or "")
-
-        regime_conf = float(getattr(regime, "confidence", 0.0) or 0.0)
-        data_health = float(getattr(regime, "data_health", 0.0) or 0.0)
-        source_quality = float(getattr(regime, "source_quality", 0.0) or 0.0)
-        sub_regime = str(getattr(regime, "sub_regime", "UNKNOWN") or "UNKNOWN")
-        rationale = str(getattr(regime, "rationale", "") or "")
-
-        def _age_display(v: float) -> str:
-            try:
-                x = float(v)
-            except Exception:
-                return ""
-            if x < 0:
-                x = 0.0
-            if x < 1.0:
-                return "<1s"
-            return f"{round(x, 1)}"
-
-        def _hours_age_display(v: float) -> str:
-            try:
-                x = float(v)
-            except Exception:
-                return ""
-            if x < 0:
-                x = 0.0
-            if x < 1.0:
-                return "<1h"
-            return f"{round(x, 2)}"
-
-        intraday_structure = s_timeframe == "15m"
-        s_vwap_gap_display: Any = round(s_vwap_gap, 3) if intraday_structure else "N/A"
-        s_orb_display: Any = s_orb if intraday_structure else "N/A"
-
-        # Use strategy defaults if config labels are absent; this is just a sheet display helper.
-        vix_trend_max = 15.0
-        vix_safe_max = 20.0
-        nifty_trend_pct = 0.3
-        pcr_bull_min = 0.8
-        pcr_bear_max = 1.2
-        try:
-            cfg = self.read_config_label_map()
-            # Best-effort parsing from sheet config labels if present.
-            vix_trend_max = float(cfg.get("VIX_TREND_MAX", vix_trend_max))
-            vix_safe_max = float(cfg.get("VIX_SAFE_MAX", vix_safe_max))
-            nifty_trend_pct = float(cfg.get("NIFTY_TREND_PCT", nifty_trend_pct))
-            pcr_bull_min = float(cfg.get("PCR_BULL_MIN", pcr_bull_min))
-            pcr_bear_max = float(cfg.get("PCR_BEAR_MAX", pcr_bear_max))
-        except Exception:
-            logger.debug("Unable to read config label map for market brain thresholds", exc_info=True)
-
-        vix_status = "✅ SAFE" if vix < vix_trend_max else ("⚠️ CAUTION" if vix < vix_safe_max else "🛑 DANGER")
-        nifty_dir = "BULLISH" if nifty_change > nifty_trend_pct else ("BEARISH" if nifty_change < -nifty_trend_pct else "NEUTRAL")
-        pcr_dir = "BULLISH" if pcr_val >= pcr_bull_min else ("BEARISH" if pcr_val <= pcr_bear_max else "NEUTRAL")
-
-        # Market Brain "Sentiment Score" (0..100): long-side favorability gauge for PM visibility.
-        sentiment = 50.0
-        regime_name = str(getattr(regime, "regime", "RANGE") or "RANGE").upper()
-        bias_name = str(getattr(regime, "bias", "NEUTRAL") or "NEUTRAL").upper()
-        sentiment += 12.0 if regime_name == "TREND" else (-18.0 if regime_name == "AVOID" else 0.0)
-        sentiment += 14.0 if bias_name == "BULLISH" else (-14.0 if bias_name == "BEARISH" else 0.0)
-        if vix <= vix_trend_max:
-            sentiment += 8.0
-        elif vix <= vix_safe_max:
-            sentiment -= 2.0
-        else:
-            sentiment -= 12.0
-        # Nifty move contribution capped to avoid dominating the score.
-        sentiment += max(-10.0, min(10.0, nifty_change * 20.0))
-        if bias_name == "BULLISH":
-            sentiment += 4.0 if pcr_val >= pcr_bull_min else -4.0
-        elif bias_name == "BEARISH":
-            sentiment += 4.0 if pcr_val <= pcr_bear_max else -4.0
-        else:
-            sentiment += 2.0 if pcr_bull_min <= pcr_val <= pcr_bear_max else -2.0
-        if fii_val > 0:
-            sentiment += 4.0
-        elif fii_val < 0:
-            sentiment -= 4.0
-        sentiment = max(0.0, min(100.0, sentiment))
-
-        data = [
-            # Left panel labels (legacy Market Brain dashboard)
-            {"range": f"'{SheetNames.MARKET}'!A4", "values": [[
-                "India VIX",
-            ]]},
-            {"range": f"'{SheetNames.MARKET}'!C4:D4", "values": [["What it means", "How calculated / source"]]},
-            {"range": f"'{SheetNames.MARKET}'!A5", "values": [["VIX Status"]]},
-            {"range": f"'{SheetNames.MARKET}'!A6", "values": [["Nifty 50 LTP"]]},
-            {"range": f"'{SheetNames.MARKET}'!A7", "values": [["Nifty Change %"]]},
-            {"range": f"'{SheetNames.MARKET}'!A8", "values": [["Nifty Bias"]]},
-            {"range": f"'{SheetNames.MARKET}'!A9", "values": [["Nifty Open"]]},
-            {"range": f"'{SheetNames.MARKET}'!A10", "values": [["Nifty High"]]},
-            {"range": f"'{SheetNames.MARKET}'!A11", "values": [["Nifty Low"]]},
-            {"range": f"'{SheetNames.MARKET}'!A12", "values": [["PCR"]]},
-            {"range": f"'{SheetNames.MARKET}'!A13", "values": [["PCR Bias"]]},
-            {"range": f"'{SheetNames.MARKET}'!A14", "values": [["Max Pain"]]},
-            {"range": f"'{SheetNames.MARKET}'!A15", "values": [["Call OI"]]},
-            {"range": f"'{SheetNames.MARKET}'!A16", "values": [["Put OI"]]},
-            {"range": f"'{SheetNames.MARKET}'!A17", "values": [["FII Net"]]},
-            {"range": f"'{SheetNames.MARKET}'!A18", "values": [["DII Net"]]},
-            {"range": f"'{SheetNames.MARKET}'!A19", "values": [["Net Flow (FII+DII)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A20", "values": [["Market Regime"]]},
-            {"range": f"'{SheetNames.MARKET}'!A21", "values": [["Market Bias"]]},
-            {"range": f"'{SheetNames.MARKET}'!A22", "values": [["Sentiment Score (0-100)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A23", "values": [["Updated At (IST)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A24", "values": [["Data Source"]]},
-            {"range": f"'{SheetNames.MARKET}'!A25", "values": [["Session Phase"]]},
-            {"range": f"'{SheetNames.MARKET}'!A26", "values": [["Regime Confidence (0-100)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A27", "values": [["Freshness Score (0-100)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A28", "values": [["Data Health (0-100)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A29", "values": [["Source Quality (0-100)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A30", "values": [["Sub Regime"]]},
-            {"range": f"'{SheetNames.MARKET}'!A31", "values": [["Nifty Structure Regime"]]},
-            {"range": f"'{SheetNames.MARKET}'!A32", "values": [["Nifty Trend Strength"]]},
-            {"range": f"'{SheetNames.MARKET}'!A33", "values": [["Nifty Chop Risk"]]},
-            {"range": f"'{SheetNames.MARKET}'!A34", "values": [["Nifty ADX (15m)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A35", "values": [["Nifty ATR % (15m)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A36", "values": [["Nifty EMA Spread %"]]},
-            {"range": f"'{SheetNames.MARKET}'!A37", "values": [["Nifty VWAP Gap %"]]},
-            {"range": f"'{SheetNames.MARKET}'!A38", "values": [["Nifty Gap %"]]},
-            {"range": f"'{SheetNames.MARKET}'!A39", "values": [["Nifty OR Break (15m)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A40", "values": [["Nifty Quote Age (sec)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A41", "values": [["VIX Quote Age (sec)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A42", "values": [["PCR Age (sec)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A43", "values": [["FII Data Age (hrs)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A44", "values": [["FII/DII Freshness (0-100)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A45", "values": [["Regime Rationale"]]},
-            {"range": f"'{SheetNames.MARKET}'!A46", "values": [["PCR Weighted"]]},
-            {"range": f"'{SheetNames.MARKET}'!A47", "values": [["PCR Near Exp"]]},
-            {"range": f"'{SheetNames.MARKET}'!A48", "values": [["PCR Next Exp"]]},
-            {"range": f"'{SheetNames.MARKET}'!A49", "values": [["PCR Monthly"]]},
-            {"range": f"'{SheetNames.MARKET}'!A50", "values": [["PCR Term Slope"]]},
-            {"range": f"'{SheetNames.MARKET}'!A51", "values": [["PCR OI Change Ratio"]]},
-            {"range": f"'{SheetNames.MARKET}'!A52", "values": [["OI Concentration (Top3)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A53", "values": [["Spot vs Max Pain %"]]},
-            {"range": f"'{SheetNames.MARKET}'!A54", "values": [["Call Wall"]]},
-            {"range": f"'{SheetNames.MARKET}'!A55", "values": [["Put Wall"]]},
-            {"range": f"'{SheetNames.MARKET}'!A56", "values": [["Call Wall Dist %"]]},
-            {"range": f"'{SheetNames.MARKET}'!A57", "values": [["Put Wall Dist %"]]},
-            {"range": f"'{SheetNames.MARKET}'!A58", "values": [["PCR Expiry Near"]]},
-            {"range": f"'{SheetNames.MARKET}'!A59", "values": [["PCR Expiry Next"]]},
-            {"range": f"'{SheetNames.MARKET}'!A60", "values": [["PCR Expiry Monthly"]]},
-            {"range": f"'{SheetNames.MARKET}'!A61", "values": [["PCR Expiries Used"]]},
-            {"range": f"'{SheetNames.MARKET}'!A62", "values": [["PCR Confidence (0-100)"]]},
-            {"range": f"'{SheetNames.MARKET}'!A63", "values": [["Nifty Structure Candle Time"]]},
-
-            # Definitions for each A-row metric (PM-friendly, self-explanatory dashboard)
-            {"range": f"'{SheetNames.MARKET}'!C4:D4", "values": [["Meaning", "Calculation / Source"]]},
-            {"range": f"'{SheetNames.MARKET}'!C5:D5", "values": [["Volatility risk zone", "Derived from B4 using VIX_TREND_MAX/VIX_SAFE_MAX thresholds"]]},
-            {"range": f"'{SheetNames.MARKET}'!C6:D6", "values": [["Current Nifty index level", "Upstox Nifty quote LTP"]]},
-            {"range": f"'{SheetNames.MARKET}'!C7:D7", "values": [["Nifty day move vs previous close", "Upstox change% (fallback computed from LTP and prev close)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C8:D8", "values": [["Short market direction from Nifty move", "BULLISH/BEARISH/NEUTRAL using NIFTY_TREND_PCT"]]},
-            {"range": f"'{SheetNames.MARKET}'!C9:D9", "values": [["Session open level", "Upstox quote OHLC if present; else derived from intraday/daily candles"]]},
-            {"range": f"'{SheetNames.MARKET}'!C10:D10", "values": [["Session high level", "Upstox quote OHLC if present; else derived from intraday/daily candles"]]},
-            {"range": f"'{SheetNames.MARKET}'!C11:D11", "values": [["Session low level", "Upstox quote OHLC if present; else derived from intraday/daily candles"]]},
-            {"range": f"'{SheetNames.MARKET}'!C12:D12", "values": [["Put/Call sentiment ratio", "Aggregate Put OI / Call OI from Upstox option chain (nearest expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C13:D13", "values": [["PCR interpretation", "BULLISH/BEARISH/NEUTRAL using PCR_BULL_MIN/PCR_BEAR_MAX"]]},
-            {"range": f"'{SheetNames.MARKET}'!C14:D14", "values": [["Max pain proxy strike", "Strike with highest total OI (Call OI + Put OI) from option chain"]]},
-            {"range": f"'{SheetNames.MARKET}'!C15:D15", "values": [["Total call open interest", "Sum of call OI across option-chain strikes (nearest expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C16:D16", "values": [["Total put open interest", "Sum of put OI across option-chain strikes (nearest expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C17:D17", "values": [["FII net flow", "Best-effort NSE fiidiiTradeReact latest row (fallback 0 if unavailable)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C18:D18", "values": [["DII net flow", "Best-effort NSE fiidiiTradeReact latest row (fallback 0 if unavailable)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C19:D19", "values": [["Combined institutional flow", "FII Net + DII Net"]]},
-            {"range": f"'{SheetNames.MARKET}'!C20:D20", "values": [["Trading environment type", "TREND/RANGE/AVOID from VIX + Nifty move + PCR contradiction checks"]]},
-            {"range": f"'{SheetNames.MARKET}'!C21:D21", "values": [["Directional bias used by algo", "Bias derived from Nifty change vs threshold"]]},
-            {"range": f"'{SheetNames.MARKET}'!C22:D22", "values": [["PM dashboard sentiment (0-100)", "Composite of regime, bias, VIX zone, Nifty move, PCR alignment, FII sign"]]},
-            {"range": f"'{SheetNames.MARKET}'!C23:D23", "values": [["Last Market Brain refresh time", "Written whenever regime is fetched by score/watchlist/scan jobs"]]},
-            {"range": f"'{SheetNames.MARKET}'!C24:D24", "values": [["Actual source used per metric", "e.g. nifty=upstox;vix=upstox|yahoo;pcr=upstox_option_chain|fallback;fii=nse|fallback"]]},
-            {"range": f"'{SheetNames.MARKET}'!C25:D25", "values": [["Market session classification", "Derived from IST time window (pre-open/opening/regular/post-close/off-hours)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C26:D26", "values": [["Confidence in current regime classification", "Composite of signal agreement, freshness, source quality, stability and structure strength"]]},
-            {"range": f"'{SheetNames.MARKET}'!C27:D27", "values": [["Freshness quality of market inputs", "Weighted recency score of Nifty/VIX/PCR/FII data (session-aware)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C28:D28", "values": [["Overall data health", "Composite of freshness, source quality and metric completeness"]]},
-            {"range": f"'{SheetNames.MARKET}'!C29:D29", "values": [["Source reliability score", "Weighted source quality: Upstox > NSE/Yahoo > cache/fallback"]]},
-            {"range": f"'{SheetNames.MARKET}'!C30:D30", "values": [["Refined regime subtype", "More descriptive state (e.g., TREND_UP, RANGE_COMPRESSION, VOLATILE_RISK_OFF)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C31:D31", "values": [["Intraday Nifty structure state", "Derived from 15m EMA/SuperTrend/VWAP/ADX/ORB features"]]},
-            {"range": f"'{SheetNames.MARKET}'!C32:D32", "values": [["Intraday trend strength (0-100)", "Strength score from ADX, EMA spread, VWAP gap, MACD, OR break"]]},
-            {"range": f"'{SheetNames.MARKET}'!C33:D33", "values": [["Intraday chop risk (0-100)", "Higher when ADX low, EMA spread small, VWAP gap small, RSI around 50"]]},
-            {"range": f"'{SheetNames.MARKET}'!C34:D34", "values": [["Average Directional Index", "ADX(14) on Nifty 15m candles (trend strength indicator)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C35:D35", "values": [["Realized intraday volatility %", "ATR(14) / current price on Nifty 15m candles"]]},
-            {"range": f"'{SheetNames.MARKET}'!C36:D36", "values": [["EMA spread %", "Abs(EMA fast - EMA slow) / price on Nifty 15m"]]},
-            {"range": f"'{SheetNames.MARKET}'!C37:D37", "values": [["VWAP gap %", "Current Nifty vs intraday VWAP on 15m candles"]]},
-            {"range": f"'{SheetNames.MARKET}'!C38:D38", "values": [["Opening gap %", "Today's first 15m open vs previous session last close"]]},
-            {"range": f"'{SheetNames.MARKET}'!C39:D39", "values": [["Opening range breakout state", "Current price vs first 15m range high/low (UP_BREAK/DOWN_BREAK/INSIDE)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C40:D40", "values": [["Nifty quote recency", "Age of Nifty quote used by Market Brain"]]},
-            {"range": f"'{SheetNames.MARKET}'!C41:D41", "values": [["VIX quote recency", "Age of VIX value used by Market Brain"]]},
-            {"range": f"'{SheetNames.MARKET}'!C42:D42", "values": [["PCR recency", "Age of PCR snapshot fetch"]]},
-            {"range": f"'{SheetNames.MARKET}'!C43:D43", "values": [["FII/DII data age", "Hours since latest FII/DII trade date (not live-tick data)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C44:D44", "values": [["FII/DII freshness quality", "Freshness score from trade date + source (NSE/cache/fallback)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C45:D45", "values": [["Machine-readable regime explanation", "Compact rationale string with key metrics used in classification"]]},
-            {"range": f"'{SheetNames.MARKET}'!C46:D46", "values": [["Weighted PCR across expiries", "OI/time weighted PCR using near/next/monthly expiries"]]},
-            {"range": f"'{SheetNames.MARKET}'!C47:D47", "values": [["Nearest expiry PCR", "Aggregate put OI / call OI for nearest expiry"]]},
-            {"range": f"'{SheetNames.MARKET}'!C48:D48", "values": [["Next expiry PCR", "Aggregate PCR for next expiry"]]},
-            {"range": f"'{SheetNames.MARKET}'!C49:D49", "values": [["Monthly expiry PCR", "Aggregate PCR for monthly expiry"]]},
-            {"range": f"'{SheetNames.MARKET}'!C50:D50", "values": [["PCR term slope", "PCR(next expiry) - PCR(near expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C51:D51", "values": [["OI change PCR", "Positive Put OI change / Positive Call OI change (nearest expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C52:D52", "values": [["OI concentration", "Top-3 strikes total OI share (nearest expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C53:D53", "values": [["Spot vs max pain distance", "(Max Pain - Nifty Spot) / Nifty Spot %"]]},
-            {"range": f"'{SheetNames.MARKET}'!C54:D54", "values": [["Call wall strike", "Strike with highest call OI (nearest expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C55:D55", "values": [["Put wall strike", "Strike with highest put OI (nearest expiry)"]]},
-            {"range": f"'{SheetNames.MARKET}'!C56:D56", "values": [["Call wall distance %", "(Call Wall - Nifty Spot) / Nifty Spot %"]]},
-            {"range": f"'{SheetNames.MARKET}'!C57:D57", "values": [["Put wall distance %", "(Put Wall - Nifty Spot) / Nifty Spot %"]]},
-            {"range": f"'{SheetNames.MARKET}'!C58:D58", "values": [["Nearest expiry used", "Nearest future option expiry used for PCR analytics"]]},
-            {"range": f"'{SheetNames.MARKET}'!C59:D59", "values": [["Next expiry used", "Second expiry used for PCR term structure"]]},
-            {"range": f"'{SheetNames.MARKET}'!C60:D60", "values": [["Monthly expiry used", "Monthly expiry used for PCR term structure"]]},
-            {"range": f"'{SheetNames.MARKET}'!C61:D61", "values": [["Expiries considered", "Count of expiries successfully fetched for PCR analytics"]]},
-            {"range": f"'{SheetNames.MARKET}'!C62:D62", "values": [["PCR analytics confidence", "Confidence score based on OI coverage and expiry availability"]]},
-            {"range": f"'{SheetNames.MARKET}'!C63:D63", "values": [["Latest Nifty structure candle time", "Timestamp of latest 15m candle used for Nifty structure signals"]]},
-
-            {"range": f"'{SheetNames.MARKET}'!B4", "values": [[round(vix, 2)]]},
-            {"range": f"'{SheetNames.MARKET}'!B5", "values": [[vix_status]]},
-            {"range": f"'{SheetNames.MARKET}'!B6", "values": [[round(nifty_ltp, 2)]]},
-            {"range": f"'{SheetNames.MARKET}'!B7", "values": [[f"'{nifty_change:.2f}%"]]},
-            {"range": f"'{SheetNames.MARKET}'!B8", "values": [[nifty_dir]]},
-            {"range": f"'{SheetNames.MARKET}'!B9", "values": [[round(nifty_open, 2) if nifty_open else ""]]},
-            {"range": f"'{SheetNames.MARKET}'!B10", "values": [[round(nifty_high, 2) if nifty_high else ""]]},
-            {"range": f"'{SheetNames.MARKET}'!B11", "values": [[round(nifty_low, 2) if nifty_low else ""]]},
-            {"range": f"'{SheetNames.MARKET}'!B12", "values": [[round(pcr_val, 2)]]},
-            {"range": f"'{SheetNames.MARKET}'!B13", "values": [[pcr_dir]]},
-            {"range": f"'{SheetNames.MARKET}'!B14", "values": [[round(pcr_max_pain, 2) if pcr_max_pain else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B15", "values": [[round(pcr_call_oi, 0) if pcr_call_oi else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B16", "values": [[round(pcr_put_oi, 0) if pcr_put_oi else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B17", "values": [[round(fii_val, 2)]]},
-            {"range": f"'{SheetNames.MARKET}'!B18", "values": [[round(dii_val, 2)]]},
-            {"range": f"'{SheetNames.MARKET}'!B19", "values": [[round(fii_val + dii_val, 2)]]},
-            {"range": f"'{SheetNames.MARKET}'!B20", "values": [[str(getattr(regime, 'regime', 'RANGE'))]]},
-            {"range": f"'{SheetNames.MARKET}'!B21", "values": [[str(getattr(regime, 'bias', 'NEUTRAL'))]]},
-            {"range": f"'{SheetNames.MARKET}'!B22", "values": [[round(sentiment, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B23", "values": [[now_ist_str()]]},
-            {"range": f"'{SheetNames.MARKET}'!B24", "values": [[str(getattr(regime, 'source', 'computed'))]]},
-            {"range": f"'{SheetNames.MARKET}'!B25", "values": [[f_session]]},
-            {"range": f"'{SheetNames.MARKET}'!B26", "values": [[round(regime_conf, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B27", "values": [[round(f_score, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B28", "values": [[round(data_health, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B29", "values": [[round(source_quality, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B30", "values": [[sub_regime]]},
-            {"range": f"'{SheetNames.MARKET}'!B31", "values": [[s_regime]]},
-            {"range": f"'{SheetNames.MARKET}'!B32", "values": [[round(s_trend, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B33", "values": [[round(s_chop, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B34", "values": [[round(s_adx, 2) if s_adx else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B35", "values": [[round(s_atr_pct, 3) if s_atr_pct else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B36", "values": [[round(s_ema_spread, 3) if s_ema_spread else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B37", "values": [[s_vwap_gap_display]]},
-            {"range": f"'{SheetNames.MARKET}'!B38", "values": [[round(s_gap, 3) if s_gap else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B39", "values": [[s_orb_display]]},
-            {"range": f"'{SheetNames.MARKET}'!B40", "values": [[_age_display(f_nifty_age)]]},
-            {"range": f"'{SheetNames.MARKET}'!B41", "values": [[_age_display(f_vix_age)]]},
-            {"range": f"'{SheetNames.MARKET}'!B42", "values": [[_age_display(f_pcr_age)]]},
-            {"range": f"'{SheetNames.MARKET}'!B43", "values": [[_hours_age_display(f_fii_age)]]},
-            {"range": f"'{SheetNames.MARKET}'!B44", "values": [[round(fii_freshness, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B45", "values": [[rationale]]},
-            {"range": f"'{SheetNames.MARKET}'!B46", "values": [[round(pcr_weighted, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B47", "values": [[round(pcr_near, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B48", "values": [[round(pcr_next, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B49", "values": [[round(pcr_monthly, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B50", "values": [[round(pcr_term_slope, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B51", "values": [[round(pcr_oi_change_pcr, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B52", "values": [[round(pcr_oi_conc, 4)]]},
-            {"range": f"'{SheetNames.MARKET}'!B53", "values": [[round(pcr_max_pain_dist, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B54", "values": [[round(pcr_call_wall, 2) if pcr_call_wall else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B55", "values": [[round(pcr_put_wall, 2) if pcr_put_wall else 0]]},
-            {"range": f"'{SheetNames.MARKET}'!B56", "values": [[round(pcr_call_wall_dist, 3)]]},
-            {"range": f"'{SheetNames.MARKET}'!B57", "values": [[round(pcr_put_wall_dist, 3)]]},
-            # Prefix apostrophe so Sheets keeps expiry labels as text (avoids serial date numbers in exports).
-            {"range": f"'{SheetNames.MARKET}'!B58", "values": [[f"'{pcr_exp_near}" if pcr_exp_near else ""]]},
-            {"range": f"'{SheetNames.MARKET}'!B59", "values": [[f"'{pcr_exp_next}" if pcr_exp_next else ""]]},
-            {"range": f"'{SheetNames.MARKET}'!B60", "values": [[f"'{pcr_exp_month}" if pcr_exp_month else ""]]},
-            {"range": f"'{SheetNames.MARKET}'!B61", "values": [[pcr_exp_used]]},
-            {"range": f"'{SheetNames.MARKET}'!B62", "values": [[round(pcr_conf, 1)]]},
-            {"range": f"'{SheetNames.MARKET}'!B63", "values": [[s_last_ts]]},
-
-            # Right panel legend (what the intraday signal score means)
-            {"range": f"'{SheetNames.MARKET}'!E4:G4", "values": [["Layer", "Max Pts", "Meaning"]]},
-            {"range": f"'{SheetNames.MARKET}'!E5:G5", "values": [["Regime", "25", "Nifty/VIX/FII context alignment"]]},
-            {"range": f"'{SheetNames.MARKET}'!E6:G6", "values": [["Options", "20", "PCR + Max Pain alignment"]]},
-            {"range": f"'{SheetNames.MARKET}'!E7:G7", "values": [["Technical", "40", "ST/VWAP/EMA/RSI/MACD + patterns"]]},
-            {"range": f"'{SheetNames.MARKET}'!E8:G8", "values": [["Volume", "15", "Vol ratio + OBV confirmation"]]},
-            {"range": f"'{SheetNames.MARKET}'!E9:G9", "values": [["Penalty", "Neg", "VIX/chop/doji/overstretch deductions"]]},
-            {"range": f"'{SheetNames.MARKET}'!E10:G10", "values": [["Direction", "Gate", "BUY / SELL / HOLD from intraday indicators"]]},
-            {"range": f"'{SheetNames.MARKET}'!E11:G11", "values": [["Score Range", "0-100", "Final signal score after penalties and clamp"]]},
-            {"range": f"'{SheetNames.MARKET}'!E12:G12", "values": [["Use", "-", "Regime dashboard for score/watchlist/scanner decisions"]]},
-            {"range": f"'{SheetNames.MARKET}'!E13:G13", "values": [["Regime v2", "-", "Confidence/freshness-aware regime + sub-regime classification"]]},
-            {"range": f"'{SheetNames.MARKET}'!E14:G14", "values": [["Freshness", "-", "Source recency model (Nifty/VIX/PCR/FII) used in confidence"]]},
-            {"range": f"'{SheetNames.MARKET}'!E15:G15", "values": [["Nifty Structure", "-", "EMA/ATR/ADX/VWAP/ORB intraday state for regime strength/chop"]]},
-            {"range": f"'{SheetNames.MARKET}'!E16:G16", "values": [["PCR Structure", "-", "Multi-expiry weighted PCR + OI walls + concentration + max pain distance"]]},
-            {"range": f"'{SheetNames.MARKET}'!E17:G17", "values": [["Flow Layer", "-", "FII/DII net + freshness/source quality (NSE/cache/fallback)"]]},
-            {"range": f"'{SheetNames.MARKET}'!E18:G18", "values": [["Data Health", "-", "Composite completeness + freshness + source quality for safe decisioning"]]},
+    def _write_market_brain_table(self, *, title: str, rows: list[list[Any]]) -> None:
+        body = [
+            [title],
+            ["GeneratedAtIST", now_ist_str()],
+            [],
+            ["Section", "Metric", "Value", "UsedByV2", "Notes"],
+            *rows,
         ]
-        self.batch_update_values(data)
+        self.ensure_sheet_grid_min(SheetNames.MARKET, min_rows=max(140, len(body) + 12), min_cols=5)
+        self.clear_range(f"'{SheetNames.MARKET}'!A1:ZZ")
+        self.update_values(f"'{SheetNames.MARKET}'!A1", body, value_input_option="RAW")
+
+    def write_market_brain(self, regime: RegimeSnapshot) -> None:
+        del regime
+        self._write_market_brain_table(
+            title="Market Brain V2 (Canonical Policy Engine)",
+            rows=[
+                [
+                    "Compatibility",
+                    "LegacyWriter",
+                    "DEPRECATED",
+                    "NO",
+                    "Legacy market-brain v1 writer removed. Use write_market_brain_v2(state, policy).",
+                ]
+            ],
+        )
 
     def write_market_brain_v2(self, state: MarketBrainState, policy: MarketPolicy) -> None:
-        self.ensure_sheet_grid_min(SheetNames.MARKET, min_rows=90, min_cols=9)
-        updates = [
-            ["Market Brain V2 Updated", str(state.asof_ts or "")],
-            ["MBV2 Phase", str(state.phase or "")],
-            ["MBV2 Regime", str(state.regime or "")],
-            ["MBV2 Participation", str(state.participation or "")],
-            ["MBV2 Risk Mode", str(state.risk_mode or "")],
-            ["MBV2 Intraday State", str(state.intraday_state or "")],
-            ["MBV2 Long Bias", round(float(state.long_bias or 0.0), 4)],
-            ["MBV2 Short Bias", round(float(state.short_bias or 0.0), 4)],
-            ["MBV2 Size Mult", round(float(state.size_multiplier or 0.0), 4)],
-            ["MBV2 MaxPos Mult", round(float(state.max_positions_multiplier or 0.0), 4)],
-            ["MBV2 Swing Permission", str(state.swing_permission or "")],
-            ["MBV2 Trend Score", round(float(state.trend_score or 0.0), 2)],
-            ["MBV2 Breadth Score", round(float(state.breadth_score or 0.0), 2)],
-            ["MBV2 Leadership Score", round(float(state.leadership_score or 0.0), 2)],
-            ["MBV2 Vol Stress Score", round(float(state.volatility_stress_score or 0.0), 2)],
-            ["MBV2 Liquidity Score", round(float(state.liquidity_health_score or 0.0), 2)],
-            ["MBV2 Data Quality Score", round(float(state.data_quality_score or 0.0), 2)],
-            ["MBV2 Allowed Strategies", ",".join(str(x) for x in (state.allowed_strategies or []))],
-            ["MBV2 Policy Target Mult", round(float(policy.watchlist_target_multiplier or 0.0), 4)],
-            ["MBV2 Policy MinScore Boost", int(policy.watchlist_min_score_boost or 0)],
-            ["MBV2 Policy Reasons", "|".join(str(x) for x in (policy.reasons or []))],
-            ["MBV2 Reasons", "|".join(str(x) for x in (state.reasons or []))],
+        reasons = [str(x).strip() for x in (state.reasons or []) if str(x).strip()]
+        reason_blob = " | ".join(reasons)
+        policy_reasons = [str(x).strip() for x in (policy.reasons or []) if str(x).strip()]
+
+        rows = [
+            ["Canonical State", "AsOfTS", str(state.asof_ts or ""), "YES", "Single source-of-truth timestamp (IST ISO)"],
+            ["Canonical State", "Phase", str(state.phase or ""), "YES", "PREMARKET/POST_OPEN/LIVE/EOD"],
+            ["Canonical State", "Regime", str(state.regime or ""), "YES", "TREND_UP/TREND_DOWN/RANGE/CHOP/PANIC/RECOVERY"],
+            ["Canonical State", "Participation", str(state.participation or ""), "YES", "STRONG/MODERATE/WEAK"],
+            ["Canonical State", "RiskMode", str(state.risk_mode or ""), "YES", "AGGRESSIVE/NORMAL/DEFENSIVE/LOCKDOWN"],
+            ["Canonical State", "IntradayState", str(state.intraday_state or ""), "YES", "PREOPEN/OPEN_DRIVE/OPEN_FADE/TREND_DAY/CHOP_DAY/EVENT_RISK"],
+            ["Canonical State", "LongBias", round(float(state.long_bias or 0.0), 4), "YES", "Portfolio long bias"],
+            ["Canonical State", "ShortBias", round(float(state.short_bias or 0.0), 4), "YES", "Portfolio short bias"],
+            ["Canonical State", "SizeMultiplier", round(float(state.size_multiplier or 0.0), 4), "YES", "Risk-per-trade multiplier"],
+            ["Canonical State", "MaxPositionsMultiplier", round(float(state.max_positions_multiplier or 0.0), 4), "YES", "Concurrency multiplier"],
+            ["Canonical State", "SwingPermission", str(state.swing_permission or ""), "YES", "ENABLED/REDUCED/DISABLED"],
+            ["Canonical Scores", "TrendScore", round(float(state.trend_score or 0.0), 2), "YES", "Index trend quality"],
+            ["Canonical Scores", "BreadthScore", round(float(state.breadth_score or 0.0), 2), "YES", "Liquidity-qualified breadth quality"],
+            ["Canonical Scores", "LeadershipScore", round(float(state.leadership_score or 0.0), 2), "YES", "Leader follow-through quality"],
+            ["Canonical Scores", "VolatilityStressScore", round(float(state.volatility_stress_score or 0.0), 2), "YES", "Stress/risk pressure"],
+            ["Canonical Scores", "LiquidityHealthScore", round(float(state.liquidity_health_score or 0.0), 2), "YES", "Opportunity quality by liquidity"],
+            ["Canonical Scores", "DataQualityScore", round(float(state.data_quality_score or 0.0), 2), "YES", "Freshness/completeness guard"],
+            ["Canonical Scores", "RiskAppetite", self._market_brain_reason_value(reasons, "appetite"), "YES", "Derived weighted appetite score"],
+            ["Canonical Policy", "PolicyRegime", str(policy.regime or ""), "YES", "Policy mapped from canonical state"],
+            ["Canonical Policy", "PolicyRiskMode", str(policy.risk_mode or ""), "YES", "Policy mapped from canonical state"],
+            ["Canonical Policy", "AllowedStrategies", "|".join(str(x) for x in (policy.allowed_strategies or [])), "YES", "Strategy families currently allowed"],
+            ["Canonical Policy", "BreakoutEnabled", self._market_brain_bool(bool(policy.breakout_enabled)), "YES", "Breakout gating"],
+            ["Canonical Policy", "OpenDriveEnabled", self._market_brain_bool(bool(policy.open_drive_enabled)), "YES", "Open-drive gating"],
+            ["Canonical Policy", "IntradayPhase2Enabled", self._market_brain_bool(bool(policy.intraday_phase2_enabled)), "YES", "Phase2 gating"],
+            ["Canonical Policy", "LongEnabled", self._market_brain_bool(bool(policy.long_enabled)), "YES", "Long side permission"],
+            ["Canonical Policy", "ShortEnabled", self._market_brain_bool(bool(policy.short_enabled)), "YES", "Short side permission"],
+            ["Canonical Policy", "SwingPermission", str(policy.swing_permission or ""), "YES", "Policy-level swing participation"],
+            ["Canonical Policy", "SizeMultiplier", round(float(policy.size_multiplier or 0.0), 4), "YES", "Policy risk-per-trade multiplier"],
+            ["Canonical Policy", "MaxPositionsMultiplier", round(float(policy.max_positions_multiplier or 0.0), 4), "YES", "Policy concurrency multiplier"],
+            ["Canonical Policy", "WatchlistTargetMultiplier", round(float(policy.watchlist_target_multiplier or 0.0), 4), "YES", "Target size scaler for watchlist"],
+            ["Canonical Policy", "WatchlistMinScoreBoost", int(policy.watchlist_min_score_boost or 0), "YES", "Minimum-score tightening"],
+            ["Canonical Policy", "LiquidityBucketFloor", str(policy.liquidity_bucket_floor or ""), "YES", "Minimum liquidity bucket allowed"],
+            ["Canonical Diagnostics", "StateReasons", reason_blob, "YES", "Machine-readable state diagnostics"],
+            ["Canonical Diagnostics", "PolicyReasons", " | ".join(policy_reasons), "YES", "Machine-readable policy diagnostics"],
+            ["Canonical Diagnostics", "TrendReason", self._market_brain_reason_value(reasons, "trend"), "YES", "Trend score reason token"],
+            ["Canonical Diagnostics", "BreadthReason", self._market_brain_reason_value(reasons, "breadth"), "YES", "Breadth score reason token"],
+            ["Canonical Diagnostics", "LeadershipReason", self._market_brain_reason_value(reasons, "leadership"), "YES", "Leadership score reason token"],
+            ["Canonical Diagnostics", "StressReason", self._market_brain_reason_value(reasons, "stress"), "YES", "Stress score reason token"],
+            ["Canonical Diagnostics", "LiquidityReason", self._market_brain_reason_value(reasons, "liq"), "YES", "Liquidity score reason token"],
+            ["Canonical Diagnostics", "DataQualityReason", self._market_brain_reason_value(reasons, "dataQ"), "YES", "Data-quality reason token"],
+            ["Compatibility", "LegacyRegimeSheetUsed", "NO", "NO", "Legacy B4:G63 dashboard removed; this V2 table is canonical"],
         ]
-        self.update_values(f"'{SheetNames.MARKET}'!H4", updates, value_input_option="RAW")
+        self._write_market_brain_table(
+            title="Market Brain V2 (Canonical Policy Engine)",
+            rows=rows,
+        )
 
     def read_universe_rows(self) -> list[UniverseRow]:
         header_map = self.read_sheet_headers(SheetNames.UNIVERSE, header_row=3)

@@ -82,10 +82,23 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
     }
 
 
-def _write_market_brain_best_effort(c, regime: Any, market_state: Any | None = None, market_policy: Any | None = None) -> None:
+def _market_brain_response_payload(c, market_state: Any, market_policy: Any) -> dict[str, Any]:
+    regime_v2 = {}
     try:
-        c.sheets.write_market_brain(regime)
-        if market_state is not None and market_policy is not None and hasattr(c.sheets, "write_market_brain_v2"):
+        regime_v2 = c.market_brain_service().watchlist_regime_payload(market_state)
+    except Exception:
+        regime_v2 = {}
+    return {
+        "regime": regime_v2,
+        "regimeV2": regime_v2,
+        "marketBrainState": getattr(market_state, "__dict__", {}),
+        "marketPolicy": getattr(market_policy, "__dict__", {}),
+    }
+
+
+def _write_market_brain_best_effort(c, market_state: Any, market_policy: Any) -> None:
+    try:
+        if hasattr(c.sheets, "write_market_brain_v2"):
             c.sheets.write_market_brain_v2(market_state, market_policy)
     except Exception:
         logger.exception("market_brain_write_failed")
@@ -376,8 +389,7 @@ def run_premarket_precompute(
         )
         market_state = c.market_brain_service().build_premarket_market_brain(now_ist().isoformat())
         market_policy = c.market_brain_service().derive_market_policy(market_state)
-        regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
-        _write_market_brain_best_effort(c, regime, market_state, market_policy)
+        _write_market_brain_best_effort(c, market_state, market_policy)
         v2_out = c.universe_service().recompute_universe_v2_from_cache()
         wl_out = c.universe_service().build_watchlist(
             market_state,
@@ -397,13 +409,10 @@ def run_premarket_precompute(
             {**sched_ctx, **_duration_ctx(started_perf), "universeV2": v2_out, "watchlist": wl_out},
         )
         sink.flush_all()
-        return {
-            "regime": regime.__dict__,
-            "marketBrainState": market_state.__dict__,
-            "marketPolicy": market_policy.__dict__,
-            "universeV2": v2_out,
-            "watchlist": wl_out,
-        }
+        out = _market_brain_response_payload(c, market_state, market_policy)
+        out["universeV2"] = v2_out
+        out["watchlist"] = wl_out
+        return out
     except Exception as e:
         sink.action(
             "Universe",
@@ -483,8 +492,7 @@ def run_watchlist_refresh(
             else c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
         )
         market_policy = c.market_brain_service().derive_market_policy(market_state)
-        regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
-        _write_market_brain_best_effort(c, regime, market_state, market_policy)
+        _write_market_brain_best_effort(c, market_state, market_policy)
         wl_out = c.universe_service().build_watchlist(
             market_state,
             target_size=target_size,
@@ -504,20 +512,16 @@ def run_watchlist_refresh(
             {
                 **sched_ctx,
                 **_duration_ctx(started_perf),
+                **audit_ctx,
                 "watchlist": wl_out,
                 "regime": wl_out.get("regimeV2", {}),
                 "regimeV2": wl_out.get("regimeV2", {}),
-                **audit_ctx,
             },
         )
         sink.flush_all()
-        return {
-            "regime": wl_out.get("regimeV2", {}),
-            "regimeV2": wl_out.get("regimeV2", {}),
-            "marketBrainState": market_state.__dict__,
-            "marketPolicy": market_policy.__dict__,
-            "watchlist": wl_out,
-        }
+        out = _market_brain_response_payload(c, market_state, market_policy)
+        out["watchlist"] = wl_out
+        return out
     except Exception as e:
         sink.action(
             "Universe",
@@ -586,9 +590,9 @@ def run_score_refresh(
         )
         market_state = c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
         market_policy = c.market_brain_service().derive_market_policy(market_state)
-        regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
-        _write_market_brain_best_effort(c, regime, market_state, market_policy)
+        _write_market_brain_best_effort(c, market_state, market_policy)
         v2_out = c.universe_service().recompute_universe_v2_from_cache()
+        regime_payload = c.market_brain_service().watchlist_regime_payload(market_state)
         sink.action(
             "Universe",
             "score_refresh",
@@ -597,19 +601,17 @@ def run_score_refresh(
             {
                 **sched_ctx,
                 **_duration_ctx(started_perf),
-                "regime": regime.__dict__,
+                "regime": regime_payload,
+                "regimeV2": regime_payload,
                 "marketBrainState": market_state.__dict__,
                 "marketPolicy": market_policy.__dict__,
                 "universeV2": v2_out,
             },
         )
         sink.flush_all()
-        return {
-            "regime": regime.__dict__,
-            "marketBrainState": market_state.__dict__,
-            "marketPolicy": market_policy.__dict__,
-            "universeV2": v2_out,
-        }
+        out = _market_brain_response_payload(c, market_state, market_policy)
+        out["universeV2"] = v2_out
+        return out
     except Exception as e:
         sink.action(
             "Universe",
@@ -918,10 +920,15 @@ def run_universe_refresh_append_backfill(
                     break
         v2_out: dict[str, Any] | None = None
         regime_dict: dict[str, Any] | None = None
+        market_state_dict: dict[str, Any] | None = None
+        market_policy_dict: dict[str, Any] | None = None
         if run_score_refresh:
-            regime = c.regime_service().get_market_regime()
-            _write_market_brain_best_effort(c, regime)
-            regime_dict = regime.__dict__
+            market_state = c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
+            market_policy = c.market_brain_service().derive_market_policy(market_state)
+            _write_market_brain_best_effort(c, market_state, market_policy)
+            regime_dict = c.market_brain_service().watchlist_regime_payload(market_state)
+            market_state_dict = market_state.__dict__
+            market_policy_dict = market_policy.__dict__
             v2_out = c.universe_service().recompute_universe_v2_from_cache()
         out: dict[str, Any] = {
             "raw": raw_out,
@@ -935,6 +942,9 @@ def run_universe_refresh_append_backfill(
         }
         if run_score_refresh:
             out["regime"] = regime_dict or {}
+            out["regimeV2"] = regime_dict or {}
+            out["marketBrainState"] = market_state_dict or {}
+            out["marketPolicy"] = market_policy_dict or {}
             out["universeV2"] = v2_out or {}
         sink.action(
             "Universe",
@@ -1560,10 +1570,15 @@ def run_eod_close_update_score(
         score_triggered = close_complete or not score_when_complete_only
         v2_out: dict[str, Any] | None = None
         regime_dict: dict[str, Any] | None = None
+        market_state_dict: dict[str, Any] | None = None
+        market_policy_dict: dict[str, Any] | None = None
         if score_triggered:
-            regime = c.regime_service().get_market_regime()
-            _write_market_brain_best_effort(c, regime)
-            regime_dict = regime.__dict__
+            market_state = c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
+            market_policy = c.market_brain_service().derive_market_policy(market_state)
+            _write_market_brain_best_effort(c, market_state, market_policy)
+            regime_dict = c.market_brain_service().watchlist_regime_payload(market_state)
+            market_state_dict = market_state.__dict__
+            market_policy_dict = market_policy.__dict__
             v2_out = c.universe_service().recompute_universe_v2_from_cache()
         out: dict[str, Any] = {
             "closeUpdate": {
@@ -1576,6 +1591,11 @@ def run_eod_close_update_score(
         }
         if regime_dict is not None:
             out["regime"] = regime_dict
+            out["regimeV2"] = regime_dict
+        if market_state_dict is not None:
+            out["marketBrainState"] = market_state_dict
+        if market_policy_dict is not None:
+            out["marketPolicy"] = market_policy_dict
         if v2_out is not None:
             out["universeV2"] = v2_out
         done_message = "eod latest candles complete and universe v2 recomputed" if score_triggered else "eod latest candles incomplete; universe v2 recompute skipped"

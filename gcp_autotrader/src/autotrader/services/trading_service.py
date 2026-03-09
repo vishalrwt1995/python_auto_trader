@@ -164,42 +164,53 @@ class TradingService:
             if recon.get("filled", 0) or recon.get("failed", 0):
                 self.log_sink.log("INFO", "OrderRecon", f"Pending entries reconciled {recon}")
 
-            brain_state = None
-            market_policy = None
             try:
                 brain_state = self.market_brain_service.build_post_open_market_brain(now_ist().isoformat())
                 market_policy = self.market_brain_service.derive_market_policy(brain_state)
             except Exception:
-                logger.warning("scan_once market_brain_v2 unavailable; falling back to legacy regime-only behavior", exc_info=True)
+                logger.exception("scan_once market_brain_v2_unavailable")
+                self.log_sink.action("TradingService", "run_scan_once", "SKIP", "market_brain_v2_unavailable")
+                return {"skipped": "market_brain_v2_unavailable"}
 
-            regime = self.regime_service.get_market_regime()
-            if brain_state is not None:
-                regime = self.market_brain_service.align_legacy_regime(regime, brain_state)
+            regime = MarketRegimeService.from_market_brain_state(brain_state)
             try:
-                self.sheets.write_market_brain(regime)
-                if brain_state is not None and market_policy is not None and hasattr(self.sheets, "write_market_brain_v2"):
+                if hasattr(self.sheets, "write_market_brain_v2"):
                     self.sheets.write_market_brain_v2(brain_state, market_policy)
             except Exception:
                 logger.exception("market_brain_write_failed")
-            self.log_sink.decision("REGIME", "NIFTY", regime.regime, f"bias={regime.bias}", {"vix": regime.vix, "pcr": regime.pcr.pcr})
-            if brain_state is not None:
-                self.log_sink.decision(
-                    "MARKET_BRAIN_V2",
-                    "NIFTY",
-                    brain_state.regime,
-                    f"risk={brain_state.risk_mode}",
-                    {
-                        "phase": brain_state.phase,
-                        "intradayState": brain_state.intraday_state,
-                        "trendScore": brain_state.trend_score,
-                        "breadthScore": brain_state.breadth_score,
-                        "leadershipScore": brain_state.leadership_score,
-                        "volStressScore": brain_state.volatility_stress_score,
-                        "liqHealthScore": brain_state.liquidity_health_score,
-                        "dataQualityScore": brain_state.data_quality_score,
-                    },
-                )
-            if market_policy is not None and brain_state is not None and brain_state.risk_mode == "LOCKDOWN" and not force:
+            self.log_sink.decision(
+                "REGIME",
+                "NIFTY",
+                brain_state.regime,
+                f"risk={brain_state.risk_mode}",
+                {
+                    "phase": brain_state.phase,
+                    "intradayState": brain_state.intraday_state,
+                    "trendScore": brain_state.trend_score,
+                    "breadthScore": brain_state.breadth_score,
+                    "leadershipScore": brain_state.leadership_score,
+                    "volStressScore": brain_state.volatility_stress_score,
+                    "liqHealthScore": brain_state.liquidity_health_score,
+                    "dataQualityScore": brain_state.data_quality_score,
+                },
+            )
+            self.log_sink.decision(
+                "MARKET_BRAIN_V2",
+                "NIFTY",
+                brain_state.regime,
+                f"risk={brain_state.risk_mode}",
+                {
+                    "phase": brain_state.phase,
+                    "intradayState": brain_state.intraday_state,
+                    "trendScore": brain_state.trend_score,
+                    "breadthScore": brain_state.breadth_score,
+                    "leadershipScore": brain_state.leadership_score,
+                    "volStressScore": brain_state.volatility_stress_score,
+                    "liqHealthScore": brain_state.liquidity_health_score,
+                    "dataQualityScore": brain_state.data_quality_score,
+                },
+            )
+            if brain_state.risk_mode == "LOCKDOWN" and not force:
                 self.log_sink.action(
                     "TradingService",
                     "run_scan_once",
@@ -209,12 +220,10 @@ class TradingService:
                 )
                 return {"skipped": "market_brain_lockdown", "regime": brain_state.regime, "riskMode": brain_state.risk_mode}
 
-            max_signals_allowed = self.settings.strategy.max_positions
-            if brain_state is not None:
-                max_signals_allowed = self.market_brain_service.policy_service.max_positions_limit(
-                    self.settings.strategy.max_positions,
-                    brain_state,
-                )
+            max_signals_allowed = self.market_brain_service.policy_service.max_positions_limit(
+                self.settings.strategy.max_positions,
+                brain_state,
+            )
 
             watchlist = self.sheets.read_watchlist()
             subset, scan_meta = self._slice_watchlist_for_scan(watchlist)
@@ -273,30 +282,26 @@ class TradingService:
                     continue
                 direction = determine_direction(ind, regime)
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy)
-                adjusted_score = int(meta.score)
-                if brain_state is not None:
-                    adjusted_score = self.market_brain_service.adjust_signal(meta.score, brain_state)
+                adjusted_score = int(self.market_brain_service.adjust_signal(meta.score, brain_state))
                 ltp = ind.close
                 pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy)
-                if brain_state is not None:
-                    setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
-                    liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
-                    dq_mult = max(0.6, min(1.1, brain_state.data_quality_score / 100.0))
-                    pos = self.market_brain_service.size_position_with_market_brain(
-                        pos,
-                        brain_state,
-                        self.settings.strategy,
-                        setup_confidence_multiplier=setup_conf,
-                        liquidity_multiplier=liq_mult,
-                        data_quality_multiplier=dq_mult,
-                    )
+                setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
+                liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
+                dq_mult = max(0.6, min(1.1, brain_state.data_quality_score / 100.0))
+                pos = self.market_brain_service.size_position_with_market_brain(
+                    pos,
+                    brain_state,
+                    self.settings.strategy,
+                    setup_confidence_multiplier=setup_conf,
+                    liquidity_multiplier=liq_mult,
+                    data_quality_multiplier=dq_mult,
+                )
 
                 change_pct = ((ltp - ind.prev_close) / ind.prev_close * 100) if ind.prev_close else 0
                 ema_state = "BULL_STACK" if ind.ema_stack else ("BEAR_STACK" if ind.ema_flip else "MIXED")
                 macd_view = ind.macd.crossed or ("POS" if ind.macd.hist >= 0 else "NEG")
                 policy_tag = f"{regime.regime}|{regime.bias}"
-                if brain_state is not None:
-                    policy_tag = f"{policy_tag}|{brain_state.regime}|{brain_state.risk_mode}"
+                policy_tag = f"{policy_tag}|{brain_state.regime}|{brain_state.risk_mode}"
                 scan_rows.append([
                     w.symbol,
                     round(ltp, 2),
@@ -332,8 +337,7 @@ class TradingService:
                         f"Score={adjusted_score} RSI={ind.rsi.curr:.1f} VolR={ind.volume.ratio:.2f} "
                         f"Reg={regime.bias}"
                     )
-                    if brain_state is not None:
-                        reason += f" MB={brain_state.regime}/{brain_state.risk_mode}"
+                    reason += f" MB={brain_state.regime}/{brain_state.risk_mode}"
                     self.log_sink.decision("SIGNAL", w.symbol, direction, "entry_qualified", {"score": adjusted_score, "reason": reason})
                     signal_rows.append([
                         now_ist_str(), w.symbol, direction, adjusted_score,

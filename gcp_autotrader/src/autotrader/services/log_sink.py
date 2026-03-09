@@ -19,37 +19,48 @@ class LogSink:
     decision_buffer: list[list[Any]] = field(default_factory=list)
     action_buffer: list[list[Any]] = field(default_factory=list)
     log_buffer: list[list[Any]] = field(default_factory=list)
+    context_char_limit: int = 45000
+
+    def _ctx_json(self, ctx: dict[str, Any] | None) -> str:
+        payload = json.dumps(ctx or {}, separators=(",", ":"), default=str)
+        if len(payload) <= int(self.context_char_limit):
+            return payload
+        trunc = "...<truncated>"
+        keep = max(0, int(self.context_char_limit) - len(trunc))
+        return payload[:keep] + trunc
 
     def decision(self, stage: str, symbol: str, decision: str, reason: str, ctx: dict[str, Any] | None = None) -> None:
+        ctx_json = self._ctx_json(ctx)
         logger.info(
             "decision stage=%s symbol=%s decision=%s reason=%s ctx=%s execId=%s",
             stage,
             symbol,
             decision,
             reason,
-            json.dumps(ctx or {}, separators=(",", ":"), default=str)[:900],
+            ctx_json,
             self.exec_id,
         )
         self.decision_buffer.append([
             now_ist_str(), str(stage), str(symbol), str(decision), str(reason),
-            json.dumps(ctx or {}, separators=(",", ":"), default=str)[:900], today_ist(),
+            ctx_json, today_ist(),
         ])
         if len(self.decision_buffer) >= 20:
             self.flush_decisions()
 
     def action(self, module: str, action: str, status: str, message: str = "", ctx: dict[str, Any] | None = None) -> None:
+        ctx_json = self._ctx_json(ctx)
         logger.info(
             "action module=%s action=%s status=%s message=%s ctx=%s execId=%s",
             module,
             action,
             status,
             message,
-            json.dumps(ctx or {}, separators=(",", ":"), default=str)[:900],
+            ctx_json,
             self.exec_id,
         )
         self.action_buffer.append([
             now_ist_str(), module, action, status, message,
-            json.dumps(ctx or {}, separators=(",", ":"), default=str)[:900], today_ist(), self.exec_id,
+            ctx_json, today_ist(), self.exec_id,
         ])
         if len(self.action_buffer) >= 20:
             self.flush_actions()

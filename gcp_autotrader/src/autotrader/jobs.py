@@ -139,8 +139,6 @@ def premarket_precompute(
     sink = LogSink(c.sheets)
     market_state = c.market_brain_service().build_premarket_market_brain(now_ist().isoformat())
     market_policy = c.market_brain_service().derive_market_policy(market_state)
-    regime = c.market_brain_service().align_legacy_regime(c.regime_service().get_market_regime(), market_state)
-    c.sheets.write_market_brain(regime)
     if hasattr(c.sheets, "write_market_brain_v2"):
         c.sheets.write_market_brain_v2(market_state, market_policy)
     sink.action("Universe", "premarket_precompute", "START", "", {"targetSize": target_size})
@@ -156,7 +154,8 @@ def premarket_precompute(
     sink.flush_all()
     _print(
         {
-            "regime": regime.__dict__,
+            "regime": c.market_brain_service().watchlist_regime_payload(market_state),
+            "regimeV2": c.market_brain_service().watchlist_regime_payload(market_state),
             "marketBrainState": market_state.__dict__,
             "marketPolicy": market_policy.__dict__,
             "universeV2": v2_out,
