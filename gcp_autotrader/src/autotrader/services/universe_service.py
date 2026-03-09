@@ -627,7 +627,7 @@ class UniverseService:
         ts = self._last_candle_ts(candles)
         if ts is None:
             return ""
-        return ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+        return ts.astimezone(IST).isoformat(timespec="seconds")
 
     @staticmethod
     def _last_candle_sig(candles: list[list[object]]) -> str:
@@ -878,7 +878,7 @@ class UniverseService:
         first_ts = self._first_candle_ts(candles)
         last_ts = self._last_candle_ts(candles)
         first_candle_date = first_ts.astimezone(IST).date().isoformat() if first_ts is not None else ""
-        last_candle = last_ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if last_ts is not None else ""
+        last_candle = last_ts.astimezone(IST).isoformat(timespec="seconds") if last_ts is not None else ""
         bars = len(candles)
         is_current = self._daily_cache_is_current(candles) if bars else False
         terminal = ""
@@ -1257,7 +1257,7 @@ class UniverseService:
         last_ts = self._last_candle_ts(candles)
         bars = len(candles)
         first_candle_date = first_ts.astimezone(IST).date().isoformat() if first_ts else ""
-        last_candle = last_ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if last_ts else ""
+        last_candle = last_ts.astimezone(IST).isoformat(timespec="seconds") if last_ts else ""
         file_name = path.rsplit("/", 1)[-1]
         notes = f"Src={source}|ExpectedLCD={expected_lcd}|Current={'Y' if status == 'FRESH_READY' else 'N'}"
         return [
@@ -1297,7 +1297,7 @@ class UniverseService:
         last_ts = self._last_candle_ts(candles)
         bars = len(candles)
         first_candle_date = first_ts.astimezone(IST).date().isoformat() if first_ts else ""
-        last_candle = last_ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if last_ts else ""
+        last_candle = last_ts.astimezone(IST).isoformat(timespec="seconds") if last_ts else ""
         file_name = path.rsplit("/", 1)[-1]
         notes = f"Src={source}|ExpectedLCD={expected_lcd}|TF=5m"
         return [
@@ -2821,13 +2821,17 @@ class UniverseService:
     def _phase2_window_open(now_i: datetime, *, premarket: bool, run_block: str = "") -> bool:
         if premarket:
             return False
-        rb = str(run_block or "").strip().upper()
-        if rb:
-            return rb != "INTRA_FINAL"
         ti = now_i.astimezone(IST)
         if ti.weekday() >= 5:
             return False
         hm = ti.hour * 60 + ti.minute
+        rb = str(run_block or "").strip().upper()
+        if rb:
+            if rb == "INTRA_FINAL":
+                return True
+            if rb in {"INTRA_5M", "INTRA_15M", "INTRA_ADHOC"}:
+                return True
+            return (9 * 60 + 30) <= hm <= (15 * 60 + 10)
         return (9 * 60 + 30) <= hm <= (15 * 60 + 10)
 
     @classmethod
@@ -2938,11 +2942,14 @@ class UniverseService:
         target: int,
         sector_coverage_pct: float,
         seed: list[dict[str, Any]] | None = None,
+        cap_share: float | None = None,
+        corr_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
         if target <= 0:
             return []
         ordered = sorted(candidates, key=lambda x: (-float(x.get("score", 0.0)), str(x.get("symbol", ""))))
-        cap = self._watchlist_cap_count(target, self.WATCHLIST_DIVERSIFICATION_CAP_SHARE)
+        cap = self._watchlist_cap_count(target, float(cap_share if cap_share is not None else self.WATCHLIST_DIVERSIFICATION_CAP_SHARE))
+        corr_thr = float(corr_threshold if corr_threshold is not None else self.WATCHLIST_CORR_THRESHOLD)
         coverage_good = float(sector_coverage_pct) >= float(self.WATCHLIST_SECTOR_COVERAGE_MIN_PCT)
         bucket_counts: dict[str, int] = defaultdict(int)
         picked: list[dict[str, Any]] = []
@@ -3000,7 +3007,7 @@ class UniverseService:
                 corr = abs(self._returns_corr(cur_rets, p.get("returnsByDate") or {}))
                 if corr > max_corr:
                     max_corr = corr
-                if corr >= float(self.WATCHLIST_CORR_THRESHOLD):
+                if corr >= corr_thr:
                     violated = True
                     break
             if violated:
@@ -3363,7 +3370,7 @@ class UniverseService:
             "industry": industry,
             "basicIndustry": basic,
             "source": str(source or raw.get("source") or "unknown").strip() or "unknown",
-            "updatedAt": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+            "updatedAt": now_ist_str(),
         }
 
     @staticmethod
@@ -4123,6 +4130,45 @@ class UniverseService:
         min_score_eff = max(1, int(min_score))
         if market_policy is not None:
             min_score_eff = max(1, int(min_score_eff + int(market_policy.watchlist_min_score_boost or 0)))
+        dynamic_sector_cap_share = float(market_policy.dynamic_sector_cap_share) if market_policy is not None else float(self.WATCHLIST_DIVERSIFICATION_CAP_SHARE)
+        dynamic_corr_threshold = float(market_policy.correlation_threshold) if market_policy is not None else float(self.WATCHLIST_CORR_THRESHOLD)
+
+        canonical_regime = str(market_state.regime if market_state is not None else "RANGE")
+        risk_mode = str(market_state.risk_mode if market_state is not None else (market_policy.risk_mode if market_policy is not None else "NORMAL"))
+        structure_state = str(getattr(market_state, "structure_state", "ORDERLY") if market_state is not None else "ORDERLY")
+        participation_state = str(getattr(market_state, "participation", "MODERATE") if market_state is not None else "MODERATE")
+        sub_regime_v2 = str(getattr(market_state, "sub_regime_v2", "BASELINE") if market_state is not None else "BASELINE")
+        run_degraded_flag = bool(getattr(market_state, "run_degraded_flag", False)) if market_state is not None else False
+        market_confidence = float(getattr(market_state, "market_confidence", 0.0) or 0.0) if market_state is not None else 0.0
+        breadth_confidence = float(getattr(market_state, "breadth_confidence", 0.0) or 0.0) if market_state is not None else 0.0
+        leadership_confidence = float(getattr(market_state, "leadership_confidence", 0.0) or 0.0) if market_state is not None else 0.0
+        phase2_confidence_state = float(getattr(market_state, "phase2_confidence", 0.0) or 0.0) if market_state is not None else 0.0
+        policy_confidence = float(getattr(market_policy, "policy_confidence", (getattr(market_state, "policy_confidence", 0.0) if market_state is not None else 0.0)) or 0.0)
+        run_integrity_confidence = float(getattr(market_state, "run_integrity_confidence", 0.0) or 0.0) if market_state is not None else 0.0
+
+        def _select_rows(
+            candidates: list[dict[str, Any]],
+            *,
+            target: int,
+            seed: list[dict[str, Any]] | None = None,
+        ) -> list[dict[str, Any]]:
+            try:
+                return self._select_with_diversification_and_corr(
+                    candidates,
+                    target=target,
+                    sector_coverage_pct=sector_mapping_coverage_pct,
+                    seed=seed,
+                    cap_share=dynamic_sector_cap_share,
+                    corr_threshold=dynamic_corr_threshold,
+                )
+            except TypeError:
+                # Compatibility for monkeypatched tests/helpers using legacy selector signature.
+                return self._select_with_diversification_and_corr(
+                    candidates,
+                    target=target,
+                    sector_coverage_pct=sector_mapping_coverage_pct,
+                    seed=seed,
+                )
 
         controls = self._build_universe_v2_controls()
         mode_thresholds = controls.active_thresholds()
@@ -4183,6 +4229,8 @@ class UniverseService:
                         "timeframe": timeframe,
                         "expectedLCD": expected_lcd,
                         "sectorMappingCoveragePct": sector_mapping_coverage_pct,
+                        "sectorCapShare": float(round(dynamic_sector_cap_share, 3)),
+                        "corrThreshold": float(round(dynamic_corr_threshold, 3)),
                     },
                     "ready": False,
                     "reason": reason,
@@ -4323,11 +4371,7 @@ class UniverseService:
         if market_policy is not None:
             swing_target = max(1, math.floor(float(swing_target) * float(market_policy.watchlist_target_multiplier or 1.0)))
         swing_target = min(swing_target, 150)
-        swing_selected = self._select_with_diversification_and_corr(
-            swing_scored,
-            target=swing_target,
-            sector_coverage_pct=sector_mapping_coverage_pct,
-        )
+        swing_selected = _select_rows(swing_scored, target=swing_target)
 
         intraday_phase1: list[dict[str, Any]] = []
         for r in intraday_candidates:
@@ -4368,6 +4412,8 @@ class UniverseService:
         phase2_global_skip_reason = ""
         phase2_window_open = self._phase2_window_open(now_i, premarket=bool(premarket), run_block=run_block)
         phase2_policy_enabled = not (market_policy is not None and not bool(market_policy.intraday_phase2_enabled))
+        phase2_final_block = str(run_block or "").strip().upper() == "INTRA_FINAL"
+        phase2_quality_score = 0.0
 
         def _record_phase2_rejection(symbol: str, reason: str, *, baseline_coverage: float = 0.0) -> None:
             norm_reason = self._phase2_rejection_reason(reason)
@@ -4465,11 +4511,22 @@ class UniverseService:
                     reversal_score = 0.0
 
                 phase2_score = max(trend_score, reversal_score) * 100.0
+                if phase2_final_block:
+                    # Final-block phase2 is allowed but requires stricter completed-bar confidence.
+                    phase2_score = float(phase2_score * 0.92)
                 setup_label = "VWAP_TREND" if trend_score >= reversal_score else "VWAP_REVERSAL"
-                if float(phase2_score) < float(min_score_eff):
+                phase2_min_score = float(min_score_eff + (6 if phase2_final_block else 0))
+                if float(phase2_score) < phase2_min_score:
                     _record_phase2_rejection(
                         sym,
                         "SETUP_GATE_FAIL",
+                        baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
+                    )
+                    continue
+                if phase2_final_block and float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0) < 85.0:
+                    _record_phase2_rejection(
+                        sym,
+                        "LOW_SLOT_COVERAGE",
                         baseline_coverage=float(phase2_chk.get("phase2BaselineCoveragePct") or 0.0),
                     )
                     continue
@@ -4544,25 +4601,40 @@ class UniverseService:
         if market_policy is not None:
             intraday_target = max(1, math.floor(float(intraday_target) * float(market_policy.watchlist_target_multiplier or 1.0)))
         if premarket:
-            intraday_selected = self._select_with_diversification_and_corr(
-                intraday_phase1_fallback,
-                target=intraday_target,
-                sector_coverage_pct=sector_mapping_coverage_pct,
-            )
+            intraday_selected = _select_rows(intraday_phase1_fallback, target=intraday_target)
         else:
-            phase2_selected = self._select_with_diversification_and_corr(
-                intraday_phase2,
-                target=intraday_target,
-                sector_coverage_pct=sector_mapping_coverage_pct,
+            avg_phase2_score = (
+                statistics.mean(float(r.get("score") or 0.0) for r in intraday_phase2)
+                if intraday_phase2
+                else 0.0
             )
+            phase2_eligible_pct_local = (len(intraday_phase2) * 100.0 / len(intraday_phase1)) if intraday_phase1 else 0.0
+            phase2_quality_score = float(
+                round(
+                    max(
+                        0.0,
+                        min(
+                            100.0,
+                        (0.45 * phase2_eligible_pct_local)
+                        + (0.35 * avg_phase2_score)
+                        + (0.20 * min(100.0, len(intraday_phase2) * 1.5)),
+                        ),
+                    ),
+                    2,
+                )
+            )
+            if phase2_quality_score >= 72.0:
+                phase2_target = intraday_target
+            elif phase2_quality_score >= 58.0:
+                phase2_target = max(1, int(math.floor(intraday_target * 0.80)))
+            elif phase2_quality_score >= 42.0:
+                phase2_target = max(1, int(math.floor(intraday_target * 0.65)))
+            else:
+                phase2_target = max(1, int(math.floor(intraday_target * 0.50)))
+            phase2_selected = _select_rows(intraday_phase2, target=phase2_target)
             selected_symbols = {str(r.get("symbol") or "") for r in phase2_selected}
             phase1_remaining = [r for r in intraday_phase1_fallback if str(r.get("symbol") or "") not in selected_symbols]
-            intraday_selected = self._select_with_diversification_and_corr(
-                phase1_remaining,
-                target=intraday_target,
-                sector_coverage_pct=sector_mapping_coverage_pct,
-                seed=phase2_selected,
-            )
+            intraday_selected = _select_rows(phase1_remaining, target=intraday_target, seed=phase2_selected)
 
         phase2_used_count = sum(1 for r in intraday_selected if str(r.get("source") or "").upper() == "PHASE2_INPLAY")
         phase1_fallback_count = max(0, len(intraday_selected) - phase2_used_count)
@@ -4601,6 +4673,19 @@ class UniverseService:
                     float(round(float(r.get("maxCorrToSelected") or 0.0), 6)),
                     float(round(float(r.get("turnoverMed60D") or 0.0), 2)),
                     float(round(float(r.get("atr14") or 0.0), 6)),
+                    canonical_regime,
+                    risk_mode,
+                    structure_state,
+                    participation_state,
+                    sub_regime_v2,
+                    "SWING_ACTIVE",
+                    "Y" if run_degraded_flag else "N",
+                    float(round(policy_confidence, 2)),
+                    float(round(market_confidence, 2)),
+                    float(round(breadth_confidence, 2)),
+                    float(round(leadership_confidence, 2)),
+                    float(round(phase2_confidence_state, 2)),
+                    float(round(run_integrity_confidence, 2)),
                 ]
             )
         if premarket and not swing_rows and market_policy is not None and str(market_policy.swing_permission or "").upper() == "DISABLED":
@@ -4641,12 +4726,26 @@ class UniverseService:
                     0.0,
                     0.0,
                     0.0,
+                    canonical_regime,
+                    risk_mode,
+                    structure_state,
+                    participation_state,
+                    sub_regime_v2,
+                    "SWING_DISABLED",
+                    "Y" if run_degraded_flag else "N",
+                    float(round(policy_confidence, 2)),
+                    float(round(market_confidence, 2)),
+                    float(round(breadth_confidence, 2)),
+                    float(round(leadership_confidence, 2)),
+                    float(round(phase2_confidence_state, 2)),
+                    float(round(run_integrity_confidence, 2)),
                 ]
             )
 
         intraday_rows: list[list[object]] = []
         for i, r in enumerate(intraday_selected, start=1):
             src = str(r.get("source") or "PHASE1_DAILY_FALLBACK").upper()
+            phase2_status = "PHASE2_INPLAY" if src == "PHASE2_INPLAY" else f"FALLBACK_{str(r.get('fallbackReason') or 'UNKNOWN').upper()}"
             intraday_rows.append(
                 [
                     run_ts,
@@ -4689,6 +4788,19 @@ class UniverseService:
                     float(round(float(r.get("maxCorrToSelected") or 0.0), 6)),
                     float(round(float(r.get("turnoverMed60D") or 0.0), 2)),
                     float(round(float(r.get("atr14") or 0.0), 6)),
+                    canonical_regime,
+                    risk_mode,
+                    structure_state,
+                    participation_state,
+                    sub_regime_v2,
+                    phase2_status,
+                    "Y" if run_degraded_flag else "N",
+                    float(round(policy_confidence, 2)),
+                    float(round(market_confidence, 2)),
+                    float(round(breadth_confidence, 2)),
+                    float(round(leadership_confidence, 2)),
+                    float(round(phase2_confidence_state, 2)),
+                    float(round(run_integrity_confidence, 2)),
                 ]
             )
 
@@ -4704,6 +4816,10 @@ class UniverseService:
             "phase2CandidatesSeen": int(phase2_candidates_seen),
             "phase2EligibleCount": int(phase2_eligible_count),
             "phase2UsedCount": int(phase2_used_count),
+            "phase2QualityScore": float(round(float(phase2_quality_score), 2)),
+            "phase2WindowOpen": bool(phase2_window_open),
+            "phase2PolicyEnabled": bool(phase2_policy_enabled),
+            "phase2GlobalSkipReason": str(phase2_global_skip_reason),
             "phase2RejectionSummary": {k: int(phase2_rejection_summary.get(k, 0) or 0) for k in self.PHASE2_REJECTION_KEYS},
         }
         try:
@@ -4716,6 +4832,9 @@ class UniverseService:
                 runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_candidates_seen", str(int(phase2_candidates_seen)))
                 runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_eligible_count", str(int(phase2_eligible_count)))
                 runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_used_count", str(int(phase2_used_count)))
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_window_open", "Y" if phase2_window_open else "N")
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_policy_enabled", "Y" if phase2_policy_enabled else "N")
+                runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_global_skip_reason", str(phase2_global_skip_reason))
                 runtime_state.set_runtime_prop("runtime:watchlist_last_phase2_rejections", json.dumps(phase2_diag_payload["phase2RejectionSummary"], separators=(",", ":")))
         except Exception:
             logger.warning("watchlist_phase2_runtime_diag_write_failed", exc_info=True)
@@ -4736,6 +4855,8 @@ class UniverseService:
                 "timeframe": timeframe,
                 "expectedLCD": expected_lcd,
                 "sectorMappingCoveragePct": sector_mapping_coverage_pct,
+                "sectorCapShare": float(round(dynamic_sector_cap_share, 3)),
+                "corrThreshold": float(round(dynamic_corr_threshold, 3)),
             },
             "ready": bool(len(swing_rows) > 0 or len(intraday_rows) > 0),
             "eligiblePool": len(intraday_candidates),
@@ -4747,16 +4868,20 @@ class UniverseService:
                 "phase1FallbackCount": int(phase1_fallback_count),
                 "phase2EligibleCount": int(phase2_eligible_count),
                 "phase2EligiblePct": float(round(phase2_eligible_pct, 2)),
+                "phase2QualityScore": float(round(float(phase2_quality_score), 2)),
                 "intradaySelectedCount": int(len(intraday_rows)),
                 "phase2BranchEntered": bool(phase2_branch_entered),
                 "phase2BranchCompleted": bool(phase2_branch_completed),
                 "phase2CandidatesSeen": int(phase2_candidates_seen),
+                "phase2WindowOpen": bool(phase2_window_open),
+                "phase2PolicyEnabled": bool(phase2_policy_enabled),
+                "phase2GlobalSkipReason": str(phase2_global_skip_reason),
                 "phase2RejectionSummary": {k: int(phase2_rejection_summary.get(k, 0) or 0) for k in self.PHASE2_REJECTION_KEYS},
             },
             "intradayPhaseDiagnostics": phase2_diag_payload,
         }
         logger.info(
-            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s phase2BranchEntered=%s phase2BranchCompleted=%s phase2Seen=%s runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f marketRegime=%s riskMode=%s",
+            "build_watchlist_v2 complete swingSelected=%s intradaySelected=%s swingCandidates=%s intradayCandidates=%s phase1=%s phase2=%s phase2BranchEntered=%s phase2BranchCompleted=%s phase2Seen=%s phase2Quality=%.2f runBlock=%s regimeDaily=%s regimeIntraday=%s expectedLCD=%s sectorCoveragePct=%.2f marketRegime=%s riskMode=%s sectorCap=%.3f corrThr=%.3f",
             swing_selected_count,
             len(intraday_rows),
             len(swing_candidates),
@@ -4766,6 +4891,7 @@ class UniverseService:
             bool(phase2_branch_entered),
             bool(phase2_branch_completed),
             int(phase2_candidates_seen),
+            float(round(float(phase2_quality_score), 2)),
             run_block,
             regime_v2["regimeDaily"],
             regime_v2["regimeIntraday"],
@@ -4773,6 +4899,8 @@ class UniverseService:
             sector_mapping_coverage_pct,
             (market_state.regime if market_state is not None else "NA"),
             (market_state.risk_mode if market_state is not None else "NA"),
+            float(dynamic_sector_cap_share),
+            float(dynamic_corr_threshold),
         )
         return out
 

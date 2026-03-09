@@ -280,9 +280,14 @@ class MarketBrainState:
     asof_ts: str
     phase: MarketPhase = "PREMARKET"
     regime: MarketRegimeV2 = "RANGE"
+    sub_regime_v2: str = "BASELINE"
+    structure_state: str = "ORDERLY"
+    recovery_state: str = "NONE"
+    event_state: str = "NONE"
     participation: ParticipationKind = "MODERATE"
     risk_mode: RiskModeKind = "NORMAL"
     intraday_state: IntradayStateKind = "PREOPEN"
+    run_degraded_flag: bool = False
     long_bias: float = 0.5
     short_bias: float = 0.5
     size_multiplier: float = 1.0
@@ -296,6 +301,12 @@ class MarketBrainState:
     volatility_stress_score: float = 50.0
     liquidity_health_score: float = 50.0
     data_quality_score: float = 50.0
+    market_confidence: float = 50.0
+    breadth_confidence: float = 50.0
+    leadership_confidence: float = 50.0
+    phase2_confidence: float = 50.0
+    policy_confidence: float = 50.0
+    run_integrity_confidence: float = 50.0
 
 
 @dataclass
@@ -314,4 +325,7 @@ class MarketPolicy:
     long_enabled: bool = True
     short_enabled: bool = True
     liquidity_bucket_floor: str = "D"
+    dynamic_sector_cap_share: float = 0.20
+    correlation_threshold: float = 0.85
+    policy_confidence: float = 50.0
     reasons: list[str] = field(default_factory=list)

@@ -343,6 +343,31 @@ def test_market_policy_size_and_max_positions_multipliers():
     assert policy_svc.max_positions_limit(4, state) == 5
 
 
+def test_market_policy_dynamic_diversification_thresholds_follow_risk_mode():
+    policy_svc = MarketPolicyService()
+    panic_policy = policy_svc.derive_market_policy(
+        MarketBrainState(
+            asof_ts=now_ist().isoformat(),
+            regime="PANIC",
+            risk_mode="LOCKDOWN",
+            policy_confidence=42.0,
+        )
+    )
+    normal_policy = policy_svc.derive_market_policy(
+        MarketBrainState(
+            asof_ts=now_ist().isoformat(),
+            regime="RANGE",
+            risk_mode="NORMAL",
+            policy_confidence=65.0,
+        )
+    )
+    assert panic_policy.dynamic_sector_cap_share == 0.12
+    assert panic_policy.correlation_threshold == 0.75
+    assert normal_policy.dynamic_sector_cap_share == 0.20
+    assert normal_policy.correlation_threshold == 0.85
+    assert panic_policy.policy_confidence == 42.0
+
+
 def test_market_brain_premarket_no_lookahead_and_post_open_live_allowed():
     pre_ctx = _baseline_regime_ctx()
     pre_ctx["source"]["dailySource"] = "cache_only"

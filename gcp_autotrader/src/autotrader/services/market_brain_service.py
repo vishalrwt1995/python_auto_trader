@@ -62,13 +62,20 @@ class MarketBrainService:
         asof = str(payload.get("asof_ts") or "").strip()
         if not asof:
             return None
+        run_degraded_raw = str(payload.get("run_degraded_flag", "")).strip().upper()
+        run_degraded = run_degraded_raw in {"Y", "YES", "TRUE", "1"} if run_degraded_raw else bool(payload.get("run_degraded_flag", False))
         return MarketBrainState(
             asof_ts=asof,
             phase=str(payload.get("phase") or "PREMARKET"),  # type: ignore[arg-type]
             regime=str(payload.get("regime") or "RANGE"),  # type: ignore[arg-type]
+            sub_regime_v2=str(payload.get("sub_regime_v2") or "BASELINE"),
+            structure_state=str(payload.get("structure_state") or "ORDERLY"),
+            recovery_state=str(payload.get("recovery_state") or "NONE"),
+            event_state=str(payload.get("event_state") or "NONE"),
             participation=str(payload.get("participation") or "MODERATE"),  # type: ignore[arg-type]
             risk_mode=str(payload.get("risk_mode") or "NORMAL"),  # type: ignore[arg-type]
             intraday_state=str(payload.get("intraday_state") or "PREOPEN"),  # type: ignore[arg-type]
+            run_degraded_flag=bool(run_degraded),
             long_bias=float(payload.get("long_bias") or 0.5),
             short_bias=float(payload.get("short_bias") or 0.5),
             size_multiplier=float(payload.get("size_multiplier") or 1.0),
@@ -82,6 +89,12 @@ class MarketBrainService:
             volatility_stress_score=float(payload.get("volatility_stress_score") or 50.0),
             liquidity_health_score=float(payload.get("liquidity_health_score") or 50.0),
             data_quality_score=float(payload.get("data_quality_score") or 50.0),
+            market_confidence=float(payload.get("market_confidence") or 50.0),
+            breadth_confidence=float(payload.get("breadth_confidence") or 50.0),
+            leadership_confidence=float(payload.get("leadership_confidence") or 50.0),
+            phase2_confidence=float(payload.get("phase2_confidence") or 50.0),
+            policy_confidence=float(payload.get("policy_confidence") or 50.0),
+            run_integrity_confidence=float(payload.get("run_integrity_confidence") or 50.0),
         )
 
     def _read_latest_context(self) -> dict[str, Any]:
@@ -140,7 +153,12 @@ class MarketBrainService:
             intraday_timeframe="5m",
         )
 
-    def _compute_liquidity_health(self, rows: list[dict[str, Any]]) -> tuple[float, dict[str, Any]]:
+    def _compute_liquidity_health(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        volatility_stress_score: float = 50.0,
+    ) -> tuple[float, dict[str, Any]]:
         if not rows:
             return 35.0, {"eligible": 0, "topLiqPassPct": 0.0, "weakLiqConcentrationPct": 100.0}
         eligible = [r for r in rows if bool(r.get("fresh")) and (bool(r.get("eligibleIntraday")) or bool(r.get("eligibleSwing")))]
@@ -210,6 +228,20 @@ class MarketBrainService:
             - (0.09 * stress_regime_execution_penalty)
         )
         score = float(round(self._clip(score01 * 100.0, 0.0, 100.0), 2))
+        # Stress-aware soft ceiling: do not let liquidity score stay unrealistically perfect in stressed regimes.
+        soft_ceiling = 98.0
+        if float(volatility_stress_score) >= 82.0:
+            soft_ceiling = 84.0
+        elif float(volatility_stress_score) >= 70.0:
+            soft_ceiling = 88.0
+        elif float(volatility_stress_score) >= 58.0:
+            soft_ceiling = 92.0
+        elif float(volatility_stress_score) >= 48.0:
+            soft_ceiling = 95.0
+        soft_ceiling -= (6.0 * self._norm(fallback_only_pct, 18.0, 60.0))
+        soft_ceiling = self._clip(soft_ceiling, 78.0, 98.0)
+        if score > soft_ceiling:
+            score = float(round(soft_ceiling + ((score - soft_ceiling) * 0.12), 2))
         return score, {
             "eligible": len(eligible),
             "topLiqPassPct": round(top_pass, 2),
@@ -223,6 +255,7 @@ class MarketBrainService:
             "liquidityDistributionEntropy": round(float(entropy), 4),
             "fallbackOnlyCandidatePct": round(float(fallback_only_pct), 2),
             "stressRegimeExecutionPenalty": round(float(stress_regime_execution_penalty), 4),
+            "stressAwareSoftCeiling": round(float(soft_ceiling), 2),
         }
 
     def _compute_data_quality(
@@ -261,7 +294,11 @@ class MarketBrainService:
         scanner_ts = parse_any_ts(self.state.get_runtime_prop("runtime:scanner_last_run_ts", ""))
         signals_ts = parse_any_ts(self.state.get_runtime_prop("runtime:signals_last_write_ts", ""))
         phase2_eligible_count = int(self.state.get_runtime_prop("runtime:watchlist_last_phase2_eligible_count", "0") or "0")
+        phase2_used_count = int(self.state.get_runtime_prop("runtime:watchlist_last_phase2_used_count", "0") or "0")
         phase2_branch_entered = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_branch_entered", "")).strip().upper() in {"Y", "YES", "TRUE", "1"}
+        phase2_window_open = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_window_open", "")).strip().upper() in {"Y", "YES", "TRUE", "1"}
+        phase2_policy_enabled = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_policy_enabled", "")).strip().upper() in {"Y", "YES", "TRUE", "1"}
+        phase2_global_skip_reason = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_global_skip_reason", "")).strip().upper()
 
         intraday_phase2_penalty = 0.0
         pipeline_alignment_penalty = 0.0
@@ -271,8 +308,16 @@ class MarketBrainService:
         if is_live_window:
             if intraday_bars < 6.0:
                 intraday_phase2_penalty += 7.0
+            expected_zero_phase2 = (phase2_global_skip_reason in {"PHASE2_WINDOW_CLOSED", "MARKET_POLICY_BLOCKED"}) or (not phase2_window_open) or (not phase2_policy_enabled)
             if phase2_eligible_count <= 0:
-                intraday_phase2_penalty += 14.0 if (phase2_branch_entered or intraday_bars >= 6.0) else 8.0
+                if expected_zero_phase2:
+                    # Policy/window expected zero contribution should not be heavily penalized.
+                    intraday_phase2_penalty += 1.5 if intraday_bars >= 6.0 else 0.5
+                else:
+                    intraday_phase2_penalty += 16.0 if (phase2_branch_entered or intraday_bars >= 6.0) else 9.0
+            elif phase2_used_count <= 0 and not expected_zero_phase2:
+                # Phase2 was available but contributed nothing: degraded operational usability.
+                intraday_phase2_penalty += 9.0
 
             writer_ts = [("watchlist", watchlist_ts), ("scanner", scanner_ts), ("signals", signals_ts)]
             observed: list[datetime] = []
@@ -316,7 +361,11 @@ class MarketBrainService:
             "pipelineAlignmentPenalty": round(float(pipeline_alignment_penalty), 2),
             "staleWriterPenalty": round(float(stale_writer_penalty), 2),
             "phase2EligibleCount": int(phase2_eligible_count),
+            "phase2UsedCount": int(phase2_used_count),
             "phase2BranchEntered": bool(phase2_branch_entered),
+            "phase2WindowOpen": bool(phase2_window_open),
+            "phase2PolicyEnabled": bool(phase2_policy_enabled),
+            "phase2GlobalSkipReason": str(phase2_global_skip_reason),
             "writerAgeMin": writer_age_min,
         }
 
@@ -370,6 +419,146 @@ class MarketBrainService:
             "gapStress": round(gap, 3),
             "intradayRangeExpansion": round(range_exp, 4),
             "chopRisk": round(chop, 2),
+        }
+
+    def _derive_secondary_states(
+        self,
+        *,
+        phase: str,
+        regime: str,
+        trend_score: float,
+        breadth_score: float,
+        leadership_score: float,
+        volatility_stress_score: float,
+        liquidity_health_score: float,
+        data_quality_score: float,
+        risk_appetite: float,
+        deltas: dict[str, float],
+        regime_ctx: dict[str, Any],
+        now_i: datetime,
+    ) -> tuple[str, str, str, str]:
+        trend_delta = float(deltas.get("trend", 0.0))
+        breadth_delta = float(deltas.get("breadth", 0.0))
+        leadership_delta = float(deltas.get("leadership", 0.0))
+        stress_delta = float(deltas.get("stress", 0.0))
+
+        structure_state = "ORDERLY"
+        if regime == "PANIC":
+            structure_state = "PANIC_TREND" if abs(float((regime_ctx.get("intraday", {}) or {}).get("vwapSlope") or 0.0)) >= 0.001 else "EVENT_DISTORTION"
+        elif regime == "TREND_UP" and breadth_score < 52.0:
+            structure_state = "NARROW_TREND"
+        elif regime == "TREND_UP" and trend_score >= 75.0 and leadership_score >= 60.0:
+            structure_state = "MATURE_TREND"
+        elif regime == "TREND_DOWN" and breadth_delta < -2.0:
+            structure_state = "DISTRIBUTION"
+        elif regime == "CHOP":
+            structure_state = "CHOPPY_NOISE"
+        elif regime == "RANGE" and volatility_stress_score < 45.0:
+            structure_state = "ORDERLY_RANGE"
+        elif regime == "RANGE":
+            structure_state = "VOLATILE_RANGE"
+
+        recovery_state = "NONE"
+        if regime == "RECOVERY":
+            if breadth_delta >= 3.0 and leadership_delta >= 2.0 and stress_delta <= 0.0:
+                recovery_state = "STRENGTHENING"
+            elif breadth_delta < 0.0 or leadership_delta < 0.0:
+                recovery_state = "FRAGILE"
+            else:
+                recovery_state = "EARLY"
+
+        sub_regime = "BASELINE"
+        if regime == "PANIC":
+            sub_regime = "PANIC_TREND"
+        elif regime == "RECOVERY":
+            if trend_score >= 58.0 and breadth_score < 48.0:
+                sub_regime = "FALSE_RECOVERY"
+            elif leadership_score >= 55.0 and breadth_score >= 50.0:
+                sub_regime = "RECOVERY_BUILD"
+            else:
+                sub_regime = "RECOVERY_TENTATIVE"
+        elif regime == "TREND_UP" and structure_state == "NARROW_TREND":
+            sub_regime = "NARROW_TREND"
+        elif regime == "TREND_DOWN" and volatility_stress_score < 55.0 and breadth_delta >= 2.0:
+            sub_regime = "SHORT_COVERING_BOUNCE"
+        elif regime == "CHOP":
+            sub_regime = "HIGH_NOISE_CHOP" if volatility_stress_score >= 62.0 else "LOW_CONVICTION_CHOP"
+        elif regime == "RANGE":
+            sub_regime = "HEALTHY_RANGE" if volatility_stress_score < 45.0 and data_quality_score >= 70.0 else "LOW_CONVICTION_RANGE"
+
+        event_state = "NONE"
+        stress_extreme = volatility_stress_score >= 80.0
+        gap_stress = float((regime_ctx.get("intraday", {}) or {}).get("rangeExpansion30m") or 0.0) >= 1.6
+        if phase == "POST_OPEN" and gap_stress:
+            event_state = "ABNORMAL_GAP"
+        elif stress_extreme:
+            event_state = "STRESS_EVENT"
+        elif now_i.astimezone(IST).weekday() == 3 and phase in {"POST_OPEN", "LIVE"}:
+            event_state = "EXPIRY_SESSION"
+        elif regime in {"CHOP", "PANIC"} and liquidity_health_score < 55.0 and risk_appetite < 45.0:
+            event_state = "EXECUTION_FRAGILITY"
+
+        return sub_regime, structure_state, recovery_state, event_state
+
+    def _confidence_family(
+        self,
+        *,
+        phase: str,
+        trend_score: float,
+        breadth_score: float,
+        leadership_score: float,
+        volatility_stress_score: float,
+        liquidity_health_score: float,
+        data_quality_score: float,
+        risk_appetite: float,
+        quality_ctx: dict[str, Any],
+        no_lookahead_valid: bool,
+    ) -> dict[str, float]:
+        market_conf = self._clip((0.35 * risk_appetite) + (0.15 * trend_score) + (0.15 * breadth_score) + (0.15 * leadership_score) + (0.10 * liquidity_health_score) + (0.10 * data_quality_score) - (0.15 * volatility_stress_score), 0.0, 100.0)
+        breadth_conf = self._clip((0.65 * breadth_score) + (0.20 * self._norm(float(quality_ctx.get("breadthProcessed") or 0.0), 40.0, 350.0) * 100.0) + (0.15 * data_quality_score), 0.0, 100.0)
+        leadership_conf = self._clip((0.68 * leadership_score) + (0.17 * self._norm(float(quality_ctx.get("leadersProcessed") or 0.0), 20.0, 130.0) * 100.0) + (0.15 * data_quality_score), 0.0, 100.0)
+
+        phase2_eligible = int(quality_ctx.get("phase2EligibleCount") or 0)
+        phase2_used = int(quality_ctx.get("phase2UsedCount") or 0)
+        phase2_window_open = bool(quality_ctx.get("phase2WindowOpen"))
+        phase2_policy_enabled = bool(quality_ctx.get("phase2PolicyEnabled"))
+        expected_zero = (str(quality_ctx.get("phase2GlobalSkipReason") or "").upper() in {"PHASE2_WINDOW_CLOSED", "MARKET_POLICY_BLOCKED"}) or (not phase2_window_open) or (not phase2_policy_enabled)
+        if phase == "PREMARKET":
+            phase2_conf = 72.0
+        elif expected_zero:
+            phase2_conf = 68.0
+        elif phase2_used > 0:
+            phase2_conf = self._clip(58.0 + (0.20 * min(100.0, phase2_used * 2.0)) + (0.22 * min(100.0, phase2_eligible * 1.5)), 35.0, 96.0)
+        elif phase2_eligible > 0:
+            phase2_conf = self._clip(46.0 + (0.15 * min(100.0, phase2_eligible * 1.8)) - 8.0, 20.0, 82.0)
+        else:
+            phase2_conf = 26.0
+
+        writer_age = quality_ctx.get("writerAgeMin") if isinstance(quality_ctx.get("writerAgeMin"), dict) else {}
+        max_writer_age = max([float(v) for v in writer_age.values() if isinstance(v, (int, float))], default=0.0)
+        integrity_penalty = (
+            float(quality_ctx.get("pipelineAlignmentPenalty") or 0.0)
+            + float(quality_ctx.get("staleWriterPenalty") or 0.0)
+            + (8.0 if not no_lookahead_valid else 0.0)
+            + (6.0 * self._norm(max_writer_age, 18.0, 90.0))
+        )
+        run_integrity_conf = self._clip(100.0 - integrity_penalty, 0.0, 100.0)
+        policy_conf = self._clip(
+            (0.40 * market_conf)
+            + (0.20 * data_quality_score)
+            + (0.15 * run_integrity_conf)
+            + (0.15 * breadth_conf)
+            + (0.10 * leadership_conf),
+            0.0,
+            100.0,
+        )
+        return {
+            "market_confidence": round(float(market_conf), 2),
+            "breadth_confidence": round(float(breadth_conf), 2),
+            "leadership_confidence": round(float(leadership_conf), 2),
+            "phase2_confidence": round(float(phase2_conf), 2),
+            "policy_confidence": round(float(policy_conf), 2),
+            "run_integrity_confidence": round(float(run_integrity_conf), 2),
         }
 
     def _classify_intraday_state(self, *, phase: str, regime_ctx: dict[str, Any]) -> str:
@@ -484,6 +673,18 @@ class MarketBrainService:
             "daily": regime_ctx.get("daily", {}),
             "intraday": regime_ctx.get("intraday", {}),
             "source": regime_ctx.get("source", {}),
+            "canonicalRegime": str(state.regime or ""),
+            "riskMode": str(state.risk_mode or ""),
+            "structureState": str(state.structure_state or ""),
+            "participation": str(state.participation or ""),
+            "subRegimeV2": str(state.sub_regime_v2 or ""),
+            "runDegradedFlag": bool(state.run_degraded_flag),
+            "marketConfidence": float(state.market_confidence or 0.0),
+            "breadthConfidence": float(state.breadth_confidence or 0.0),
+            "leadershipConfidence": float(state.leadership_confidence or 0.0),
+            "phase2Confidence": float(state.phase2_confidence or 0.0),
+            "policyConfidence": float(state.policy_confidence or 0.0),
+            "runIntegrityConfidence": float(state.run_integrity_confidence or 0.0),
         }
 
     def _validate_phase_no_lookahead(self, *, state: MarketBrainState, context: dict[str, Any]) -> bool:
@@ -528,7 +729,6 @@ class MarketBrainService:
         trend_score = self._compute_trend_score(regime_ctx)
         breadth = self.compute_breadth_snapshot(expected_lcd=expected_lcd, rows=rows)
         leadership = self.compute_leadership_snapshot(expected_lcd=expected_lcd, rows=rows, now_i=asof_i)
-        liquidity_health_score, liquidity_ctx = self._compute_liquidity_health(rows)
 
         live_regime: RegimeSnapshot | None = None
         if phase in {"POST_OPEN", "LIVE", "EOD"}:
@@ -538,6 +738,14 @@ class MarketBrainService:
                 logger.warning("market_brain_v2 live regime fetch failed", exc_info=True)
 
         volatility_stress_score, stress_ctx = self._compute_volatility_stress(regime_ctx=regime_ctx, live_regime=live_regime)
+        try:
+            liquidity_health_score, liquidity_ctx = self._compute_liquidity_health(
+                rows,
+                volatility_stress_score=volatility_stress_score,
+            )
+        except TypeError:
+            # Compatibility for monkeypatched tests/helpers using legacy signature.
+            liquidity_health_score, liquidity_ctx = self._compute_liquidity_health(rows)
         quality_regime_ctx = dict(regime_ctx)
         quality_regime_ctx["_phaseHint"] = phase
         data_quality_score, quality_ctx = self._compute_data_quality(
@@ -557,6 +765,14 @@ class MarketBrainService:
         )
         risk_appetite = self._clip(risk_appetite, 0.0, 100.0)
         participation = "STRONG" if (breadth.get("score", 0.0) >= 65.0 and liquidity_health_score >= 65.0) else ("WEAK" if (breadth.get("score", 0.0) < 45.0 or liquidity_health_score < 45.0) else "MODERATE")
+        deltas = {
+            "trend": (trend_score - float(prior.trend_score)) if prior is not None else 0.0,
+            "breadth": (float(breadth.get("score") or 0.0) - float(prior.breadth_score)) if prior is not None else 0.0,
+            "leadership": (float(leadership.get("score") or 0.0) - float(prior.leadership_score)) if prior is not None else 0.0,
+            "stress": (volatility_stress_score - float(prior.volatility_stress_score)) if prior is not None else 0.0,
+            "liquidity": (liquidity_health_score - float(prior.liquidity_health_score)) if prior is not None else 0.0,
+            "quality": (data_quality_score - float(prior.data_quality_score)) if prior is not None else 0.0,
+        }
         regime = self._map_regime(
             trend_score=trend_score,
             breadth_score=float(breadth.get("score") or 0.0),
@@ -565,6 +781,20 @@ class MarketBrainService:
             data_quality_score=data_quality_score,
             risk_appetite=risk_appetite,
             prev=prior,
+        )
+        sub_regime_v2, structure_state, recovery_state, event_state = self._derive_secondary_states(
+            phase=phase,
+            regime=regime,
+            trend_score=trend_score,
+            breadth_score=float(breadth.get("score") or 0.0),
+            leadership_score=float(leadership.get("score") or 0.0),
+            volatility_stress_score=volatility_stress_score,
+            liquidity_health_score=liquidity_health_score,
+            data_quality_score=data_quality_score,
+            risk_appetite=risk_appetite,
+            deltas=deltas,
+            regime_ctx=regime_ctx,
+            now_i=asof_i,
         )
         risk_mode = self._map_risk_mode(
             regime=regime,
@@ -608,6 +838,24 @@ class MarketBrainService:
         if not allowed_strategies:
             allowed_strategies = ["MEAN_REVERSION", "VWAP_REVERSAL"]
 
+        no_lookahead_valid = self._validate_phase_no_lookahead(state=MarketBrainState(asof_ts=asof_i.isoformat(), phase=phase), context={"regimeContext": regime_ctx})
+        confidence_family = self._confidence_family(
+            phase=phase,
+            trend_score=trend_score,
+            breadth_score=float(breadth.get("score") or 0.0),
+            leadership_score=float(leadership.get("score") or 0.0),
+            volatility_stress_score=volatility_stress_score,
+            liquidity_health_score=liquidity_health_score,
+            data_quality_score=data_quality_score,
+            risk_appetite=risk_appetite,
+            quality_ctx=quality_ctx,
+            no_lookahead_valid=no_lookahead_valid,
+        )
+        run_degraded_flag = bool(
+            data_quality_score < 55.0
+            or confidence_family.get("run_integrity_confidence", 100.0) < 55.0
+            or confidence_family.get("phase2_confidence", 100.0) < 35.0
+        )
         reasons = [
             f"phase={phase}",
             f"trend={round(trend_score, 2)}",
@@ -617,15 +865,24 @@ class MarketBrainService:
             f"liq={round(liquidity_health_score, 2)}",
             f"dataQ={round(data_quality_score, 2)}",
             f"appetite={round(risk_appetite, 2)}",
+            f"subRegime={sub_regime_v2}",
+            f"struct={structure_state}",
+            f"event={event_state}",
+            f"degraded={'Y' if run_degraded_flag else 'N'}",
         ]
 
         state = MarketBrainState(
             asof_ts=asof_i.isoformat(),
             phase=phase,  # type: ignore[arg-type]
             regime=regime,  # type: ignore[arg-type]
+            sub_regime_v2=sub_regime_v2,
+            structure_state=structure_state,
+            recovery_state=recovery_state,
+            event_state=event_state,
             participation=participation,  # type: ignore[arg-type]
             risk_mode=risk_mode,  # type: ignore[arg-type]
             intraday_state=intraday_state,  # type: ignore[arg-type]
+            run_degraded_flag=run_degraded_flag,
             long_bias=long_bias,
             short_bias=short_bias,
             size_multiplier=size_multiplier,
@@ -639,6 +896,12 @@ class MarketBrainService:
             volatility_stress_score=round(volatility_stress_score, 2),
             liquidity_health_score=round(liquidity_health_score, 2),
             data_quality_score=round(data_quality_score, 2),
+            market_confidence=float(confidence_family.get("market_confidence", 50.0)),
+            breadth_confidence=float(confidence_family.get("breadth_confidence", 50.0)),
+            leadership_confidence=float(confidence_family.get("leadership_confidence", 50.0)),
+            phase2_confidence=float(confidence_family.get("phase2_confidence", 50.0)),
+            policy_confidence=float(confidence_family.get("policy_confidence", 50.0)),
+            run_integrity_confidence=float(confidence_family.get("run_integrity_confidence", 50.0)),
         )
 
         context = {
@@ -651,7 +914,10 @@ class MarketBrainService:
             "liquiditySnapshot": liquidity_ctx,
             "stressSnapshot": stress_ctx,
             "dataQualitySnapshot": quality_ctx,
-            "noLookaheadValid": self._validate_phase_no_lookahead(state=state, context={"regimeContext": regime_ctx}),
+            "deltas": {k: round(float(v), 4) for k, v in deltas.items()},
+            "confidenceFamily": confidence_family,
+            "noLookaheadValid": no_lookahead_valid,
+            "runDegradedFlag": bool(run_degraded_flag),
         }
         policy = self.policy_service.derive_market_policy(state)
         self.persist_market_brain_state(state, context=context, policy=policy)

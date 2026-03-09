@@ -199,6 +199,13 @@ def test_watchlist_v2_regime_premarket_skips_index_intraday_api():
     assert reg["source"]["intradaySource"] == "premarket_skip"
 
 
+def test_watchlist_v2_phase2_window_allows_final_block_with_completed_bars():
+    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    now_i = now_ist().astimezone(IST).replace(hour=14, minute=50, second=0, microsecond=0)
+    assert svc._phase2_window_open(now_i, premarket=False, run_block="INTRA_FINAL") is True
+    assert svc._phase2_window_open(now_i, premarket=True, run_block="INTRA_FINAL") is False
+
+
 def test_watchlist_v2_score_bounds_zero_to_hundred():
     sheets = _FakeSheets()
     svc = UniverseService(sheets, object(), object(), StrategySettings())

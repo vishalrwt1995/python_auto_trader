@@ -22,20 +22,28 @@ class MarketPolicyService:
         open_drive_enabled = True
         long_enabled = True
         short_enabled = True
+        dynamic_sector_cap_share = 0.20
+        correlation_threshold = 0.85
 
         if risk_mode == "AGGRESSIVE":
             watchlist_target_multiplier = 1.10
             watchlist_min_score_boost = 0
             liquidity_bucket_floor = "B"
+            dynamic_sector_cap_share = 0.25
+            correlation_threshold = 0.88
         elif risk_mode == "NORMAL":
             watchlist_target_multiplier = 1.0
             watchlist_min_score_boost = 2
             liquidity_bucket_floor = "B"
+            dynamic_sector_cap_share = 0.20
+            correlation_threshold = 0.85
         elif risk_mode == "DEFENSIVE":
             watchlist_target_multiplier = 0.75
             watchlist_min_score_boost = 8
             liquidity_bucket_floor = "A"
             open_drive_enabled = False
+            dynamic_sector_cap_share = 0.15
+            correlation_threshold = 0.80
         else:
             watchlist_target_multiplier = 0.40
             watchlist_min_score_boost = 18
@@ -43,6 +51,8 @@ class MarketPolicyService:
             breakout_enabled = False
             open_drive_enabled = False
             liquidity_bucket_floor = "A"
+            dynamic_sector_cap_share = 0.12
+            correlation_threshold = 0.75
 
         if regime in {"CHOP", "PANIC"}:
             breakout_enabled = False
@@ -56,6 +66,9 @@ class MarketPolicyService:
             short_enabled = True
         if regime in {"TREND_DOWN", "PANIC"}:
             intraday_phase2_enabled = intraday_phase2_enabled and (state.data_quality_score >= 55.0)
+        if regime == "PANIC":
+            dynamic_sector_cap_share = min(dynamic_sector_cap_share, 0.12)
+            correlation_threshold = min(correlation_threshold, 0.75)
 
         reasons = [
             f"regime={state.regime}",
@@ -63,6 +76,8 @@ class MarketPolicyService:
             f"sizeMult={round(float(state.size_multiplier), 3)}",
             f"maxPosMult={round(float(state.max_positions_multiplier), 3)}",
             f"swing={state.swing_permission}",
+            f"sectorCap={round(float(dynamic_sector_cap_share), 3)}",
+            f"corrThr={round(float(correlation_threshold), 3)}",
         ]
         if not breakout_enabled:
             reasons.append("breakout_disabled")
@@ -88,6 +103,9 @@ class MarketPolicyService:
             long_enabled=bool(long_enabled),
             short_enabled=bool(short_enabled),
             liquidity_bucket_floor=str(liquidity_bucket_floor),
+            dynamic_sector_cap_share=float(max(0.05, min(0.40, dynamic_sector_cap_share))),
+            correlation_threshold=float(max(0.60, min(0.95, correlation_threshold))),
+            policy_confidence=float(max(0.0, min(100.0, float(state.policy_confidence or state.market_confidence or 50.0)))),
             reasons=reasons,
         )
 

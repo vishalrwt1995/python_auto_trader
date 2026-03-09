@@ -29,9 +29,28 @@ def test_watchlist_done_log_fields_include_required_premarket_audit_keys():
             "phase1FallbackCount": 150,
             "phase2EligibleCount": 0,
             "phase2EligiblePct": 0.0,
+            "phase2QualityScore": 41.5,
+            "phase2WindowOpen": True,
+            "phase2PolicyEnabled": True,
+            "phase2GlobalSkipReason": "",
             "intradaySelectedCount": 150,
             "phase2RejectionSummary": {"MARKET_POLICY_BLOCKED": 150},
         },
+        "marketBrainState": {
+            "regime": "PANIC",
+            "risk_mode": "LOCKDOWN",
+            "structure_state": "PANIC_TREND",
+            "participation": "WEAK",
+            "sub_regime_v2": "PANIC_TREND",
+            "run_degraded_flag": True,
+            "market_confidence": 38.4,
+            "breadth_confidence": 26.1,
+            "leadership_confidence": 40.2,
+            "phase2_confidence": 25.0,
+            "policy_confidence": 44.0,
+            "run_integrity_confidence": 64.0,
+        },
+        "marketPolicy": {"policy_confidence": 44.0},
     }
 
     ctx = _watchlist_done_log_fields(wl_out, is_premarket=True)
@@ -46,7 +65,15 @@ def test_watchlist_done_log_fields_include_required_premarket_audit_keys():
     assert ctx["phase2_branch_entered"] is True
     assert ctx["phase2_branch_completed"] is True
     assert ctx["phase2_candidates_seen"] == 150
+    assert ctx["phase2_quality_score"] == 41.5
+    assert ctx["phase2_window_open"] is True
+    assert ctx["phase2_policy_enabled"] is True
     assert ctx["phase2_rejection_summary"]["MARKET_POLICY_BLOCKED"] == 150
+    assert ctx["canonicalRegime"] == "PANIC"
+    assert ctx["riskMode"] == "LOCKDOWN"
+    assert ctx["subRegimeV2"] == "PANIC_TREND"
+    assert ctx["runDegradedFlag"] is True
+    assert ctx["policyConfidence"] == 44.0
 
 
 class _SheetsStub:

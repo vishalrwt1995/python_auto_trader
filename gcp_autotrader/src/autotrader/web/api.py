@@ -57,6 +57,8 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
     regime_v2 = wl_out.get("regimeV2", {}) if isinstance(wl_out.get("regimeV2"), dict) else {}
     source = regime_v2.get("source", {}) if isinstance(regime_v2.get("source"), dict) else {}
     phase_stats = wl_out.get("intradayPhaseStats", {}) if isinstance(wl_out.get("intradayPhaseStats"), dict) else {}
+    brain = wl_out.get("marketBrainState", {}) if isinstance(wl_out.get("marketBrainState"), dict) else {}
+    policy = wl_out.get("marketPolicy", {}) if isinstance(wl_out.get("marketPolicy"), dict) else {}
     rejection_summary_raw = phase_stats.get("phase2RejectionSummary", {})
     rejection_summary = rejection_summary_raw if isinstance(rejection_summary_raw, dict) else {}
 
@@ -67,9 +69,13 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
     phase1_fallback = int(phase_stats.get("phase1FallbackCount", max(0, intraday_selected - phase2_used)) or 0)
     phase2_eligible = int(phase_stats.get("phase2EligibleCount", coverage.get("phase2Candidates", 0)) or 0)
     phase2_eligible_pct = float(phase_stats.get("phase2EligiblePct", 0.0) or 0.0)
+    phase2_quality_score = float(phase_stats.get("phase2QualityScore", 0.0) or 0.0)
     phase2_branch_entered = bool(phase_stats.get("phase2BranchEntered", False))
     phase2_branch_completed = bool(phase_stats.get("phase2BranchCompleted", False))
     phase2_candidates_seen = int(phase_stats.get("phase2CandidatesSeen", 0) or 0)
+    phase2_window_open = bool(phase_stats.get("phase2WindowOpen", False))
+    phase2_policy_enabled = bool(phase_stats.get("phase2PolicyEnabled", False))
+    phase2_global_skip_reason = str(phase_stats.get("phase2GlobalSkipReason", "") or "")
 
     return {
         "expectedLCD": str(coverage.get("expectedLCD") or ""),
@@ -83,10 +89,26 @@ def _watchlist_done_log_fields(wl_out: dict[str, Any], *, is_premarket: bool) ->
         "phase1_fallback_count": phase1_fallback,
         "phase2_eligible_count": phase2_eligible,
         "phase2_eligible_pct": round(phase2_eligible_pct, 2),
+        "phase2_quality_score": round(phase2_quality_score, 2),
         "intraday_selected_count": intraday_selected,
         "phase2_branch_entered": phase2_branch_entered,
         "phase2_branch_completed": phase2_branch_completed,
         "phase2_candidates_seen": phase2_candidates_seen,
+        "phase2_window_open": phase2_window_open,
+        "phase2_policy_enabled": phase2_policy_enabled,
+        "phase2_global_skip_reason": phase2_global_skip_reason,
+        "canonicalRegime": str(brain.get("regime") or regime_v2.get("canonicalRegime") or ""),
+        "riskMode": str(brain.get("risk_mode") or regime_v2.get("riskMode") or ""),
+        "structureState": str(brain.get("structure_state") or regime_v2.get("structureState") or ""),
+        "participation": str(brain.get("participation") or regime_v2.get("participation") or ""),
+        "subRegimeV2": str(brain.get("sub_regime_v2") or regime_v2.get("subRegimeV2") or ""),
+        "runDegradedFlag": bool(brain.get("run_degraded_flag", regime_v2.get("runDegradedFlag", False))),
+        "marketConfidence": float(brain.get("market_confidence", regime_v2.get("marketConfidence", 0.0)) or 0.0),
+        "breadthConfidence": float(brain.get("breadth_confidence", regime_v2.get("breadthConfidence", 0.0)) or 0.0),
+        "leadershipConfidence": float(brain.get("leadership_confidence", regime_v2.get("leadershipConfidence", 0.0)) or 0.0),
+        "phase2Confidence": float(brain.get("phase2_confidence", regime_v2.get("phase2Confidence", 0.0)) or 0.0),
+        "policyConfidence": float(policy.get("policy_confidence", brain.get("policy_confidence", regime_v2.get("policyConfidence", 0.0))) or 0.0),
+        "runIntegrityConfidence": float(brain.get("run_integrity_confidence", regime_v2.get("runIntegrityConfidence", 0.0)) or 0.0),
         "phase2_rejection_summary": {str(k): int(v or 0) for k, v in rejection_summary.items()},
     }
 
