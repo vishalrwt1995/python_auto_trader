@@ -234,7 +234,7 @@ def run_universe_sync(
     started_perf = time.perf_counter()
     try:
         sink.action("Universe", "sync", "START", "", {**sched_ctx, "limit": limit})
-        rows = c.universe_service().sync_universe_from_groww_instruments(limit=limit)
+        rows = c.universe_service().sync_universe_from_upstox_instruments(limit=limit)
         out = {"rows": rows}
         sink.action("Universe", "sync", "DONE", "universe synced", {**sched_ctx, **_duration_ctx(started_perf), **out})
         sink.flush_all()
@@ -1692,3 +1692,76 @@ def run_scan_once(
         )
         sink.flush_all()
         raise
+
+
+# ---------------------------------------------------------------------------
+# EOD position reconciliation (called by Cloud Scheduler at 15:10/15:20/15:30)
+# ---------------------------------------------------------------------------
+
+@app.post("/jobs/eod-position-reconcile")
+def run_eod_position_reconcile(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Close all open positions at EOD via Upstox order status check + forced market exit.
+
+    Called at 15:10, 15:20, 15:30 IST by Cloud Scheduler jobs:
+      autotrader-eod-recon-1510
+      autotrader-eod-recon-1520
+      autotrader-eod-recon-1530
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink(c.sheets)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("OrderService", "eod_position_reconcile", "START", "", sched_ctx)
+        out = c.order_service().reconcile_open_positions()
+        sink.action(
+            "OrderService",
+            "eod_position_reconcile",
+            "DONE",
+            "eod reconcile complete",
+            {**sched_ctx, **_duration_ctx(started_perf), **out},
+        )
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action(
+            "OrderService",
+            "eod_position_reconcile",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__},
+        )
+        sink.flush_all()
+        raise
+
+
+@app.get("/jobs/position-status")
+def get_position_status(
+    x_job_token: str | None = Header(default=None),
+    symbol: str | None = Query(default=None),
+    status: str | None = Query(default=None, description="OPEN or CLOSED \u2014 omit for all"),
+) -> dict[str, Any]:
+    """Return current open (or all) positions from Firestore.
+
+    Query params:
+      symbol \u2014 filter by symbol (case-insensitive)
+      status \u2014 OPEN | CLOSED | (omit for all)
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    if status and status.upper() == "OPEN":
+        positions = c.state.list_open_positions()
+    else:
+        positions = c.state.list_all_positions(limit=500)
+    if symbol:
+        sym_upper = symbol.strip().upper()
+        positions = [p for p in positions if str(p.get("symbol", "")).upper() == sym_upper]
+    if status and status.upper() not in ("OPEN", "ALL"):
+        stat_upper = status.strip().upper()
+        positions = [p for p in positions if str(p.get("status", "")).upper() == stat_upper]
+    return {"count": len(positions), "positions": positions}

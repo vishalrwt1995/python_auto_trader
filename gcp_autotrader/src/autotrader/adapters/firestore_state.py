@@ -134,3 +134,106 @@ class FirestoreStateStore:
                 break
         return rows
 
+    # ------------------------------------------------------------------ #
+    # Positions
+    # ------------------------------------------------------------------ #
+
+    def save_position(self, position_tag: str, payload: dict[str, Any]) -> None:
+        self.set_json("positions", position_tag, payload)
+
+    def get_position(self, position_tag: str) -> dict[str, Any] | None:
+        return self.get_json("positions", position_tag)
+
+    def update_position(self, position_tag: str, updates: dict[str, Any]) -> None:
+        self.set_json("positions", position_tag, updates, merge=True)
+
+    def list_open_positions(self) -> list[dict[str, Any]]:
+        rows = []
+        for d in self._db().collection("positions").stream():
+            row = d.to_dict() or {}
+            if str(row.get("status", "")).upper() == "OPEN":
+                row["_id"] = d.id
+                rows.append(row)
+        return rows
+
+    def list_all_positions(self, limit: int = 500) -> list[dict[str, Any]]:
+        rows = []
+        for d in self._db().collection("positions").limit(limit).stream():
+            row = d.to_dict() or {}
+            row["_id"] = d.id
+            rows.append(row)
+        return rows
+
+    # ------------------------------------------------------------------ #
+    # Orders log
+    # ------------------------------------------------------------------ #
+
+    def save_order(self, ref_id: str, payload: dict[str, Any]) -> None:
+        self.set_json("orders", ref_id, payload)
+
+    def get_order(self, ref_id: str) -> dict[str, Any] | None:
+        return self.get_json("orders", ref_id)
+
+    def list_orders(self, limit: int = 200) -> list[dict[str, Any]]:
+        return self.list_by_prefix("orders", prefix="", limit=limit)
+
+    # ------------------------------------------------------------------ #
+    # Universe
+    # ------------------------------------------------------------------ #
+
+    def save_universe_row(self, symbol: str, payload: dict[str, Any]) -> None:
+        self.set_json("universe", symbol.upper(), payload)
+
+    def get_universe_row(self, symbol: str) -> dict[str, Any] | None:
+        return self.get_json("universe", symbol.upper())
+
+    def list_universe(self, limit: int = 3000) -> list[dict[str, Any]]:
+        return self.list_by_prefix("universe", prefix="", limit=limit)
+
+    # ------------------------------------------------------------------ #
+    # Watchlist
+    # ------------------------------------------------------------------ #
+
+    def save_watchlist(self, payload: dict[str, Any]) -> None:
+        self.set_json("watchlist", "latest", payload)
+
+    def get_watchlist(self) -> dict[str, Any] | None:
+        return self.get_json("watchlist", "latest")
+
+    # ------------------------------------------------------------------ #
+    # Market Brain
+    # ------------------------------------------------------------------ #
+
+    def save_market_brain(self, payload: dict[str, Any]) -> None:
+        self.set_json("market_brain", "latest", payload)
+
+    def get_market_brain(self) -> dict[str, Any] | None:
+        return self.get_json("market_brain", "latest")
+
+    # ------------------------------------------------------------------ #
+    # Sector Mapping
+    # ------------------------------------------------------------------ #
+
+    def save_sector_mapping(self, symbol: str, payload: dict[str, Any]) -> None:
+        self.set_json("sector_mapping", symbol.upper(), payload)
+
+    def get_sector_mapping(self, symbol: str) -> dict[str, Any] | None:
+        return self.get_json("sector_mapping", symbol.upper())
+
+    def list_sector_mapping(self, limit: int = 3000) -> list[dict[str, Any]]:
+        return self.list_by_prefix("sector_mapping", prefix="", limit=limit)
+
+    # ------------------------------------------------------------------ #
+    # Config key-value store
+    # ------------------------------------------------------------------ #
+
+    def get_config(self, key: str, default: str = "") -> str:
+        row = self.get_json("config", key)
+        if not row:
+            return default
+        val = row.get("value")
+        return str(val) if val is not None else default
+
+    def set_config(self, key: str, value: str) -> None:
+        self.set_json("config", key, {"key": key, "value": value})
+

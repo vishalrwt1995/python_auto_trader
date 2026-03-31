@@ -1,2 +1,2 @@
-"""Adapter implementations for GCP and Groww."""
+"""Adapter implementations for GCP and Upstox."""
 

@@ -218,4 +218,10 @@ gcloud scheduler jobs delete "autotrader-scan-market-1535" \
   --location "$REGION" \
   --quiet || true
 
+# EOD position reconciliation — closes all open positions that bracket orders haven't auto-closed.
+# Three passes at 15:10, 15:20, 15:30 to catch any stragglers before market close (15:30 IST).
+create_job "autotrader-eod-recon-1510" "40 9 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
+create_job "autotrader-eod-recon-1520" "50 9 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
+create_job "autotrader-eod-recon-1530" "0 10 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
+
 echo "Scheduler jobs created/updated."

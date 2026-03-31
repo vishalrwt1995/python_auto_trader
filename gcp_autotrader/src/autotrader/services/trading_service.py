@@ -9,7 +9,7 @@ from typing import Any
 
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
-from autotrader.adapters.groww_client import GrowwClient
+from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository
 from autotrader.domain.indicators import compute_indicators
@@ -35,12 +35,71 @@ class TradingService:
     sheets: GoogleSheetsRepository
     state: FirestoreStateStore
     gcs: GoogleCloudStorageStore
-    groww: GrowwClient
     upstox: UpstoxClient
     regime_service: MarketRegimeService
     market_brain_service: MarketBrainService
     order_service: OrderService
     log_sink: LogSink
+    pubsub: PubSubClient | None = None
+
+    def _read_watchlist_with_fallback(self) -> list[Any]:
+        """Return watchlist rows — Firestore primary, Sheets fallback."""
+        from autotrader.domain.models import WatchlistRow
+        try:
+            doc = self.state.get_watchlist()
+            if doc and isinstance(doc.get("rows"), list) and doc["rows"]:
+                rows = []
+                for r in doc["rows"]:
+                    sym = str(r.get("symbol", "")).strip().upper()
+                    if not sym:
+                        continue
+                    enabled_raw = str(r.get("enabled", "Y") or "Y").strip().upper()
+                    if enabled_raw not in {"Y", "YES", "TRUE", "1", "ENABLED"}:
+                        continue
+                    rows.append(WatchlistRow(
+                        symbol=sym,
+                        exchange=str(r.get("exchange", "NSE") or "NSE").upper(),
+                        segment="CASH",
+                        product="MIS",
+                        strategy=str(r.get("setup", r.get("strategy", "AUTO")) or "AUTO"),
+                        sector=str(r.get("macrosector", r.get("sector", "UNKNOWN")) or "UNKNOWN"),
+                        beta=float(r.get("beta", 1.0) or 1.0),
+                        enabled=True,
+                        note=str(r.get("reason", r.get("notes", "")) or ""),
+                    ))
+                if rows:
+                    logger.debug("watchlist_read_source=firestore count=%d", len(rows))
+                    return rows
+        except Exception:
+            logger.warning("firestore_watchlist_read_failed — falling back to Sheets", exc_info=True)
+        logger.debug("watchlist_read_source=sheets")
+        return self.sheets.read_watchlist()
+
+    def _read_universe_instrument_keys(self, symbol_set: set[str]) -> dict[str, str]:
+        """Return {symbol: instrument_key} — Firestore primary, Sheets fallback."""
+        result: dict[str, str] = {}
+        try:
+            universe_rows = self.state.list_universe(limit=3000)
+            for row in universe_rows:
+                sym = str(row.get("symbol", "")).strip().upper()
+                ik = str(row.get("instrument_key", "") or "").strip()
+                if sym and ik and sym in symbol_set:
+                    result[sym] = ik
+            if result:
+                logger.debug("universe_key_map_source=firestore count=%d", len(result))
+                return result
+        except Exception:
+            logger.warning("firestore_universe_read_failed — falling back to Sheets", exc_info=True)
+        # Sheets fallback
+        try:
+            for u in self.sheets.read_universe_rows():
+                sym = str(u.symbol or "").strip().upper()
+                ik = str(u.instrument_key or "").strip()
+                if sym and ik and sym in symbol_set:
+                    result[sym] = ik
+        except Exception:
+            logger.warning("sheets_universe_read_failed", exc_info=True)
+        return result
 
     @staticmethod
     def _strategy_allowed(strategy: str, allowed: list[str]) -> bool:
@@ -131,13 +190,20 @@ class TradingService:
         from_str = start.strftime("%Y-%m-%d %H:%M:%S")
         to_str = end.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Groww fallback preserves backward compatibility and gives deeper historical intraday bars when available.
+        # Upstox intraday candle fallback for symbols not in GCS cache.
         api: list[list[Any]] = []
         try:
-            api = self.groww.get_candles_range(symbol, exchange, segment, timeframe, from_str, to_str)
+            instrument_key = symbol  # Will be resolved to full key by caller if needed
+            api = self.upstox.get_historical_candles_v3_intraday_range(
+                instrument_key,
+                from_date=start.strftime("%Y-%m-%d"),
+                to_date=end.strftime("%Y-%m-%d"),
+                unit="minutes",
+                interval=int(timeframe.replace("m", "").replace("min", "")) if timeframe else 15,
+            )
         except Exception:
             logger.warning(
-                "scanner_groww_candle_fallback_failed symbol=%s exchange=%s segment=%s",
+                "scanner_upstox_candle_fallback_failed symbol=%s exchange=%s segment=%s",
                 symbol,
                 exchange,
                 segment,
@@ -225,7 +291,8 @@ class TradingService:
                 brain_state,
             )
 
-            watchlist = self.sheets.read_watchlist()
+            # Read watchlist: Firestore is primary, Sheets is fallback
+            watchlist = self._read_watchlist_with_fallback()
             subset, scan_meta = self._slice_watchlist_for_scan(watchlist)
             if not subset:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")
@@ -235,11 +302,9 @@ class TradingService:
             key_by_symbol: dict[str, str] = {}
             if symbol_set:
                 try:
-                    for u in self.sheets.read_universe_rows():
-                        sym = str(u.symbol or "").strip().upper()
-                        if not sym or sym not in symbol_set:
-                            continue
-                        ik = str(u.instrument_key or "").strip()
+                    # Read instrument keys: Firestore universe first, then Sheets fallback
+                    universe_rows = self._read_universe_instrument_keys(symbol_set)
+                    for sym, ik in universe_rows.items():
                         if ik and sym not in key_by_symbol:
                             key_by_symbol[sym] = ik
                 except Exception:
@@ -247,6 +312,9 @@ class TradingService:
 
             scan_rows: list[list[Any]] = []
             signal_rows: list[list[Any]] = []
+            bq_signals: list[dict[str, Any]] = []
+            import uuid as _uuid
+            scanner_run_id = _uuid.uuid4().hex[:12]
             qualified = 0
 
             for w in subset:
@@ -339,12 +407,29 @@ class TradingService:
                     )
                     reason += f" MB={brain_state.regime}/{brain_state.risk_mode}"
                     self.log_sink.decision("SIGNAL", w.symbol, direction, "entry_qualified", {"score": adjusted_score, "reason": reason})
+                    _scan_ts = now_ist_str()
                     signal_rows.append([
-                        now_ist_str(), w.symbol, direction, adjusted_score,
+                        _scan_ts, w.symbol, direction, adjusted_score,
                         round(ltp, 2), round(pos.sl_price, 2), round(pos.target, 2),
                         pos.qty, round(pos.max_loss, 2), round(pos.max_gain, 2),
                         w.strategy, regime.regime, regime.bias, "QUALIFIED",
                     ])
+                    bq_signals.append({
+                        "scan_ts": _scan_ts,
+                        "run_date": _scan_ts[:10],
+                        "symbol": w.symbol,
+                        "direction": direction,
+                        "score": adjusted_score,
+                        "ltp": round(ltp, 2),
+                        "sl": round(pos.sl_price, 2),
+                        "target": round(pos.target, 2),
+                        "qty": pos.qty,
+                        "regime": brain_state.regime if brain_state else regime.regime,
+                        "risk_mode": brain_state.risk_mode if brain_state else "",
+                        "entry_placed": True,
+                        "blocked_reason": "",
+                        "scanner_run_id": scanner_run_id,
+                    })
                     self.order_service.place_entry_order(
                         symbol=w.symbol,
                         exchange=w.exchange,
@@ -379,6 +464,17 @@ class TradingService:
             if signal_rows:
                 self.sheets.append_signals(signal_rows)
                 self.state.set_runtime_prop("runtime:signals_last_write_ts", run_ts)
+            # Publish signals to Pub/Sub + BigQuery (best-effort)
+            if bq_signals:
+                try:
+                    from autotrader.adapters.bigquery_client import BigQueryClient as _BQC
+                    bq: _BQC | None = getattr(self.order_service, "bq", None)  # type: ignore[assignment]
+                    if bq:
+                        bq.insert_signals_batch(bq_signals)
+                except Exception:
+                    logger.warning("bq_signals_insert_failed — non-critical", exc_info=True)
+                if self.pubsub:
+                    self.pubsub.publish_trade_signals_batch(bq_signals)
             self.log_sink.action(
                 "TradingService",
                 "run_scan_once",

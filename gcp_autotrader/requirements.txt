@@ -7,6 +7,9 @@ google-auth-httplib2==0.2.0
 google-cloud-storage==2.19.0
 google-cloud-firestore==2.20.0
 google-cloud-secret-manager==2.23.1
+google-cloud-bigquery==3.27.0
+google-cloud-pubsub==2.27.1
+websockets==13.1
 tenacity==9.0.0
 typer==0.15.2
 pytest==8.3.4

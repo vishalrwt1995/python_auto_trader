@@ -7,9 +7,10 @@ from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
-from autotrader.adapters.groww_client import GrowwClient
+from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.secrets_manager import SecretManagerStore
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository
 from autotrader.adapters.upstox_client import UpstoxClient
@@ -82,8 +83,9 @@ class AppContainer:
         self.sheets = GoogleSheetsRepository(settings.gcp.spreadsheet_id)
         self.gcs = GoogleCloudStorageStore(settings.gcp.bucket_name)
         self.state = FirestoreStateStore(settings.gcp.project_id, settings.gcp.firestore_database)
+        self.bq = BigQueryClient(settings.gcp.project_id, settings.gcp.bq_dataset)
+        self.pubsub = PubSubClient(settings.gcp.project_id)
         self.upstox = UpstoxClient(settings.upstox, self.secrets)
-        self.groww = GrowwClient(settings.groww, self.secrets)
         self._regime_service: MarketRegimeService | None = None
         self._universe_service: UniverseService | None = None
         self._market_brain_service: MarketBrainService | None = None
@@ -101,6 +103,7 @@ class AppContainer:
     def universe_service(self) -> UniverseService:
         if self._universe_service is None:
             self._universe_service = UniverseService(self.sheets, self.gcs, self.upstox, self.settings.strategy)
+            self._universe_service.bq = self.bq
         return self._universe_service
 
     def market_brain_service(self) -> MarketBrainService:
@@ -110,13 +113,15 @@ class AppContainer:
                 universe_service=self.universe_service(),
                 gcs=self.gcs,
                 state=self.state,
+                bq=self.bq,
+                pubsub=self.pubsub,
             )
             self.universe_service().set_market_brain_service(self._market_brain_service)
         return self._market_brain_service
 
     def order_service(self) -> OrderService:
         if self._order_service is None:
-            self._order_service = OrderService(self.settings, self.sheets, self.state, self.groww)
+            self._order_service = OrderService(self.settings, self.sheets, self.state, self.upstox, self.bq, self.pubsub)
         return self._order_service
 
     def trading_service(self) -> TradingService:
@@ -126,12 +131,12 @@ class AppContainer:
                 sheets=self.sheets,
                 state=self.state,
                 gcs=self.gcs,
-                groww=self.groww,
                 upstox=self.upstox,
                 regime_service=self.regime_service(),
                 market_brain_service=self.market_brain_service(),
                 order_service=self.order_service(),
                 log_sink=self.log_sink(),
+                pubsub=self.pubsub,
             )
         return self._trading_service
 

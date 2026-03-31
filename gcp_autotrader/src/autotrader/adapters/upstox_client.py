@@ -689,5 +689,109 @@ class UpstoxClient:
                 return [r for r in rows if isinstance(r, dict)]
         return []
 
+    # ------------------------------------------------------------------ #
+    # Order Management (v2)
+    # ------------------------------------------------------------------ #
+
+    def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Place a regular market/limit order. Returns the API response dict."""
+        data = self._request("POST", "order/place", json_body=payload, auth=True, version="v2")
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def place_bracket_order(
+        self,
+        *,
+        instrument_token: str,
+        transaction_type: str,
+        quantity: int,
+        stop_loss: float,
+        square_off: float,
+        price: float = 0,
+        order_type: str = "MARKET",
+        product: str = "I",
+        validity: str = "DAY",
+        tag: str = "autotrader",
+        disclosed_quantity: int = 0,
+        trigger_price: float = 0,
+        is_amo: bool = False,
+        order_reference_id: str = "",
+    ) -> dict[str, Any]:
+        """Place a bracket order with automatic SL and target exits.
+
+        Args:
+            instrument_token: Upstox instrument key e.g. "NSE_EQ|INE002A01018"
+            transaction_type: "BUY" or "SELL"
+            quantity: number of shares
+            stop_loss: distance in ₹ from entry (not absolute price)
+            square_off: distance in ₹ from entry toward target (not absolute price)
+        """
+        body: dict[str, Any] = {
+            "quantity": quantity,
+            "product": product,
+            "validity": validity,
+            "price": price,
+            "tag": tag,
+            "instrument_token": instrument_token,
+            "order_type": order_type,
+            "transaction_type": transaction_type.upper(),
+            "disclosed_quantity": disclosed_quantity,
+            "trigger_price": trigger_price,
+            "is_amo": is_amo,
+            "stop_loss": round(abs(stop_loss), 2),
+            "square_off": round(abs(square_off), 2),
+        }
+        if order_reference_id:
+            body["order_reference_id"] = order_reference_id
+        data = self._request("POST", "order/place", json_body=body, auth=True, version="v2")
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def get_order_details(self, order_id: str) -> dict[str, Any] | None:
+        """Fetch a single order by order_id. Returns dict or None on error."""
+        try:
+            data = self._request(
+                "GET",
+                "order/details",
+                params={"order_id": str(order_id).strip()},
+                auth=True,
+                version="v2",
+                content_type=None,
+            )
+            if isinstance(data, dict):
+                return data
+            if isinstance(data, list) and data:
+                return data[0] if isinstance(data[0], dict) else None
+            return None
+        except Exception:
+            logger.exception("get_order_details failed order_id=%s", order_id)
+            return None
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        """Cancel an open order by order_id."""
+        data = self._request(
+            "DELETE",
+            "order/cancel",
+            params={"order_id": str(order_id).strip()},
+            auth=True,
+            version="v2",
+            content_type=None,
+        )
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def list_orders(self) -> list[dict[str, Any]]:
+        """Return all orders for today's session."""
+        try:
+            data = self._request("GET", "order/retrieve-all", auth=True, version="v2", content_type=None)
+        except Exception:
+            logger.exception("list_orders failed")
+            return []
+        if isinstance(data, list):
+            return [o for o in data if isinstance(o, dict)]
+        if isinstance(data, dict):
+            for key in ("orders", "order_list", "items", "results", "data"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return [o for o in val if isinstance(o, dict)]
+        return []
+
     def close(self) -> None:
         self.http.close()

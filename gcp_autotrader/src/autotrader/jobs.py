@@ -36,7 +36,7 @@ def universe_sync(limit: int = typer.Option(0)) -> None:
     sink = LogSink(c.sheets)
     sink.action("Universe", "sync", "START", "", {"limit": limit})
     c.sheets.ensure_core_sheets()
-    rows = c.universe_service().sync_universe_from_groww_instruments(limit=limit)
+    rows = c.universe_service().sync_universe_from_upstox_instruments(limit=limit)
     sink.action("Universe", "sync", "DONE", "universe synced", {"rows": rows})
     sink.flush_all()
     _print({"rows": rows})

@@ -39,11 +39,6 @@ CLOUD_RUN_MAX_INSTANCES="${CLOUD_RUN_MAX_INSTANCES:-3}"
 CLOUD_RUN_TIMEOUT="${CLOUD_RUN_TIMEOUT:-3600}"
 CLOUD_RUN_CONCURRENCY="${CLOUD_RUN_CONCURRENCY:-1}"
 
-# Required secret-name envs (AppSettings.from_env hard requirements).
-GROWW_API_KEY_SECRET_NAME="${GROWW_API_KEY_SECRET_NAME:-groww-api-key}"
-GROWW_API_SECRET_SECRET_NAME="${GROWW_API_SECRET_SECRET_NAME:-groww-api-secret}"
-GROWW_ACCESS_TOKEN_SECRET_NAME="${GROWW_ACCESS_TOKEN_SECRET_NAME:-groww-access-token}"
-GROWW_ACCESS_TOKEN_EXPIRY_SECRET_NAME="${GROWW_ACCESS_TOKEN_EXPIRY_SECRET_NAME:-groww-access-token-expiry}"
 UPSTOX_CLIENT_ID_SECRET_NAME="${UPSTOX_CLIENT_ID_SECRET_NAME:-upstox-client-id}"
 UPSTOX_CLIENT_SECRET_SECRET_NAME="${UPSTOX_CLIENT_SECRET_SECRET_NAME:-upstox-client-secret}"
 UPSTOX_ACCESS_TOKEN_SECRET_NAME="${UPSTOX_ACCESS_TOKEN_SECRET_NAME:-upstox-access-token}"
@@ -70,11 +65,6 @@ ENV_VARS=(
   "UPSTOX_NIFTY50_INSTRUMENT_KEY=${UPSTOX_NIFTY50_INSTRUMENT_KEY:-NSE_INDEX|Nifty 50}"
   "UPSTOX_INDIA_VIX_INSTRUMENT_KEY=${UPSTOX_INDIA_VIX_INSTRUMENT_KEY:-NSE_INDEX|India VIX}"
   "UPSTOX_PCR_UNDERLYING_INSTRUMENT_KEY=${UPSTOX_PCR_UNDERLYING_INSTRUMENT_KEY:-NSE_INDEX|Nifty 50}"
-  "GROWW_API_HOST=${GROWW_API_HOST:-https://api.groww.in}"
-  "GROWW_API_KEY_SECRET_NAME=$GROWW_API_KEY_SECRET_NAME"
-  "GROWW_API_SECRET_SECRET_NAME=$GROWW_API_SECRET_SECRET_NAME"
-  "GROWW_ACCESS_TOKEN_SECRET_NAME=$GROWW_ACCESS_TOKEN_SECRET_NAME"
-  "GROWW_ACCESS_TOKEN_EXPIRY_SECRET_NAME=$GROWW_ACCESS_TOKEN_EXPIRY_SECRET_NAME"
   "PAPER_TRADE=${PAPER_TRADE:-true}"
   "JOB_TRIGGER_TOKEN=$JOB_TRIGGER_TOKEN"
   "LOG_LEVEL=${LOG_LEVEL:-INFO}"
@@ -106,3 +96,44 @@ gcloud run deploy "$SERVICE_NAME" \
   --update-env-vars "$ENV_VARS_CSV"
 
 echo "Cloud Run service deployed."
+
+
+# ---------------------------------------------------------------------------
+# ws-monitor: deploy as a separate always-on Cloud Run service
+# Usage: WS_MONITOR_IMAGE=gcr.io/... bash deploy_cloud_run.sh ... && deploy_ws_monitor
+# ---------------------------------------------------------------------------
+
+deploy_ws_monitor() {
+  local WS_IMAGE="${WS_MONITOR_IMAGE:?WS_MONITOR_IMAGE env var required}"
+  local WS_SERVICE="autotrader-ws-monitor"
+
+  WS_ENV_VARS=(
+    "GCP_PROJECT_ID=$PROJECT_ID"
+    "GCP_REGION=$REGION"
+    "FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-(default)}"
+    "UPSTOX_ACCESS_TOKEN_SECRET_NAME=$UPSTOX_ACCESS_TOKEN_SECRET_NAME"
+    "LOG_LEVEL=${LOG_LEVEL:-INFO}"
+    "TZ=${TZ:-Asia/Kolkata}"
+  )
+  WS_ENV_CSV="$(IFS=,; echo "${WS_ENV_VARS[*]}")"
+
+  gcloud run deploy "$WS_SERVICE" \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --image "$WS_IMAGE" \
+    --platform managed \
+    --no-allow-unauthenticated \
+    --cpu 1 \
+    --memory 512Mi \
+    --min-instances 1 \
+    --max-instances 1 \
+    --timeout 86400 \
+    --concurrency 1 \
+    --update-env-vars "$WS_ENV_CSV"
+
+  echo "ws-monitor deployed as $WS_SERVICE (min-instances=1)"
+}
+
+if [[ -n "${WS_MONITOR_IMAGE:-}" ]]; then
+  deploy_ws_monitor
+fi

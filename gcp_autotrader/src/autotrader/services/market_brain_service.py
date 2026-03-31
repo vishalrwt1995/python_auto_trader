@@ -7,8 +7,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
+from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot
 from autotrader.services.market_breadth_service import MarketBreadthService
 from autotrader.services.market_leadership_service import MarketLeadershipService
@@ -28,6 +30,8 @@ class MarketBrainService:
     breadth_service: MarketBreadthService = field(default_factory=MarketBreadthService)
     leadership_service: MarketLeadershipService = field(default_factory=MarketLeadershipService)
     policy_service: MarketPolicyService = field(default_factory=MarketPolicyService)
+    bq: BigQueryClient | None = None
+    pubsub: PubSubClient | None = None
     latest_state_path: str = "state/market_brain/latest.json"
     history_prefix: str = "state/market_brain/history"
     _last_context: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
@@ -125,6 +129,26 @@ class MarketBrainService:
         d = asof.astimezone(IST).strftime("%Y-%m-%d")
         t = asof.astimezone(IST).strftime("%H%M%S")
         self.gcs.write_json(f"{self.history_prefix}/{d}/{t}.json", payload)
+        # Publish regime snapshot to Pub/Sub + BigQuery (best-effort)
+        bq_row = {
+            "asof_ts": state.asof_ts,
+            "run_date": d,
+            "regime": state.regime,
+            "risk_mode": state.risk_mode,
+            "participation": state.participation,
+            "market_confidence": state.market_confidence,
+            "breadth_confidence": state.breadth_confidence,
+            "leadership_confidence": state.leadership_confidence,
+            "trend_score": state.trend_score,
+            "breadth_score": state.breadth_score,
+            "volatility_stress_score": state.volatility_stress_score,
+            "data_quality_score": state.data_quality_score,
+            "selected_watchlist_count": 0,
+        }
+        if self.bq:
+            self.bq.insert_market_brain(bq_row)
+        if self.pubsub:
+            self.pubsub.publish_regime_changed(bq_row)
 
     def _build_rows(self, expected_lcd: str) -> list[dict[str, Any]]:
         rows = self.universe_service._watchlist_v2_candidates(expected_lcd)

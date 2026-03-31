@@ -20,6 +20,10 @@ def now_ist_str() -> str:
     return now_ist().isoformat(timespec="seconds")
 
 
+def now_utc_iso() -> str:
+    return now_utc().isoformat(timespec="seconds")
+
+
 def today_ist() -> str:
     return now_ist().strftime("%Y-%m-%d")
 

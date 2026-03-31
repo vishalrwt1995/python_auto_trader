@@ -60,17 +60,6 @@ class StrategySettings:
 
 
 @dataclass(frozen=True)
-class GrowwSettings:
-    api_host: str
-    api_key_secret_name: str
-    api_secret_secret_name: str
-    access_token_secret_name: str
-    access_token_expiry_secret_name: str
-    requests_per_second: int = 3
-    max_retries: int = 3
-
-
-@dataclass(frozen=True)
 class UpstoxSettings:
     api_v2_host: str
     api_v3_host: str
@@ -99,6 +88,10 @@ class GcpSettings:
     spreadsheet_id: str
     bucket_name: str
     firestore_database: str = "(default)"
+    bq_dataset: str = "autotrader"
+    pubsub_topic_positions: str = "position-events"
+    pubsub_topic_signals: str = "trade-signals"
+    pubsub_topic_regime: str = "regime-events"
 
 
 @dataclass(frozen=True)
@@ -113,7 +106,6 @@ class RuntimeSettings:
 class AppSettings:
     gcp: GcpSettings
     upstox: UpstoxSettings
-    groww: GrowwSettings
     runtime: RuntimeSettings
     strategy: StrategySettings
 
@@ -151,6 +143,10 @@ class AppSettings:
                 spreadsheet_id=_env("GOOGLE_SHEETS_SPREADSHEET_ID"),
                 bucket_name=_env("GCS_BUCKET"),
                 firestore_database=_env("FIRESTORE_DATABASE", "(default)"),
+                bq_dataset=_env("BQ_DATASET", "autotrader"),
+                pubsub_topic_positions=_env("PUBSUB_TOPIC_POSITIONS", "position-events"),
+                pubsub_topic_signals=_env("PUBSUB_TOPIC_SIGNALS", "trade-signals"),
+                pubsub_topic_regime=_env("PUBSUB_TOPIC_REGIME", "regime-events"),
             ),
             upstox=UpstoxSettings(
                 api_v2_host=_env("UPSTOX_API_V2_HOST", "https://api.upstox.com/v2").rstrip("/"),
@@ -174,15 +170,6 @@ class AppSettings:
                 india_vix_instrument_key=_env("UPSTOX_INDIA_VIX_INSTRUMENT_KEY", "NSE_INDEX|India VIX"),
                 pcr_underlying_instrument_key=_env("UPSTOX_PCR_UNDERLYING_INSTRUMENT_KEY", "NSE_INDEX|Nifty 50"),
                 pcr_expiry_date=_env("UPSTOX_PCR_EXPIRY_DATE", ""),
-            ),
-            groww=GrowwSettings(
-                api_host=_env("GROWW_API_HOST", "https://api.groww.in").rstrip("/"),
-                api_key_secret_name=_env("GROWW_API_KEY_SECRET_NAME"),
-                api_secret_secret_name=_env("GROWW_API_SECRET_SECRET_NAME"),
-                access_token_secret_name=_env("GROWW_ACCESS_TOKEN_SECRET_NAME"),
-                access_token_expiry_secret_name=_env("GROWW_ACCESS_TOKEN_EXPIRY_SECRET_NAME"),
-                requests_per_second=max(1, _env_int("GROWW_REQUESTS_PER_SECOND", 3)),
-                max_retries=max(1, _env_int("GROWW_MAX_RETRIES", 3)),
             ),
             runtime=RuntimeSettings(
                 paper_trade=_env_bool("PAPER_TRADE", True),

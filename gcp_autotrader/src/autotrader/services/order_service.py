@@ -1,3 +1,4 @@
+"""Order service — entry/exit via Upstox, positions stored in Firestore, trades in BigQuery."""
 from __future__ import annotations
 
 import logging
@@ -7,11 +8,13 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
-from autotrader.adapters.groww_client import GrowwClient
+from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository
+from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.settings import AppSettings
-from autotrader.time_utils import now_ist_str, today_ist
+from autotrader.time_utils import now_ist_str, now_utc_iso, today_ist
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +22,7 @@ logger = logging.getLogger(__name__)
 def make_ref_id() -> str:
     ts = format(int(time.time() * 1000), "x")[-6:].upper()
     rand = "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(3))
-    return f"GR-{ts}-{rand}"
+    return f"AT-{ts}-{rand}"
 
 
 def _order_status(raw: str | None) -> str:
@@ -40,34 +43,64 @@ class OrderService:
     settings: AppSettings
     sheets: GoogleSheetsRepository
     state: FirestoreStateStore
-    groww: GrowwClient
+    upstox: UpstoxClient
+    bq: BigQueryClient
+    pubsub: PubSubClient | None = None
 
-    def _append_order_log(self, row: list[Any]) -> None:
-        self.sheets.append_orders([row])
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
 
-    def _append_position_row(self, row: list[Any]) -> None:
-        self.sheets.append_positions([row])
+    def _append_order_log_sheets(self, row: list[Any]) -> None:
+        try:
+            self.sheets.append_orders([row])
+        except Exception:
+            logger.warning("sheets_order_log_failed — non-critical, continuing")
+
+    def _append_position_sheets(self, row: list[Any]) -> None:
+        try:
+            self.sheets.append_positions([row])
+        except Exception:
+            logger.warning("sheets_position_append_failed — non-critical, continuing")
 
     def _extract_order_snapshot(self, order_id: str, ref_id: str) -> dict[str, Any] | None:
+        """Find an order by order_id or ref_id from today's Upstox order list."""
         try:
-            orders = self.groww.list_orders()
+            orders = self.upstox.list_orders()
         except Exception:
-            logger.exception("Failed to list orders for reconciliation")
+            logger.exception("list_orders failed during reconciliation")
             return None
         for obj in orders:
-            oid = str(obj.get("groww_order_id") or obj.get("order_id") or obj.get("id") or "").strip()
-            rid = str(obj.get("order_reference_id") or obj.get("reference_id") or obj.get("ref_id") or "").strip()
+            oid = str(
+                obj.get("order_id") or obj.get("upstox_order_id") or obj.get("id") or ""
+            ).strip()
+            rid = str(
+                obj.get("order_reference_id") or obj.get("reference_id") or obj.get("tag") or ""
+            ).strip()
             if (order_id and oid == order_id) or (ref_id and rid == ref_id):
                 return {
-                    "status": _order_status(obj.get("order_status") or obj.get("status") or obj.get("state")),
-                    "filled_qty": float(obj.get("filled_quantity") or obj.get("filledQty") or obj.get("executed_quantity") or 0),
-                    "avg_fill_price": float(obj.get("average_fill_price") or obj.get("avg_price") or obj.get("averagePrice") or 0),
-                    "message": str(obj.get("message") or obj.get("remark") or obj.get("reason") or ""),
+                    "status": _order_status(
+                        obj.get("status") or obj.get("order_status") or obj.get("state")
+                    ),
+                    "filled_qty": float(
+                        obj.get("filled_quantity") or obj.get("quantity") or 0
+                    ),
+                    "avg_fill_price": float(
+                        obj.get("average_price") or obj.get("avg_price") or 0
+                    ),
+                    "message": str(obj.get("message") or obj.get("remark") or ""),
                     "raw": obj,
                 }
         return None
 
-    def _await_fill(self, order_id: str, ref_id: str, qty: int, timeout_ms: int = 25000, poll_ms: int = 1200) -> dict[str, Any]:
+    def _await_fill(
+        self,
+        order_id: str,
+        ref_id: str,
+        qty: int,
+        timeout_ms: int = 25_000,
+        poll_ms: int = 1_200,
+    ) -> dict[str, Any]:
         started = time.time()
         while (time.time() - started) * 1000 < timeout_ms:
             snap = self._extract_order_snapshot(order_id, ref_id)
@@ -79,7 +112,120 @@ class OrderService:
                 if _is_final_non_fill(status):
                     return {"filled": False, "terminal": True, "snapshot": snap}
             time.sleep(poll_ms / 1000.0)
-        return {"filled": False, "terminal": False, "snapshot": self._extract_order_snapshot(order_id, ref_id)}
+        return {
+            "filled": False,
+            "terminal": False,
+            "snapshot": self._extract_order_snapshot(order_id, ref_id),
+        }
+
+    def _save_position_firestore(
+        self,
+        *,
+        position_tag: str,
+        symbol: str,
+        exchange: str,
+        segment: str,
+        side: str,
+        qty: int,
+        entry_price: float,
+        sl_price: float,
+        target: float,
+        atr: float,
+        strategy: str = "",
+        order_id: str = "",
+        regime: str = "",
+        risk_mode: str = "",
+        signal_score: int = 0,
+    ) -> None:
+        doc = {
+            "position_tag": position_tag,
+            "symbol": symbol,
+            "exchange": exchange,
+            "segment": segment,
+            "side": side,
+            "qty": qty,
+            "entry_price": round(entry_price, 2),
+            "sl_price": round(sl_price, 2),
+            "target": round(target, 2),
+            "atr": round(atr, 4),
+            "strategy": strategy,
+            "order_id": order_id,
+            "status": "OPEN",
+            "exit_price": 0.0,
+            "exit_reason": "",
+            "entry_ts": now_ist_str(),
+            "exit_ts": "",
+            "pnl": 0.0,
+            "regime": regime,
+            "risk_mode": risk_mode,
+            "signal_score": signal_score,
+        }
+        self.state.save_position(position_tag, doc)
+        if self.pubsub:
+            self.pubsub.publish_position_opened(doc)
+
+    def _close_position_firestore(
+        self,
+        *,
+        position_tag: str,
+        exit_price: float,
+        exit_reason: str,
+    ) -> None:
+        pos = self.state.get_position(position_tag)
+        if not pos:
+            logger.warning("close_position: tag not found in Firestore tag=%s", position_tag)
+            return
+        entry_price = float(pos.get("entry_price") or 0)
+        qty = int(pos.get("qty") or 0)
+        side = str(pos.get("side") or "BUY").upper()
+        multiplier = 1 if side == "BUY" else -1
+        pnl = round((exit_price - entry_price) * qty * multiplier, 2)
+        exit_ts = now_ist_str()
+        self.state.update_position(
+            position_tag,
+            {
+                "status": "CLOSED",
+                "exit_price": round(exit_price, 2),
+                "exit_reason": exit_reason,
+                "exit_ts": exit_ts,
+                "pnl": pnl,
+            },
+        )
+        # Publish position_closed event
+        if self.pubsub:
+            closed_doc = {**(self.state.get_position(position_tag) or {}), "exit_price": round(exit_price, 2), "exit_reason": exit_reason}
+            self.pubsub.publish_position_closed(closed_doc)
+        # Write completed trade to BigQuery (best-effort)
+        try:
+            entry_ts_raw = str(pos.get("entry_ts") or "")
+            self.bq.insert_trade({
+                "trade_date": today_ist(),
+                "position_tag": position_tag,
+                "symbol": str(pos.get("symbol") or ""),
+                "side": side,
+                "qty": qty,
+                "entry_price": entry_price,
+                "exit_price": round(exit_price, 2),
+                "sl_price": float(pos.get("sl_price") or 0),
+                "target": float(pos.get("target") or 0),
+                "pnl": pnl,
+                "pnl_pct": round(pnl / (entry_price * qty) * 100, 4) if entry_price and qty else 0.0,
+                "exit_reason": exit_reason,
+                "strategy": str(pos.get("strategy") or ""),
+                "entry_ts": entry_ts_raw,
+                "exit_ts": exit_ts,
+                "hold_minutes": 0,
+                "regime": str(pos.get("regime") or ""),
+                "risk_mode": str(pos.get("risk_mode") or ""),
+                "market_confidence": 0.0,
+                "signal_score": int(pos.get("signal_score") or 0),
+            })
+        except Exception:
+            logger.warning("bq_trade_insert_failed tag=%s — non-critical", position_tag)
+
+    # ------------------------------------------------------------------ #
+    # Entry order
+    # ------------------------------------------------------------------ #
 
     def place_entry_order(
         self,
@@ -96,6 +242,10 @@ class OrderService:
         product: str,
         score: int,
         reason: str,
+        instrument_key: str = "",
+        strategy: str = "",
+        regime: str = "",
+        risk_mode: str = "",
         allow_live_orders: bool = False,
     ) -> dict[str, Any] | None:
         if self.state.already_fired_today(symbol, side):
@@ -104,63 +254,101 @@ class OrderService:
         ref_id = make_ref_id()
         paper = self.settings.runtime.paper_trade or not allow_live_orders
 
-        self._append_order_log([
+        # Log to Sheets (non-blocking)
+        self._append_order_log_sheets([
             now_ist_str(),
             ref_id if paper else "",
             symbol, exchange, segment,
-            side, qty, "MARKET", round(entry_price, 2),
-            round(sl_price, 2), round(target, 2),
+            side, qty, "BRACKET" if not paper else "PAPER",
+            round(entry_price, 2), round(sl_price, 2), round(target, 2),
             "PAPER" if paper else "SENT",
             "", "",
         ])
 
+        # ---- Paper trade ----
         if paper:
             pos_tag = f"BOTP:{ref_id}"
-            self._append_position_row([
+            self._save_position_firestore(
+                position_tag=pos_tag,
+                symbol=symbol, exchange=exchange, segment=segment,
+                side=side, qty=qty, entry_price=entry_price,
+                sl_price=sl_price, target=target, atr=atr,
+                strategy=strategy, order_id=ref_id,
+                regime=regime, risk_mode=risk_mode, signal_score=score,
+            )
+            # Keep Sheets copy for human visibility
+            self._append_position_sheets([
                 now_ist_str(), symbol, exchange, segment, side,
-                round(entry_price, 2), qty, round(abs(entry_price - sl_price), 2), round(target, 2),
-                round(sl_price, 2), round(entry_price, 2), 0.0, round(atr, 4), "OPEN", pos_tag, "",
+                round(entry_price, 2), qty,
+                round(abs(entry_price - sl_price), 2),
+                round(target, 2), round(sl_price, 2),
+                round(entry_price, 2), 0.0, round(atr, 4),
+                "OPEN", pos_tag, "",
             ])
             self.state.mark_fired_today(symbol, side)
-            return {"paper": True, "groww_order_id": ref_id}
+            logger.info(
+                "paper_order symbol=%s side=%s qty=%d entry=%.2f sl=%.2f target=%.2f tag=%s",
+                symbol, side, qty, entry_price, sl_price, target, pos_tag,
+            )
+            return {"paper": True, "order_id": ref_id, "position_tag": pos_tag}
 
-        payload = {
-            "exchange": exchange,
-            "segment": segment,
-            "trading_symbol": symbol,
-            "quantity": qty,
-            "price": 0,
-            "trigger_price": 0,
-            "order_type": "MARKET",
-            "transaction_type": side,
-            "product": product,
-            "validity": "DAY",
-            "order_reference_id": ref_id,
-        }
+        # ---- Live bracket order ----
+        token = instrument_key or symbol
         try:
-            resp = self.groww.create_order(payload)
+            resp = self.upstox.place_bracket_order(
+                instrument_token=token,
+                transaction_type=side.upper(),
+                quantity=qty,
+                stop_loss=abs(entry_price - sl_price),
+                square_off=abs(target - entry_price),
+                order_reference_id=ref_id,
+            )
         except Exception as exc:
-            logger.exception("Live order create failed")
+            logger.exception("live_bracket_order_failed symbol=%s", symbol)
             return {"error": str(exc), "status": "API_FAIL"}
 
-        order_id = str(resp.get("groww_order_id") or resp.get("order_id") or ref_id)
+        order_id = str(
+            resp.get("order_id") or resp.get("upstox_order_id") or resp.get("data", {}).get("order_id") or ref_id
+        )
+
         probe = self._await_fill(order_id, ref_id, qty)
         if probe.get("filled"):
             snap = probe.get("snapshot") or {}
-            fill_price = float(snap.get("avg_fill_price") or entry_price or 0)
+            fill_price = float(snap.get("avg_fill_price") or entry_price)
             pos_tag = f"BOT:{order_id}:{ref_id}"
-            self._append_position_row([
+            self._save_position_firestore(
+                position_tag=pos_tag,
+                symbol=symbol, exchange=exchange, segment=segment,
+                side=side, qty=qty, entry_price=fill_price,
+                sl_price=sl_price, target=target, atr=atr,
+                strategy=strategy, order_id=order_id,
+                regime=regime, risk_mode=risk_mode, signal_score=score,
+            )
+            self._append_position_sheets([
                 now_ist_str(), symbol, exchange, segment, side,
-                round(fill_price, 2), qty, round(abs(fill_price - sl_price), 2), round(target, 2),
-                round(sl_price, 2), round(fill_price, 2), 0.0, round(atr, 4), "OPEN", pos_tag, "",
+                round(fill_price, 2), qty,
+                round(abs(fill_price - sl_price), 2),
+                round(target, 2), round(sl_price, 2),
+                round(fill_price, 2), 0.0, round(atr, 4),
+                "OPEN", pos_tag, "",
             ])
             self.state.mark_fired_today(symbol, side)
-            return {"groww_order_id": order_id, "order_status": "FILLED", "fill_price": fill_price}
+            # Save order record to Firestore
+            self.state.save_order(ref_id, {
+                "ref_id": ref_id,
+                "symbol": symbol, "side": side, "qty": qty,
+                "order_type": "BRACKET", "entry_price": fill_price,
+                "sl_price": sl_price, "target": target,
+                "status": "FILLED", "order_id": order_id,
+                "paper": False, "sent_at": now_ist_str(),
+            })
+            return {"order_id": order_id, "order_status": "FILLED", "fill_price": fill_price, "position_tag": pos_tag}
 
         if probe.get("terminal"):
             self.state.clear_fired_today(symbol, side)
-            return {"groww_order_id": order_id, "order_status": "TERMINAL_NONFILL"}
+            return {"order_id": order_id, "order_status": "TERMINAL_NONFILL"}
 
+        # Still pending — save for reconcile
         self.state.save_pending_order(
             ref_id,
             {
@@ -179,12 +367,103 @@ class OrderService:
                 "product": product,
                 "score": score,
                 "reason": reason,
+                "strategy": strategy,
+                "regime": regime,
+                "risk_mode": risk_mode,
+                "instrument_key": token,
                 "day": today_ist(),
             },
             kind="entry",
         )
         self.state.mark_fired_today(symbol, side)
-        return {"groww_order_id": order_id, "order_status": "PENDING_RECON"}
+        return {"order_id": order_id, "order_status": "PENDING_RECON"}
+
+    # ------------------------------------------------------------------ #
+    # Exit order (called by WebSocket monitor on SL/target hit)
+    # ------------------------------------------------------------------ #
+
+    def place_exit_order(
+        self,
+        *,
+        position_tag: str,
+        instrument_key: str,
+        exit_reason: str = "MANUAL",
+    ) -> dict[str, Any]:
+        pos = self.state.get_position(position_tag)
+        if not pos:
+            return {"error": "position_not_found", "tag": position_tag}
+        if str(pos.get("status", "")) != "OPEN":
+            return {"skipped": "already_closed", "tag": position_tag}
+
+        symbol = str(pos.get("symbol") or "")
+        side = str(pos.get("side") or "BUY").upper()
+        qty = int(pos.get("qty") or 0)
+        exit_side = "SELL" if side == "BUY" else "BUY"
+        paper = self.settings.runtime.paper_trade
+
+        if paper:
+            # Paper exit: use current LTP as proxy
+            try:
+                quote = self.upstox.get_quote(instrument_key)
+                exit_price = quote.ltp or float(pos.get("entry_price") or 0)
+            except Exception:
+                exit_price = float(pos.get("entry_price") or 0)
+            self._close_position_firestore(
+                position_tag=position_tag,
+                exit_price=exit_price,
+                exit_reason=exit_reason,
+            )
+            logger.info("paper_exit tag=%s reason=%s exit_price=%.2f", position_tag, exit_reason, exit_price)
+            return {"paper": True, "exit_price": exit_price, "exit_reason": exit_reason}
+
+        # Live exit: MARKET order
+        ref_id = make_ref_id()
+        try:
+            resp = self.upstox.place_order({
+                "quantity": qty,
+                "product": "I",
+                "validity": "DAY",
+                "price": 0,
+                "tag": ref_id,
+                "instrument_token": instrument_key,
+                "order_type": "MARKET",
+                "transaction_type": exit_side,
+                "disclosed_quantity": 0,
+                "trigger_price": 0,
+                "is_amo": False,
+            })
+        except Exception as exc:
+            logger.exception("exit_order_failed tag=%s", position_tag)
+            return {"error": str(exc), "tag": position_tag}
+
+        order_id = str(resp.get("order_id") or resp.get("data", {}).get("order_id") or ref_id)
+        probe = self._await_fill(order_id, ref_id, qty, timeout_ms=10_000)
+        fill_price = 0.0
+        if probe.get("filled"):
+            snap = probe.get("snapshot") or {}
+            fill_price = float(snap.get("avg_fill_price") or 0)
+        else:
+            # Fallback: get LTP as approximate exit
+            try:
+                fill_price = self.upstox.get_quote(instrument_key).ltp
+            except Exception:
+                fill_price = 0.0
+
+        self._close_position_firestore(
+            position_tag=position_tag,
+            exit_price=fill_price,
+            exit_reason=exit_reason,
+        )
+        return {
+            "order_id": order_id,
+            "exit_price": fill_price,
+            "exit_reason": exit_reason,
+            "filled": probe.get("filled", False),
+        }
+
+    # ------------------------------------------------------------------ #
+    # Reconcile pending entry orders
+    # ------------------------------------------------------------------ #
 
     def reconcile_pending_entries(self, max_items: int = 15) -> dict[str, int | bool]:
         if self.settings.runtime.paper_trade:
@@ -206,23 +485,35 @@ class OrderService:
                 fill_price = float(snap.get("avg_fill_price") or item.get("entry_price") or 0)
                 qty = int(float(item.get("qty") or 0))
                 pos_tag = f"BOT:{order_id}:{ref_id}"
-                self._append_position_row([
-                    now_ist_str(),
-                    symbol,
+                self._save_position_firestore(
+                    position_tag=pos_tag,
+                    symbol=symbol,
+                    exchange=str(item.get("exchange") or "NSE"),
+                    segment=str(item.get("segment") or "CASH"),
+                    side=side,
+                    qty=qty,
+                    entry_price=fill_price,
+                    sl_price=float(item.get("sl_price") or 0),
+                    target=float(item.get("target") or 0),
+                    atr=float(item.get("atr") or 0),
+                    strategy=str(item.get("strategy") or ""),
+                    order_id=order_id,
+                    regime=str(item.get("regime") or ""),
+                    risk_mode=str(item.get("risk_mode") or ""),
+                    signal_score=int(item.get("score") or 0),
+                )
+                self._append_position_sheets([
+                    now_ist_str(), symbol,
                     str(item.get("exchange") or "NSE"),
                     str(item.get("segment") or "CASH"),
-                    side,
-                    round(fill_price, 2),
+                    side, round(fill_price, 2),
                     qty,
                     round(abs(fill_price - float(item.get("sl_price") or fill_price)), 2),
                     round(float(item.get("target") or 0), 2),
                     round(float(item.get("sl_price") or 0), 2),
-                    round(fill_price, 2),
-                    0.0,
+                    round(fill_price, 2), 0.0,
                     round(float(item.get("atr") or 0), 4),
-                    "OPEN",
-                    pos_tag,
-                    "",
+                    "OPEN", pos_tag, "",
                 ])
                 self.state.delete_pending_order(ref_id, kind="entry")
                 filled += 1
@@ -236,3 +527,87 @@ class OrderService:
                 time.sleep(0.12)
         return {"processed": processed, "pending": pending, "filled": filled, "failed": failed}
 
+    # ------------------------------------------------------------------ #
+    # Reconcile open positions at EOD
+    # ------------------------------------------------------------------ #
+
+    def reconcile_open_positions(self) -> dict[str, Any]:
+        """Check all OPEN positions against Upstox order status and close settled ones.
+
+        Called at 15:10, 15:20, 15:30 IST by the eod-position-reconcile scheduler job.
+        Paper-trade positions are closed at current LTP.
+        """
+        open_positions = self.state.list_open_positions()
+        checked = closed = remaining = 0
+        errors = []
+
+        for pos in open_positions:
+            checked += 1
+            tag = str(pos.get("position_tag") or pos.get("_id") or "")
+            if not tag:
+                continue
+            order_id = str(pos.get("order_id") or "")
+            symbol = str(pos.get("symbol") or "")
+            paper = not order_id or str(order_id).startswith("AT-")
+
+            if paper or self.settings.runtime.paper_trade:
+                # Paper close at LTP
+                instrument_key = str(pos.get("instrument_key") or symbol)
+                try:
+                    ltp = self.upstox.get_quote(instrument_key).ltp if instrument_key else 0.0
+                except Exception:
+                    ltp = 0.0
+                exit_price = ltp or float(pos.get("entry_price") or 0)
+                self._close_position_firestore(
+                    position_tag=tag, exit_price=exit_price, exit_reason="EOD_CLOSE"
+                )
+                closed += 1
+                continue
+
+            # Live: check Upstox order status
+            snap = self._extract_order_snapshot(order_id, "")
+            if snap and _order_status(str(snap.get("status") or "")) == "FILLED":
+                # Bracket order already closed (SL or target hit)
+                fill_price = float(snap.get("avg_fill_price") or 0)
+                sl_price = float(pos.get("sl_price") or 0)
+                tgt = float(pos.get("target") or 0)
+                entry = float(pos.get("entry_price") or 0)
+                # Determine reason by proximity
+                if sl_price and abs(fill_price - sl_price) < abs(fill_price - tgt):
+                    reason = "SL_HIT"
+                elif tgt and abs(fill_price - tgt) < abs(fill_price - sl_price):
+                    reason = "TARGET_HIT"
+                elif fill_price and entry and abs((fill_price - entry) / entry) < 0.001:
+                    reason = "EOD_CLOSE"
+                else:
+                    reason = "CLOSED"
+                self._close_position_firestore(
+                    position_tag=tag, exit_price=fill_price, exit_reason=reason
+                )
+                closed += 1
+            else:
+                # Still open at EOD — force close with market exit
+                instrument_key = str(pos.get("instrument_key") or symbol)
+                try:
+                    result = self.place_exit_order(
+                        position_tag=tag,
+                        instrument_key=instrument_key,
+                        exit_reason="EOD_CLOSE",
+                    )
+                    if result.get("error"):
+                        errors.append({"tag": tag, "error": result["error"]})
+                        remaining += 1
+                    else:
+                        closed += 1
+                except Exception as exc:
+                    logger.exception("eod_exit_failed tag=%s", tag)
+                    errors.append({"tag": tag, "error": str(exc)})
+                    remaining += 1
+            time.sleep(0.1)
+
+        return {
+            "checked": checked,
+            "closed": closed,
+            "remaining": remaining,
+            "errors": errors[:5],
+        }

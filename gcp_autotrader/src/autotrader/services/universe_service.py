@@ -127,9 +127,77 @@ class UniverseService:
         self._holiday_api_fallback_day: str | None = None
         self._expected_lcd_ctx_by_day: dict[str, dict[str, Any]] = {}
         self.market_brain_service: Any | None = None
+        self.bq: Any | None = None   # BigQueryClient — set by container after construction
 
     def set_market_brain_service(self, svc: Any | None) -> None:
         self.market_brain_service = svc
+
+    def _bq_write_candles_1d(
+        self,
+        symbol: str,
+        instrument_key: str,
+        exchange: str,
+        segment: str,
+        candles: list[list[Any]],
+    ) -> None:
+        """Best-effort dual-write of fresh daily candles to BigQuery."""
+        if not self.bq or not candles:
+            return
+        try:
+            rows: list[dict[str, Any]] = []
+            for c in candles:
+                if not isinstance(c, (list, tuple)) or len(c) < 6:
+                    continue
+                ts_str = str(c[0])
+                trade_date = ts_str[:10] if len(ts_str) >= 10 else ts_str
+                rows.append({
+                    "trade_date": trade_date,
+                    "symbol": symbol.upper(),
+                    "exchange": exchange,
+                    "segment": segment,
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                    "volume": float(c[5]),
+                    "instrument_key": instrument_key,
+                })
+            if rows:
+                self.bq.insert_candles_1d_batch(rows)
+        except Exception:
+            logger.warning("bq_candles_1d_write_failed symbol=%s — non-critical", symbol, exc_info=True)
+
+    def _bq_write_candles_5m(
+        self,
+        symbol: str,
+        instrument_key: str,
+        candles: list[list[Any]],
+    ) -> None:
+        """Best-effort dual-write of fresh 5m candles to BigQuery."""
+        if not self.bq or not candles:
+            return
+        try:
+            rows: list[dict[str, Any]] = []
+            for c in candles:
+                if not isinstance(c, (list, tuple)) or len(c) < 6:
+                    continue
+                ts_str = str(c[0])
+                trade_date = ts_str[:10] if len(ts_str) >= 10 else ts_str
+                rows.append({
+                    "candle_ts": ts_str,
+                    "trade_date": trade_date,
+                    "symbol": symbol.upper(),
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                    "volume": float(c[5]),
+                    "instrument_key": instrument_key,
+                })
+            if rows:
+                self.bq.insert_candles_5m_batch(rows)
+        except Exception:
+            logger.warning("bq_candles_5m_write_failed symbol=%s — non-critical", symbol, exc_info=True)
 
     @staticmethod
     def _cfg_int(cfg: dict[str, str], key: str, default: int) -> int:
@@ -1231,7 +1299,7 @@ class UniverseService:
         )
         return out
 
-    def sync_universe_from_groww_instruments(self, limit: int = 0) -> int:
+    def sync_universe_from_upstox_instruments(self, limit: int = 0) -> int:
         # Backward-compatible endpoint name; now uses Upstox raw snapshot as source of truth.
         if not self.gcs.exists(self.gcs.upstox_raw_universe_latest_path()):
             self.refresh_raw_universe_from_upstox()
@@ -1522,6 +1590,7 @@ class UniverseService:
                             if fetched:
                                 candles = self.gcs.merge_candles(path, fetched)
                                 candles = self._candles_sorted_unique(candles)
+                                self._bq_write_candles_5m(symbol, instrument_key, fetched)
                             else:
                                 source = "upstox_api_5m_empty"
                     elif should_fetch and fetches >= max(0, int(api_cap)):
@@ -1810,6 +1879,7 @@ class UniverseService:
                         source = "upstox_api_full_history"
                         if api:
                             candles = self.gcs.merge_candles(path, api)
+                            self._bq_write_candles_1d(symbol, instrument_key, exchange, segment, api)
                     elif allow_fetch_for_symbol and len(candles) > 0 and fetches < api_cap:
                         api = self._fetch_daily_candles_incremental(instrument_key, candles, lookback_days=9500)
                         fetches += 1
@@ -1818,6 +1888,7 @@ class UniverseService:
                         source = "upstox_api_incremental"
                         if api:
                             candles = self.gcs.merge_candles(path, api)
+                            self._bq_write_candles_1d(symbol, instrument_key, exchange, segment, api)
 
                     if allow_fetch_for_symbol and run_full_backfill and len(candles) > 0 and fetches < api_cap:
                         first_ts = self._first_candle_ts(candles)
@@ -1829,6 +1900,7 @@ class UniverseService:
                             source = "upstox_api_backfill_older"
                             if older:
                                 candles = self.gcs.merge_candles(path, older)
+                                self._bq_write_candles_1d(symbol, instrument_key, exchange, segment, older)
 
                     if allow_fetch_for_symbol and not did_fetch and fetches >= api_cap:
                         source = "api_cap_blocked"
