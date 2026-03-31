@@ -226,12 +226,31 @@ class WsMonitorService:
 # CLI entry point — invoked by the ws-monitor Cloud Run container
 # ---------------------------------------------------------------------------
 
+async def _health_server(port: int) -> None:
+    """Minimal HTTP server so Cloud Run health checks pass."""
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(1024)
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(_handle, "0.0.0.0", port)
+    async with server:
+        await server.serve_forever()
+
+
 async def _main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stdout,
     )
+
+    # Start health server immediately so Cloud Run health checks pass
+    # even during slow WS initialisation or Secret Manager lookups.
+    port = int(os.environ.get("PORT", "8080"))
+    asyncio.create_task(_health_server(port))
+    await asyncio.sleep(0.5)  # yield to event loop so health server binds before any blocking calls
 
     project_id = os.environ.get("GCP_PROJECT_ID", "")
     firestore_db = os.environ.get("FIRESTORE_DATABASE", "(default)")
