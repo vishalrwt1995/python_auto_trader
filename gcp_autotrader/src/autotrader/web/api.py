@@ -7,13 +7,25 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from autotrader.container import get_container
 from autotrader.services.log_sink import LogSink
 from autotrader.time_utils import now_ist, now_utc, parse_any_ts
 
 app = FastAPI(title="GCP AutoTrader", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 logger = logging.getLogger(__name__)
+
+from autotrader.web.dashboard_api import router as dashboard_router  # noqa: E402
+app.include_router(dashboard_router)
 
 
 def _auth(expected: str, supplied: str | None) -> None:

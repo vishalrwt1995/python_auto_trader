@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "/Users/vishalrawat/.nvm/versions/node/v24.13.1/bin/node",
+      "runtimeArgs": ["/Users/vishalrawat/.nvm/versions/node/v24.13.1/bin/npx", "next", "dev"],
+      "port": 3001,
+      "autoPort": true,
+      "cwd": "dashboard",
+      "env": {
+        "PATH": "/Users/vishalrawat/.nvm/versions/node/v24.13.1/bin:/usr/bin:/bin"
+      }
+    }
+  ]
+}
