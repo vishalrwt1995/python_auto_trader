@@ -40,26 +40,23 @@ create_job () {
       --message-body "$BODY"
 }
 
-# Bootstrap/repair once per day (optional)
-create_job "autotrader-bootstrap-sheets" "0 4 * * 1-5" "$SERVICE_URL/jobs/bootstrap-sheets"
-
 # Upstox access-token request (notifier flow) shortly after daily token expiry (~03:30 IST).
 # User approval is still required in the Upstox app/flow; the notifier webhook stores the token automatically.
 create_job "autotrader-upstox-token-request" "35 3 * * 1-5" "$SERVICE_URL/jobs/upstox-token-request"
 
 # Universe V2 morning pipeline (raw refresh -> canonical build -> backfill only newly appended instruments).
-UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=600&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1200&intraday_lookback_trading_days=60"
+# candle_api_cap=1800: fits within Upstox 2000/30-min limit (standard API tier).
+UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=1800&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1800&intraday_lookback_trading_days=60"
 create_job "autotrader-universe-v2-refresh-0615" "15 6 * * 1-5" "$UNIVERSE_PIPELINE_URI" "{}" "30m"
 
-# Morning latest 1D/5m update:
-# - early passes retry stale terminals to catch same-day provider catch-up
-# - final pass terminalizes no-progress stale rows so downstream score/watchlist runs don't stall
-CLOSE_UPDATE_URI_RETRY="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
+# Morning latest 1D/5m update — simplified to 2 passes (was 4):
+# Upstox standard API limit: 2000 req/30-min. ~500 symbols x 2 calls = ~1000 per pass, fits in one run.
+# Pass 1 (07:05): main fetch with retries — processes all symbols, retries stale terminals.
+# Pass 2 (07:40): terminalize only — marks no-progress symbols so score/watchlist don't stall.
+CLOSE_UPDATE_URI_RETRY="$SERVICE_URL/jobs/score-cache-update-close?api_cap=1800&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=1800&intraday_lookback_trading_days=60"
 CLOSE_UPDATE_URI_TERMINAL="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=false&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
 create_job "autotrader-score-cache-update-close-0705" "5 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
-create_job "autotrader-score-cache-update-close-0725" "25 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
-create_job "autotrader-score-cache-update-close-0745" "45 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
-create_job "autotrader-score-cache-update-close-0805" "5 8 * * 1-5" "$CLOSE_UPDATE_URI_TERMINAL"
+create_job "autotrader-score-cache-update-close-0740" "40 7 * * 1-5" "$CLOSE_UPDATE_URI_TERMINAL"
 
 # Score refresh after latest daily candle update window:
 # - computes v1 scoring
@@ -86,6 +83,24 @@ create_job "autotrader-scan-market-1530" "0-30/5 15 * * 1-5" "$SCAN_URI"
 # Full 1D backfill remains available via the same endpoint for manual/on-demand use.
 
 # Cleanup old schedule from previous versions (best-effort)
+# Remove bootstrap-sheets (no longer scheduled — run manually if sheets need repair)
+gcloud scheduler jobs delete "autotrader-bootstrap-sheets" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+# Remove old 4-pass candle cache jobs (replaced by 2-pass)
+gcloud scheduler jobs delete "autotrader-score-cache-update-close-0725" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+gcloud scheduler jobs delete "autotrader-score-cache-update-close-0745" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
+gcloud scheduler jobs delete "autotrader-score-cache-update-close-0805" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
 gcloud scheduler jobs delete "autotrader-premarket-precompute-9am" \
   --project "$PROJECT_ID" \
   --location "$REGION" \

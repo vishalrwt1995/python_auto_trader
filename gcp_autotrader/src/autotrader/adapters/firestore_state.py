@@ -184,6 +184,10 @@ class FirestoreStateStore:
     def save_universe_row(self, symbol: str, payload: dict[str, Any]) -> None:
         self.set_json("universe", symbol.upper(), payload)
 
+    def update_universe_row(self, symbol: str, fields: dict[str, Any]) -> None:
+        """Partial merge — updates only the provided fields without overwriting others."""
+        self.set_json("universe", symbol.upper(), fields, merge=True)
+
     def get_universe_row(self, symbol: str) -> dict[str, Any] | None:
         return self.get_json("universe", symbol.upper())
 

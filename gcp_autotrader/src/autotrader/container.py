@@ -104,6 +104,7 @@ class AppContainer:
         if self._universe_service is None:
             self._universe_service = UniverseService(self.sheets, self.gcs, self.upstox, self.settings.strategy)
             self._universe_service.bq = self.bq
+            self._universe_service.state = self.state
         return self._universe_service
 
     def market_brain_service(self) -> MarketBrainService:

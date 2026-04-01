@@ -7,6 +7,7 @@ import { ChevronUp, ChevronDown } from "lucide-react";
 export interface Column<T> {
   key: string;
   label: string;
+  tooltip?: string;
   sortable?: boolean;
   className?: string;
   render: (row: T, index: number) => React.ReactNode;
@@ -88,6 +89,16 @@ export function DataTable<T>({
                     ) : (
                       <ChevronDown className="h-3 w-3" />
                     )
+                  )}
+                  {col.tooltip && (
+                    <span className="relative group inline-flex ml-0.5">
+                      <span className="w-3 h-3 rounded-full bg-bg-tertiary text-[8px] font-bold inline-flex items-center justify-center cursor-help text-text-secondary border border-bg-tertiary leading-none select-none">
+                        ?
+                      </span>
+                      <span className="absolute z-[200] top-full left-0 mt-1 w-56 p-2.5 bg-gray-950 border border-gray-700 rounded-lg text-[11px] text-text-secondary leading-relaxed opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-150 shadow-xl whitespace-normal font-normal">
+                        {col.tooltip}
+                      </span>
+                    </span>
                   )}
                 </span>
               </th>

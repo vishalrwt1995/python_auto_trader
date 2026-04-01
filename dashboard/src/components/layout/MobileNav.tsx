@@ -16,6 +16,8 @@ import {
   Activity,
   BarChart3,
   Settings,
+  PieChart,
+  Database,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MOBILE_NAV_ITEMS, NAV_ITEMS } from "@/lib/constants";
@@ -32,6 +34,8 @@ const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   Activity,
   BarChart3,
   Settings,
+  PieChart,
+  Database,
 };
 
 export function MobileNav() {

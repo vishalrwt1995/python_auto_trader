@@ -29,6 +29,7 @@ from autotrader.services.universe_v2 import (
     canonical_id_from_fields,
     choose_primary_listing,
     classify_eligibility,
+    compute_beta,
     compute_tradability_stats,
 )
 from autotrader.settings import StrategySettings
@@ -128,6 +129,7 @@ class UniverseService:
         self._expected_lcd_ctx_by_day: dict[str, dict[str, Any]] = {}
         self.market_brain_service: Any | None = None
         self.bq: Any | None = None   # BigQueryClient — set by container after construction
+        self.state: Any | None = None  # FirestoreStateStore — set by container after construction
 
     def set_market_brain_service(self, svc: Any | None) -> None:
         self.market_brain_service = svc
@@ -1676,6 +1678,19 @@ class UniverseService:
                     source=source,
                 )
             )
+            # Write 5m freshness fields to Firestore for dashboard monitoring
+            if self.state is not None:
+                try:
+                    last_ts_5m = self._last_candle_ts(candles)
+                    last_5m_date = last_ts_5m.astimezone(IST).date().isoformat() if last_ts_5m else ""
+                    self.state.update_universe_row(symbol, {
+                        "last_5m_date": last_5m_date,
+                        "bars_5m": len(candles),
+                        "status_5m": status,
+                        "last_5m_updated_at": now_ist_str(),
+                    })
+                except Exception as _e:
+                    logger.debug("firestore_5m_update_skipped symbol=%s error=%s", symbol, _e)
 
         write_rows: list[list[object]] = index_rows
         if filter_enabled and existing_index_rows:
@@ -1708,14 +1723,8 @@ class UniverseService:
                 merged.append(r)
             write_rows = merged
 
+        # Sheets 5m index write removed — data lives in GCS + Firestore.
         sheet_write_error = ""
-        try:
-            self.sheets.replace_score_cache_5m_index(write_rows)
-        except Exception as exc:
-            # Do not fail the whole backfill run on transient Sheets transport errors.
-            # Cache files are already written to GCS and should keep progressing.
-            sheet_write_error = self._error_text_short(exc, max_len=220)
-            logger.warning("intraday_5m_index_write_failed error=%s", sheet_write_error)
         total = len(index_rows)
         complete = min(total, fresh_ready + terminal_insufficient + terminal_stale + terminal_missing + terminal_disabled + invalid)
         pending = max(0, total - complete)
@@ -1813,6 +1822,15 @@ class UniverseService:
         expected = self._parse_iso_date(expected_lcd) or self._expected_last_completed_daily_date()
         horizon_start = self._history_horizon_start_ist()
         horizon_floor = horizon_start.date()
+
+        # Fetch Nifty50 daily candles once for beta computation across all symbols
+        nifty_candles: list[list[Any]] = []
+        try:
+            nifty_ik = self.upstox.settings.nifty50_instrument_key
+            nifty_candles = self._fetch_daily_candles_windowed_between(nifty_ik, horizon_start, now_ist()) or []
+            logger.info("nifty50_candles_fetched count=%d instrument_key=%s", len(nifty_candles), nifty_ik)
+        except Exception as exc:
+            logger.warning("nifty50_candle_fetch_failed error=%s — beta will be 0.0 for all symbols", exc)
 
         scanned = 0
         fetches = 0
@@ -1959,6 +1977,8 @@ class UniverseService:
                 updated += 1
 
             stats = compute_tradability_stats(candles)
+            if nifty_candles:
+                stats.beta = compute_beta(candles, nifty_candles)
             last_ts = self._last_candle_ts(candles)
             last_date = last_ts.astimezone(IST).date().isoformat() if last_ts is not None else ""
             stale_days = max(0, (expected - last_ts.astimezone(IST).date()).days) if last_ts is not None else 9999
@@ -1986,8 +2006,7 @@ class UniverseService:
                 )
             )
 
-        if write_history_index:
-            self.sheets.replace_score_cache_1d_index(index_rows)
+        # Sheets 1D index write removed — data lives in GCS + Firestore.
         assign_turnover_rank_and_bucket(stats_by_canonical)
         return {
             "statsByCanonical": stats_by_canonical,
@@ -2099,6 +2118,7 @@ class UniverseService:
                 "ATR 14": round(float(stats.atr_14), 6) if math.isfinite(float(stats.atr_14)) else 0.0,
                 "ATR Pct 14D": round(float(stats.atr_pct_14d), 6) if math.isfinite(float(stats.atr_pct_14d)) else 0.0,
                 "Gap Risk 60D": round(float(stats.gap_risk_60d), 6) if math.isfinite(float(stats.gap_risk_60d)) else 0.0,
+                "Beta": round(float(stats.beta), 4) if math.isfinite(float(stats.beta)) and stats.beta != 0.0 else "",
                 "Turnover Rank 60D": int(stats.turnover_rank_60d) if stats.turnover_rank_60d is not None else "",
                 "Liquidity Bucket": str(stats.liquidity_bucket or ""),
                 "Data Quality Flag": data_quality_flag,
@@ -2702,9 +2722,37 @@ class UniverseService:
                 )
             )
 
-        # Refresh the visible 1D score-cache index sheet so manual backfill progress can be tracked easily.
-        self.sheets.replace_score_cache_1d_index(score_cache_index_rows)
+            # Write 1D freshness fields to Firestore for dashboard monitoring (mirrors 5M pattern)
+            if self.state is not None:
+                try:
+                    last_ts_1d = self._last_candle_ts(candles)
+                    last_1d_date = last_ts_1d.astimezone(IST).date().isoformat() if last_ts_1d else ""
+                    if source == "invalid_instrument_key_terminal":
+                        dq_flag = "INVALID_KEY"
+                    elif not candles or not after_ready:
+                        dq_flag = "MISSING"
+                    elif after_fresh:
+                        dq_flag = "FRESH"
+                    else:
+                        dq_flag = "STALE"
+                    stale_days_1d = 0
+                    if last_1d_date and not after_fresh:
+                        try:
+                            from datetime import date as _date
+                            stale_days_1d = (_date.fromisoformat(expected) - _date.fromisoformat(last_1d_date)).days
+                        except Exception:
+                            stale_days_1d = 0
+                    self.state.update_universe_row(u.symbol, {
+                        "last_1d_date": last_1d_date,
+                        "bars_1d": len(candles),
+                        "data_quality_flag": dq_flag,
+                        "stale_days": max(0, stale_days_1d),
+                        "last_1d_updated_at": updated_at,
+                    })
+                except Exception as _e:
+                    logger.debug("firestore_1d_update_skipped symbol=%s error=%s", u.symbol, _e)
 
+        # Sheets 1D index write removed — data lives in GCS + Firestore.
         total = len(rows)
         complete = min(total, fresh + terminal_insufficient + terminal_stale + terminal_invalid_key + terminal_missing)
         pending = max(0, total - complete)

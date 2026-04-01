@@ -1,12 +1,33 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useDashboardStore } from "@/stores/dashboardStore";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
 import { cn } from "@/lib/utils";
 import type { WatchlistRow } from "@/lib/types";
 import { X, Search } from "lucide-react";
+import {
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+} from "recharts";
+import { api } from "@/lib/api";
+
+interface CandleData {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+}
 
 const SETUP_COLORS: Record<string, string> = {
   BREAKOUT: "text-profit",
@@ -240,17 +261,49 @@ function SymbolDrawer({
   row: WatchlistRow;
   onClose: () => void;
 }) {
+  const [candles, setCandles] = useState<CandleData[]>([]);
+  const [candleLoading, setCandleLoading] = useState(true);
+  const [candleDays, setCandleDays] = useState(90);
+
+  useEffect(() => {
+    setCandleLoading(true);
+    api
+      .getCandles(row.symbol, "1d", candleDays)
+      .then((d: any) => setCandles(d.candles ?? []))
+      .catch(() => setCandles([]))
+      .finally(() => setCandleLoading(false));
+  }, [row.symbol, candleDays]);
+
+  // Compute min/max for chart domain
+  const priceMin = candles.length > 0 ? Math.min(...candles.map((c) => c.low)) * 0.995 : 0;
+  const priceMax = candles.length > 0 ? Math.max(...candles.map((c) => c.high)) * 1.005 : 0;
+  const volMax = candles.length > 0 ? Math.max(...candles.map((c) => c.volume ?? 0)) : 1;
+
+  // Color each candle
+  const chartData = candles.map((c) => ({
+    ...c,
+    dateLabel: c.time?.slice(5) ?? "",
+    isUp: (c.close ?? 0) >= (c.open ?? 0),
+    bodyTop: Math.max(c.open ?? 0, c.close ?? 0),
+    bodyBottom: Math.min(c.open ?? 0, c.close ?? 0),
+  }));
+
+  // Compute price change
+  const firstClose = candles[0]?.close ?? 0;
+  const lastClose = candles[candles.length - 1]?.close ?? 0;
+  const pctChange = firstClose > 0 ? ((lastClose - firstClose) / firstClose) * 100 : 0;
+
   return (
     <>
       <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 bottom-0 w-full sm:w-[480px] bg-bg-secondary border-l border-bg-tertiary z-50 overflow-y-auto scrollbar-thin">
+      <div className="fixed right-0 top-0 bottom-0 w-full sm:w-[520px] bg-bg-secondary border-l border-bg-tertiary z-50 overflow-y-auto scrollbar-thin">
         <div className="p-4 space-y-4">
+          {/* Header */}
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold">{row.symbol}</h2>
               <p className="text-xs text-text-secondary">
-                {row.sector} &middot; {row.setup} &middot; Beta{" "}
-                {row.beta?.toFixed(2)}
+                {row.sector} &middot; {row.setup} &middot; Beta {row.beta?.toFixed(2)}
               </p>
             </div>
             <button
@@ -261,9 +314,114 @@ function SymbolDrawer({
             </button>
           </div>
 
-          {/* Chart placeholder */}
-          <div className="bg-bg-primary rounded-lg border border-bg-tertiary h-[300px] flex items-center justify-center text-xs text-text-secondary">
-            Candlestick chart loads from /dashboard/candles/{row.symbol}
+          {/* Price Chart */}
+          <div className="bg-bg-primary rounded-lg border border-bg-tertiary p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium">Price</span>
+                {lastClose > 0 && (
+                  <span className="font-mono text-xs text-text-secondary">
+                    ₹{lastClose.toLocaleString("en-IN", { maximumFractionDigits: 1 })}
+                  </span>
+                )}
+                {candles.length > 1 && (
+                  <span
+                    className={cn(
+                      "text-xs font-medium",
+                      pctChange >= 0 ? "text-profit" : "text-loss",
+                    )}
+                  >
+                    {pctChange >= 0 ? "+" : ""}
+                    {pctChange.toFixed(1)}%
+                  </span>
+                )}
+              </div>
+              <div className="flex gap-1">
+                {([30, 90, 180] as const).map((d) => (
+                  <button
+                    key={d}
+                    onClick={() => setCandleDays(d)}
+                    className={cn(
+                      "px-1.5 py-0.5 rounded text-[10px]",
+                      candleDays === d
+                        ? "bg-accent text-white"
+                        : "bg-bg-tertiary text-text-secondary hover:text-text-primary",
+                    )}
+                  >
+                    {d}d
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {candleLoading ? (
+              <div className="h-[200px] flex items-center justify-center text-xs text-text-secondary">
+                Loading…
+              </div>
+            ) : candles.length === 0 ? (
+              <div className="h-[200px] flex items-center justify-center text-xs text-text-secondary">
+                No candle data
+              </div>
+            ) : (
+              <>
+                {/* Price area chart */}
+                <ResponsiveContainer width="100%" height={180}>
+                  <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor={pctChange >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.3} />
+                        <stop offset="95%" stopColor={pctChange >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis
+                      dataKey="dateLabel"
+                      tick={{ fill: "#6b7280", fontSize: 8 }}
+                      tickLine={false}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      domain={[priceMin, priceMax]}
+                      tick={{ fill: "#6b7280", fontSize: 8 }}
+                      tickLine={false}
+                      axisLine={false}
+                      tickFormatter={(v) => `₹${v >= 1000 ? (v / 1000).toFixed(1) + "k" : v.toFixed(0)}`}
+                      width={42}
+                    />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: "#111827", border: "1px solid #1f2937", fontSize: 10 }}
+                      formatter={(v: any) => [`₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 1 })}`, "Close"]}
+                      labelFormatter={(l) => l}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="close"
+                      stroke={pctChange >= 0 ? "#22c55e" : "#ef4444"}
+                      strokeWidth={1.5}
+                      fill="url(#priceGrad)"
+                      dot={false}
+                      activeDot={{ r: 3 }}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+
+                {/* Volume bars */}
+                <ResponsiveContainer width="100%" height={48}>
+                  <BarChart data={chartData} margin={{ top: 0, right: 4, left: 0, bottom: 0 }}>
+                    <YAxis domain={[0, volMax]} hide />
+                    <XAxis dataKey="dateLabel" hide />
+                    <Bar dataKey="volume" radius={[1, 1, 0, 0]} maxBarSize={6}>
+                      {chartData.map((d, i) => (
+                        <Cell
+                          key={i}
+                          fill={d.isUp ? "#22c55e" : "#ef4444"}
+                          fillOpacity={0.5}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </>
+            )}
           </div>
 
           {/* Stats */}

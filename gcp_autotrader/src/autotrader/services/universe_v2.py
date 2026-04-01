@@ -20,6 +20,7 @@ UNIVERSE_V2_HEADERS: list[str] = [
     "ATR 14",
     "ATR Pct 14D",
     "Gap Risk 60D",
+    "Beta",
     "Turnover Rank 60D",
     "Liquidity Bucket",
     "Data Quality Flag",
@@ -54,6 +55,7 @@ class TradabilityStats:
     atr_14: float = 0.0
     atr_pct_14d: float = 0.0
     gap_risk_60d: float = 0.0
+    beta: float = 0.0
     turnover_rank_60d: int | None = None
     liquidity_bucket: str = ""
 
@@ -154,6 +156,44 @@ def compute_tradability_stats(candles: list[list[Any]]) -> TradabilityStats:
         atr_pct_14d=atr_pct,
         gap_risk_60d=gap_risk_60d,
     )
+
+
+def compute_beta(stock_candles: list[list[Any]], nifty_candles: list[list[Any]], lookback_days: int = 90) -> float:
+    """Compute beta of stock vs Nifty50 using daily close returns over lookback_days."""
+    stock_norm = normalize_candles(stock_candles)
+    nifty_norm = normalize_candles(nifty_candles)
+    if not stock_norm or not nifty_norm:
+        return 0.0
+
+    stock_norm = stock_norm[-lookback_days:]
+    nifty_norm = nifty_norm[-lookback_days:]
+
+    # Build date→close maps (timestamp prefix YYYY-MM-DD)
+    stock_by_date = {c[0][:10]: float(c[4]) for c in stock_norm if c[4]}
+    nifty_by_date = {c[0][:10]: float(c[4]) for c in nifty_norm if c[4]}
+
+    common_dates = sorted(set(stock_by_date) & set(nifty_by_date))
+    if len(common_dates) < 20:
+        return 0.0
+
+    stock_closes = [stock_by_date[d] for d in common_dates]
+    nifty_closes = [nifty_by_date[d] for d in common_dates]
+
+    stock_rets = [(stock_closes[i] / stock_closes[i - 1]) - 1.0 for i in range(1, len(stock_closes))]
+    nifty_rets = [(nifty_closes[i] / nifty_closes[i - 1]) - 1.0 for i in range(1, len(nifty_closes))]
+
+    n = len(stock_rets)
+    if n < 10:
+        return 0.0
+
+    mean_s = sum(stock_rets) / n
+    mean_n = sum(nifty_rets) / n
+    cov = sum((stock_rets[i] - mean_s) * (nifty_rets[i] - mean_n) for i in range(n)) / n
+    var_n = sum((r - mean_n) ** 2 for r in nifty_rets) / n
+
+    if var_n == 0.0:
+        return 0.0
+    return round(cov / var_n, 4)
 
 
 def assign_turnover_rank_and_bucket(stats_by_symbol: dict[str, TradabilityStats]) -> None:

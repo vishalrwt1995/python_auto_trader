@@ -13,6 +13,8 @@ const NAV = [
   { id: "/signals", icon: "📡", label: "Signals" },
   { id: "/journal", icon: "📊", label: "Trade Journal" },
   { id: "/universe", icon: "🌐", label: "Universe" },
+  { id: "/sectors", icon: "🏭", label: "Sectors" },
+  { id: "/history", icon: "🗄️", label: "Data History" },
   { id: "/pipeline", icon: "🔧", label: "Pipeline" },
   { id: "/analytics", icon: "🔬", label: "Analytics" },
   { id: "/settings", icon: "⚙️", label: "Settings" },

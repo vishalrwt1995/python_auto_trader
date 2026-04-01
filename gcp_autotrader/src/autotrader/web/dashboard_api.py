@@ -6,11 +6,14 @@ Authentication is performed via Firebase ID tokens (Bearer scheme).
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from datetime import date, timedelta
 from typing import Any
 
 import google.auth.transport.requests
 import google.oauth2.id_token
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from autotrader.container import get_container
@@ -96,8 +99,8 @@ def get_trades_summary(
         WHERE trade_date BETWEEN '{fd}' AND '{td}'
     """
     try:
-        rows = list(c.bq.client.query(q).result())
-        r = dict(rows[0]) if rows else {}
+        rows = c.bq.query(q)
+        r = rows[0] if rows else {}
         total = r.get("total_trades", 0)
         wins = r.get("wins", 0)
         win_rate = (wins / total * 100) if total else 0
@@ -143,12 +146,12 @@ def get_trades_equity_curve(
         ORDER BY trade_date
     """
     try:
-        rows = list(c.bq.client.query(q).result())
+        rows = c.bq.query(q)
         cum = 0.0
         series = []
         for r in rows:
-            cum += float(r.daily_pnl or 0)
-            series.append({"date": str(r.trade_date), "pnl": round(cum, 2)})
+            cum += float(r.get("daily_pnl") or 0)
+            series.append({"date": str(r.get("trade_date", "")), "pnl": round(cum, 2)})
         return {"series": series}
     except Exception as exc:
         logger.error("trades/equity-curve query failed: %s", exc)
@@ -182,8 +185,7 @@ def get_trades_list(
         LIMIT {limit} OFFSET {offset}
     """
     try:
-        rows = [dict(r) for r in c.bq.client.query(q).result()]
-        # Serialize dates
+        rows = c.bq.query(q)
         for r in rows:
             for k, v in r.items():
                 if hasattr(v, "isoformat"):
@@ -221,7 +223,7 @@ def get_signals_today(
         ORDER BY scan_ts DESC
     """
     try:
-        rows = [dict(r) for r in c.bq.client.query(q).result()]
+        rows = c.bq.query(q)
         for r in rows:
             for k, v in r.items():
                 if hasattr(v, "isoformat"):
@@ -237,6 +239,29 @@ def get_signals_today(
 # ---------------------------------------------------------------------------
 
 
+def _fmt_date(v: Any) -> str:
+    """Convert Firestore Timestamp, datetime, or ISO string to YYYY-MM-DD string."""
+    if v is None:
+        return ""
+    if hasattr(v, "date"):  # datetime or Firestore DatetimeWithNanoseconds
+        try:
+            return v.date().isoformat()
+        except Exception:
+            pass
+    s = str(v)
+    return s[:10] if len(s) >= 10 else s
+
+
+def _derive_eligibility(data: dict[str, Any]) -> tuple[bool, bool]:
+    """Return swing/intraday eligibility — uses real fields if present, falls back to allowed_product."""
+    if "eligible_swing" in data or "eligible_intraday" in data:
+        return bool(data.get("eligible_swing")), bool(data.get("eligible_intraday"))
+    ap = str(data.get("allowed_product", "BOTH")).upper()
+    swing = ap in ("BOTH", "SWING")
+    intraday = ap in ("BOTH", "INTRADAY")
+    return swing, intraday
+
+
 @router.get("/universe/stats")
 def get_universe_stats(
     user: dict[str, Any] = Depends(verify_firebase_token),
@@ -244,21 +269,24 @@ def get_universe_stats(
     """Eligible counts and score distribution."""
     c = get_container()
     try:
-        docs = list(c.sheets.db.collection("universe").stream())
-        total = len(docs)
+        rows = c.state.list_universe(limit=3000)
+        total = len(rows)
         swing = 0
         intraday = 0
-        for d in docs:
-            data = d.to_dict()
-            if data.get("eligible_swing"):
+        both = 0
+        for data in rows:
+            s, i = _derive_eligibility(data)
+            if s:
                 swing += 1
-            if data.get("eligible_intraday"):
+            if i:
                 intraday += 1
+            if s and i:
+                both += 1
         return {
             "total_symbols": total,
             "eligible_swing": swing,
             "eligible_intraday": intraday,
-            "neither": total - swing - intraday + len([d for d in docs if d.to_dict().get("eligible_swing") and d.to_dict().get("eligible_intraday")]),
+            "neither": total - swing - intraday + both,
         }
     except Exception as exc:
         logger.error("universe/stats failed: %s", exc)
@@ -269,12 +297,386 @@ def get_universe_stats(
 def get_universe_list(
     sector: str | None = Query(default=None),
     eligible: str | None = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=2000),
+    limit: int = Query(default=200, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
     user: dict[str, Any] = Depends(verify_firebase_token),
 ) -> dict[str, Any]:
-    """Full universe list with filters. Stub — reads from Firestore."""
-    return {"symbols": [], "limit": limit, "offset": offset, "message": "Full implementation pending"}
+    """Full universe list with filters."""
+    c = get_container()
+    try:
+        rows = c.state.list_universe(limit=3000)
+        symbols = []
+        for data in rows:
+            s, i = _derive_eligibility(data)
+            symbols.append({
+                "symbol": data.get("symbol", data.get("_id", "")),
+                "exchange": data.get("exchange", "NSE"),
+                "sector": data.get("sector", ""),
+                "beta": data.get("beta", 0),
+                "eligible_swing": s,
+                "eligible_intraday": i,
+                "score": data.get("priority"),
+                # Tradability metrics
+                "price_last": data.get("price_last"),
+                "atr_pct_14d": data.get("atr_pct_14d"),
+                "atr_14": data.get("atr_14"),
+                "turnover_med_60d": data.get("turnover_med_60d"),
+                "turnover_rank_60d": data.get("turnover_rank_60d"),
+                "liquidity_bucket": data.get("liquidity_bucket", ""),
+                "gap_risk_60d": data.get("gap_risk_60d"),
+                "bars_1d": data.get("bars_1d"),
+                "last_1d_date": _fmt_date(data.get("last_1d_date")),
+                # Data quality
+                "data_quality_flag": data.get("data_quality_flag", ""),
+                "stale_days": data.get("stale_days"),
+                "disable_reason": data.get("disable_reason", ""),
+                # Config
+                "allowed_product": data.get("allowed_product", ""),
+                "strategy_pref": data.get("strategy_pref", ""),
+                "enabled": data.get("enabled", True),
+            })
+
+        # Apply filters
+        if sector:
+            symbols = [s for s in symbols if s["sector"] == sector]
+        if eligible == "swing":
+            symbols = [s for s in symbols if s["eligible_swing"]]
+        elif eligible == "intraday":
+            symbols = [s for s in symbols if s["eligible_intraday"]]
+        elif eligible == "both":
+            symbols = [s for s in symbols if s["eligible_swing"] and s["eligible_intraday"]]
+
+        total = len(symbols)
+        symbols = symbols[offset : offset + limit]
+        return {"symbols": symbols, "total": total, "limit": limit, "offset": offset}
+    except Exception as exc:
+        logger.error("universe/list failed: %s", exc)
+        return {"symbols": [], "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Sectors
+# ---------------------------------------------------------------------------
+
+
+@router.get("/sectors/summary")
+def get_sectors_summary(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Per-sector aggregated metrics derived from universe + sector_mapping."""
+    c = get_container()
+    try:
+        uni_rows = c.state.list_universe(limit=3000)
+
+        # Build sector_mapping lookup: symbol → {macro_sector, industry, basic_industry}
+        try:
+            sm_rows = c.state.list_sector_mapping(limit=3000)
+        except Exception:
+            sm_rows = []
+        sm_lookup: dict[str, dict[str, Any]] = {}
+        for r in sm_rows:
+            sym = r.get("symbol") or r.get("_id") or ""
+            if sym:
+                sm_lookup[sym] = r
+
+        # Aggregate
+        sectors: dict[str, Any] = {}
+        for data in uni_rows:
+            sym = data.get("symbol") or data.get("_id") or ""
+            sector = data.get("sector") or "Unknown"
+            sm = sm_lookup.get(sym, {})
+            macro = sm.get("macro_sector") or data.get("macro_sector") or "Other"
+            industry = sm.get("industry") or ""
+
+            if sector not in sectors:
+                sectors[sector] = {
+                    "sector": sector,
+                    "macro_sector": macro,
+                    "total": 0,
+                    "eligible_swing": 0,
+                    "eligible_intraday": 0,
+                    "both": 0,
+                    "beta_sum": 0.0,
+                    "beta_count": 0,
+                    "atr_sum": 0.0,
+                    "atr_count": 0,
+                    "turnover_sum": 0.0,
+                    "bucket_a": 0,
+                    "bucket_b": 0,
+                    "bucket_c": 0,
+                    "bucket_d": 0,
+                    "gap_risk_sum": 0.0,
+                    "gap_risk_count": 0,
+                    "dq_good": 0,
+                    "dq_stale": 0,
+                    "dq_missing": 0,
+                    "dq_other": 0,
+                    "industries": set(),
+                }
+
+            sd = sectors[sector]
+            sd["total"] += 1
+            sw, intra = _derive_eligibility(data)
+            if sw:
+                sd["eligible_swing"] += 1
+            if intra:
+                sd["eligible_intraday"] += 1
+            if sw and intra:
+                sd["both"] += 1
+
+            if data.get("beta"):
+                sd["beta_sum"] += float(data["beta"])
+                sd["beta_count"] += 1
+            if data.get("atr_pct_14d"):
+                sd["atr_sum"] += float(data["atr_pct_14d"])
+                sd["atr_count"] += 1
+            if data.get("turnover_med_60d"):
+                sd["turnover_sum"] += float(data["turnover_med_60d"])
+
+            bucket = data.get("liquidity_bucket") or ""
+            if bucket == "A":
+                sd["bucket_a"] += 1
+            elif bucket == "B":
+                sd["bucket_b"] += 1
+            elif bucket == "C":
+                sd["bucket_c"] += 1
+            elif bucket == "D":
+                sd["bucket_d"] += 1
+
+            if data.get("gap_risk_60d"):
+                sd["gap_risk_sum"] += float(data["gap_risk_60d"])
+                sd["gap_risk_count"] += 1
+
+            dq = data.get("data_quality_flag") or ""
+            if dq == "GOOD":
+                sd["dq_good"] += 1
+            elif dq == "STALE":
+                sd["dq_stale"] += 1
+            elif dq == "MISSING":
+                sd["dq_missing"] += 1
+            else:
+                sd["dq_other"] += 1
+
+            if industry:
+                sd["industries"].add(industry)
+
+        result = []
+        for sd in sectors.values():
+            total = sd["total"] or 1
+            eligible_any = max(sd["eligible_swing"], sd["eligible_intraday"])
+            liq_weighted = (
+                sd["bucket_a"] * 4 + sd["bucket_b"] * 3 + sd["bucket_c"] * 2 + sd["bucket_d"]
+            )
+            liq_with_data = sd["bucket_a"] + sd["bucket_b"] + sd["bucket_c"] + sd["bucket_d"]
+            result.append(
+                {
+                    "sector": sd["sector"],
+                    "macro_sector": sd["macro_sector"],
+                    "total": sd["total"],
+                    "eligible_swing": sd["eligible_swing"],
+                    "eligible_intraday": sd["eligible_intraday"],
+                    "both": sd["both"],
+                    "neither": sd["total"] - sd["eligible_swing"] - sd["eligible_intraday"] + sd["both"],
+                    "eligible_pct": round(eligible_any / total * 100, 1),
+                    "avg_beta": round(sd["beta_sum"] / sd["beta_count"], 2) if sd["beta_count"] else None,
+                    "avg_atr_pct": round(sd["atr_sum"] / sd["atr_count"], 4) if sd["atr_count"] else None,
+                    "total_turnover": sd["turnover_sum"],
+                    "bucket_a": sd["bucket_a"],
+                    "bucket_b": sd["bucket_b"],
+                    "bucket_c": sd["bucket_c"],
+                    "bucket_d": sd["bucket_d"],
+                    "liq_score": round(liq_weighted / liq_with_data, 2) if liq_with_data else 0.0,
+                    "avg_gap_risk": round(sd["gap_risk_sum"] / sd["gap_risk_count"], 4) if sd["gap_risk_count"] else None,
+                    "dq_good": sd["dq_good"],
+                    "dq_stale": sd["dq_stale"],
+                    "dq_missing": sd["dq_missing"],
+                    "dq_other": sd["dq_other"],
+                    "dq_score": round(sd["dq_good"] / total * 100, 1),
+                    "industries": sorted(sd["industries"]),
+                }
+            )
+
+        result.sort(key=lambda x: x["total_turnover"], reverse=True)
+        macro_sectors = sorted({r["macro_sector"] for r in result})
+        return {"sectors": result, "total_sectors": len(result), "macro_sectors": macro_sectors}
+    except Exception as exc:
+        logger.error("sectors/summary failed: %s", exc)
+        return {"sectors": [], "error": str(exc)}
+
+
+@router.get("/sectors/detail/{sector}")
+def get_sector_detail(
+    sector: str,
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Top symbols and industry breakdown for a specific sector."""
+    c = get_container()
+    try:
+        uni_rows = c.state.list_universe(limit=3000)
+        try:
+            sm_rows = c.state.list_sector_mapping(limit=3000)
+        except Exception:
+            sm_rows = []
+        sm_lookup: dict[str, dict[str, Any]] = {
+            (r.get("symbol") or r.get("_id") or ""): r for r in sm_rows
+        }
+
+        symbols = []
+        for data in uni_rows:
+            if (data.get("sector") or "Unknown") != sector:
+                continue
+            sym = data.get("symbol") or data.get("_id") or ""
+            sm = sm_lookup.get(sym, {})
+            sw, intra = _derive_eligibility(data)
+            symbols.append(
+                {
+                    "symbol": sym,
+                    "industry": sm.get("industry") or "",
+                    "basic_industry": sm.get("basic_industry") or "",
+                    "eligible_swing": sw,
+                    "eligible_intraday": intra,
+                    "price_last": data.get("price_last"),
+                    "turnover_med_60d": data.get("turnover_med_60d"),
+                    "atr_pct_14d": data.get("atr_pct_14d"),
+                    "liquidity_bucket": data.get("liquidity_bucket") or "",
+                    "beta": data.get("beta"),
+                    "gap_risk_60d": data.get("gap_risk_60d"),
+                    "data_quality_flag": data.get("data_quality_flag") or "",
+                    "disable_reason": data.get("disable_reason") or "",
+                }
+            )
+
+        symbols.sort(key=lambda x: x.get("turnover_med_60d") or 0, reverse=True)
+
+        industries: dict[str, int] = {}
+        for s in symbols:
+            ind = s["industry"] or "Unknown"
+            industries[ind] = industries.get(ind, 0) + 1
+
+        return {
+            "sector": sector,
+            "total": len(symbols),
+            "symbols": symbols,
+            "industries": sorted(industries.items(), key=lambda x: -x[1]),
+        }
+    except Exception as exc:
+        logger.error("sectors/detail failed: %s", exc)
+        return {"sector": sector, "symbols": [], "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# History / Data Freshness
+# ---------------------------------------------------------------------------
+
+
+def _normalize_status_1d(flag: str) -> str:
+    f = (flag or "").upper()
+    if f == "GOOD": return "FRESH"
+    if f == "STALE": return "STALE"
+    if f == "MISSING": return "MISSING"
+    if "INVALID" in f: return "INVALID"
+    return "OTHER"
+
+
+def _normalize_status_5m(s: str) -> str:
+    s = (s or "").upper()
+    if s == "FRESH_READY": return "FRESH"
+    if "STALE" in s: return "STALE"
+    if "MISSING" in s: return "MISSING"
+    if "INVALID" in s: return "INVALID"
+    if not s: return "NO_DATA"
+    return "OTHER"
+
+
+@router.get("/history/summary")
+def get_history_summary(user: dict[str, Any] = Depends(verify_firebase_token)) -> dict[str, Any]:
+    c = get_container()
+    try:
+        rows = c.state.list_universe(limit=3000)
+        total = len(rows)
+        d1: dict[str, int] = {"fresh": 0, "stale": 0, "missing": 0, "invalid": 0, "other": 0}
+        d5: dict[str, int] = {"fresh": 0, "stale": 0, "missing": 0, "invalid": 0, "no_data": 0, "other": 0}
+        last_1d_dates: list[str] = []
+        last_5m_dates: list[str] = []
+
+        for row in rows:
+            s1d = _normalize_status_1d(row.get("data_quality_flag", ""))
+            d1[s1d] = d1.get(s1d, 0) + 1
+            s5m = _normalize_status_5m(row.get("status_5m", ""))
+            d5[s5m] = d5.get(s5m, 0) + 1
+            d = _fmt_date(row.get("last_1d_date"))
+            if d: last_1d_dates.append(d)
+            d5m = str(row.get("last_5m_date") or "")[:10]
+            if d5m: last_5m_dates.append(d5m)
+
+        expected_lcd = max(last_1d_dates) if last_1d_dates else ""
+        last_5m_run = max(last_5m_dates) if last_5m_dates else ""
+        return {
+            "total": total,
+            "expected_lcd": expected_lcd,
+            "last_5m_run": last_5m_run,
+            "status_1d": d1,
+            "status_5m": d5,
+            "fresh_pct_1d": round(d1["fresh"] / total * 100, 1) if total else 0,
+            "fresh_pct_5m": round(d5["fresh"] / total * 100, 1) if total else 0,
+            "issues_1d": d1["stale"] + d1["missing"] + d1["invalid"],
+            "issues_5m": d5["stale"] + d5["missing"] + d5["invalid"] + d5["no_data"],
+        }
+    except Exception as exc:
+        logger.error("history/summary failed: %s", exc)
+        return {"total": 0, "error": str(exc)}
+
+
+@router.get("/history/symbols")
+def get_history_symbols(
+    status_1d: str = Query(default=""),
+    status_5m: str = Query(default=""),
+    search: str = Query(default=""),
+    limit: int = Query(default=3000, ge=1, le=5000),
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    c = get_container()
+    try:
+        rows = c.state.list_universe(limit=3000)
+        result = []
+        filter_1d = status_1d.upper() if status_1d else ""
+        filter_5m = status_5m.upper() if status_5m else ""
+        search_q = search.lower()
+
+        for row in rows:
+            sym = row.get("symbol") or row.get("_id") or ""
+            if not sym:
+                continue
+            s1d = _normalize_status_1d(row.get("data_quality_flag", ""))
+            s5m = _normalize_status_5m(row.get("status_5m", ""))
+            if filter_1d and s1d != filter_1d:
+                continue
+            if filter_5m and s5m != filter_5m:
+                continue
+            if search_q and search_q not in sym.lower():
+                continue
+            result.append({
+                "symbol": sym,
+                "exchange": row.get("exchange", "NSE"),
+                "sector": row.get("sector", ""),
+                "last_1d_date": _fmt_date(row.get("last_1d_date")),
+                "bars_1d": row.get("bars_1d"),
+                "status_1d": s1d,
+                "stale_days": row.get("stale_days"),
+                "last_5m_date": str(row.get("last_5m_date") or "")[:10],
+                "bars_5m": row.get("bars_5m"),
+                "status_5m": s5m,
+            })
+
+        _order = {"MISSING": 0, "INVALID": 1, "NO_DATA": 2, "STALE": 3, "OTHER": 4, "FRESH": 5}
+        result.sort(key=lambda r: (
+            _order.get(r["status_1d"], 4),
+            -(r.get("stale_days") or 0),
+        ))
+        return {"symbols": result[:limit], "total": len(result)}
+    except Exception as exc:
+        logger.error("history/symbols failed: %s", exc)
+        return {"symbols": [], "total": 0, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +699,7 @@ def get_pipeline_status(
         LIMIT 50
     """
     try:
-        rows = [dict(r) for r in c.bq.client.query(q).result()]
+        rows = c.bq.query(q)
         for r in rows:
             for k, v in r.items():
                 if hasattr(v, "isoformat"):
@@ -342,7 +744,7 @@ def get_candles(
         """
 
     try:
-        rows = [dict(r) for r in c.bq.client.query(q).result()]
+        rows = c.bq.query(q)
         for r in rows:
             for k, v in r.items():
                 if hasattr(v, "isoformat"):
@@ -510,14 +912,50 @@ def get_paper_mode(
     return {"paper_trade": c.settings.runtime.paper_trade}
 
 
+_JOB_TOKEN = os.environ.get("JOB_TRIGGER_TOKEN", "")
+
+# Maps dashboard job names → internal job endpoint path + query params
+_JOB_ROUTES: dict[str, str] = {
+    "token_refresh":       "/jobs/upstox-token-request",
+    "universe_refresh":    "/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=1800&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1800&intraday_lookback_trading_days=60",
+    "candle_cache":        "/jobs/score-cache-update-close?api_cap=1800&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=1800&intraday_lookback_trading_days=60",
+    "candle_finalize":     "/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=false&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60",
+    "score_refresh":       "/jobs/score-refresh?api_cap=0&cache_only=true&require_fresh_cache=true&fresh_hours=0",
+    "premarket_watchlist": "/jobs/watchlist-refresh?target_size=150&premarket=true&intraday_timeframe=5m",
+    "watchlist_5m":        "/jobs/watchlist-refresh?target_size=150&premarket=false&intraday_timeframe=5m",
+    "scanner":             "/jobs/scan-once?force=true&allow_live_orders=false",
+    "eod_recon":           "/jobs/eod-position-reconcile",
+}
+
+
+def _fire_job_async(path: str) -> None:
+    """Call internal job endpoint in a background thread (fire-and-forget)."""
+    base = os.environ.get("INTERNAL_SERVICE_URL", "http://localhost:8080")
+    url = f"{base}{path}"
+    try:
+        httpx.post(
+            url,
+            headers={"Content-Type": "application/json", "X-Job-Token": _JOB_TOKEN},
+            json={},
+            timeout=None,  # jobs run for minutes; don't time out the background thread
+        )
+    except Exception as exc:
+        logger.warning("trigger-job background call failed: %s", exc)
+
+
 @router.post("/admin/trigger-job")
 def post_admin_trigger_job(
     payload: dict[str, Any],
     admin: dict[str, Any] = Depends(_require_admin),
 ) -> dict[str, Any]:
-    """Manually trigger a pipeline job. Admin only. Stub."""
-    job_name = payload.get("job")
-    return {"status": "ok", "job": job_name, "message": "Job trigger not yet wired"}
+    """Manually trigger a pipeline job. Admin only."""
+    job_name = payload.get("job", "")
+    path = _JOB_ROUTES.get(job_name)
+    if not path:
+        raise HTTPException(status_code=400, detail=f"Unknown job: {job_name!r}. Valid jobs: {list(_JOB_ROUTES)}")
+    logger.info("manual trigger: job=%s path=%s by=%s", job_name, path, admin.get("email"))
+    threading.Thread(target=_fire_job_async, args=(path,), daemon=True).start()
+    return {"status": "triggered", "job": job_name, "path": path}
 
 
 @router.post("/admin/force-token-refresh")

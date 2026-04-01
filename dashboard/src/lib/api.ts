@@ -2,9 +2,21 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 async function getAuthToken(): Promise<string> {
   const { auth } = await import("./firebase");
-  const user = auth.currentUser;
-  if (!user) throw new Error("Not authenticated");
-  return user.getIdToken();
+  if (auth.currentUser) return auth.currentUser.getIdToken();
+  // Firebase auth state may still be restoring — wait up to 5s
+  const { onAuthStateChanged } = await import("firebase/auth");
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      unsub();
+      reject(new Error("Not authenticated"));
+    }, 5000);
+    const unsub = onAuthStateChanged(auth, (user) => {
+      clearTimeout(timer);
+      unsub();
+      if (user) resolve(user.getIdToken() as Promise<string>);
+      else reject(new Error("Not authenticated"));
+    });
+  });
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -61,6 +73,19 @@ export const api = {
   getUniverseList: (params?: Record<string, string>) => {
     const qs = params ? new URLSearchParams(params) : "";
     return api.get<unknown[]>(`/dashboard/universe/list?${qs}`);
+  },
+
+  getSectorsSummary: () =>
+    api.get<Record<string, unknown>>("/dashboard/sectors/summary"),
+
+  getSectorDetail: (sector: string) =>
+    api.get<Record<string, unknown>>(`/dashboard/sectors/detail/${encodeURIComponent(sector)}`),
+
+  getHistorySummary: () => api.get<Record<string, unknown>>("/dashboard/history/summary"),
+
+  getHistorySymbols: (params?: { status_1d?: string; status_5m?: string; search?: string }) => {
+    const qs = params ? new URLSearchParams(Object.entries(params).filter(([, v]) => v) as [string, string][]) : "";
+    return api.get<Record<string, unknown>>(`/dashboard/history/symbols${qs ? `?${qs}` : ""}`);
   },
 
   getPipelineStatus: () => api.get<unknown[]>("/dashboard/pipeline/status"),

@@ -11,18 +11,15 @@ import type { AuditLogEntry } from "@/lib/types";
 import { RefreshCw } from "lucide-react";
 
 const PIPELINE_JOBS = [
-  { name: "token_refresh", label: "Token Refresh", cron: "03:35 IST" },
-  { name: "bootstrap_sheets", label: "Bootstrap Sheets", cron: "04:00 IST" },
-  { name: "universe_refresh", label: "Universe Refresh", cron: "06:15 IST" },
-  { name: "candle_cache_p1", label: "Candle Cache P1", cron: "07:05 IST" },
-  { name: "candle_cache_p2", label: "Candle Cache P2", cron: "07:25 IST" },
-  { name: "candle_cache_p3", label: "Candle Cache P3", cron: "07:45 IST" },
-  { name: "candle_cache_p4", label: "Candle Cache P4", cron: "08:05 IST" },
-  { name: "score_refresh", label: "Score Refresh", cron: "08:30 IST" },
-  { name: "premarket_watchlist", label: "Watchlist Pre", cron: "09:00 IST" },
-  { name: "scanner", label: "Scanner 5m", cron: "09:20 IST" },
-  { name: "watchlist_5m", label: "Watchlist 5m", cron: "09:30 IST" },
-  { name: "eod_recon", label: "EOD Recon", cron: "15:10 IST" },
+  { name: "token_refresh",       label: "Token Refresh",    cron: "03:35 IST", desc: "Upstox OAuth token renewal" },
+  { name: "universe_refresh",    label: "Universe Refresh", cron: "06:15 IST", desc: "Raw universe refresh + new-symbol backfill" },
+  { name: "candle_cache",        label: "Candle Cache",     cron: "07:05 IST", desc: "1D + 5m fetch for all symbols (api_cap=1800)" },
+  { name: "candle_finalize",     label: "Candle Finalize",  cron: "07:40 IST", desc: "Terminalize stragglers, no new API fetches" },
+  { name: "score_refresh",       label: "Score Refresh",    cron: "08:30 IST", desc: "Compute scores + universe eligibility (cache-only)" },
+  { name: "premarket_watchlist", label: "Watchlist Pre",    cron: "09:00 IST", desc: "Pre-market watchlist build" },
+  { name: "scanner",             label: "Scanner 5m",       cron: "09:20 IST", desc: "Live signal scan loop (every 5 min)" },
+  { name: "watchlist_5m",        label: "Watchlist 5m",     cron: "09:30 IST", desc: "Intraday watchlist refresh" },
+  { name: "eod_recon",           label: "EOD Recon",        cron: "15:10 IST", desc: "Force-close open positions (3 passes)" },
 ];
 
 export default function PipelinePage() {
@@ -30,6 +27,7 @@ export default function PipelinePage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [upstoxHealth, setUpstoxHealth] = useState<{ token_valid: boolean; token_expires_at?: string } | null>(null);
+  const [triggerStates, setTriggerStates] = useState<Record<string, "idle" | "loading" | "ok" | "error">>({});
   const isAdmin = useAuthStore((s) => s.isAdmin);
 
   const fetchData = () => {
@@ -227,8 +225,11 @@ export default function PipelinePage() {
                   {icon === "checkmark" ? "✓" : icon === "running" ? "●" : "○"}
                 </div>
                 {/* Label */}
-                <div className="flex-1">
+                <div className="flex-1 min-w-0">
                   <span className="text-xs font-semibold">{job.label}</span>
+                  {"desc" in job && job.desc && (
+                    <p className="text-[10px] text-text-secondary truncate">{job.desc}</p>
+                  )}
                 </div>
                 {/* Time */}
                 <span className="font-mono text-[11px] text-text-secondary">{job.cron}</span>
@@ -247,19 +248,54 @@ export default function PipelinePage() {
 
       {/* Admin: Manual Trigger */}
       {isAdmin() && (
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-          <h3 className="text-sm font-medium mb-3">Manual Trigger</h3>
-          <div className="flex flex-wrap gap-2">
-            {PIPELINE_JOBS.map((job) => (
-              <button
-                key={job.name}
-                onClick={() => api.triggerJob(job.name).then(fetchData).catch(() => {})}
-                className="px-3 py-1.5 rounded text-xs bg-bg-tertiary text-text-secondary hover:text-text-primary hover:bg-accent/20 transition-colors"
-              >
-                {job.label}
-              </button>
-            ))}
+        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-sm font-medium">Manual Trigger</h3>
+              <p className="text-[11px] text-text-secondary mt-0.5">Jobs run in the background — refresh audit log to see progress</p>
+            </div>
           </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+            {PIPELINE_JOBS.map((job) => {
+              const state = triggerStates[job.name] ?? "idle";
+              return (
+                <button
+                  key={job.name}
+                  disabled={state === "loading"}
+                  onClick={async () => {
+                    setTriggerStates((s) => ({ ...s, [job.name]: "loading" }));
+                    try {
+                      await api.triggerJob(job.name);
+                      setTriggerStates((s) => ({ ...s, [job.name]: "ok" }));
+                      setTimeout(() => setTriggerStates((s) => ({ ...s, [job.name]: "idle" })), 4000);
+                      setTimeout(fetchData, 3000);
+                    } catch {
+                      setTriggerStates((s) => ({ ...s, [job.name]: "error" }));
+                      setTimeout(() => setTriggerStates((s) => ({ ...s, [job.name]: "idle" })), 4000);
+                    }
+                  }}
+                  className={cn(
+                    "flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs text-left transition-all border",
+                    state === "idle"    && "bg-bg-tertiary border-transparent text-text-secondary hover:text-text-primary hover:border-accent/30",
+                    state === "loading" && "bg-accent/10 border-accent/30 text-accent opacity-80 cursor-not-allowed",
+                    state === "ok"      && "bg-profit/10 border-profit/30 text-profit",
+                    state === "error"   && "bg-loss/10 border-loss/30 text-loss",
+                  )}
+                >
+                  <span className="text-base leading-none">
+                    {state === "loading" ? "⏳" : state === "ok" ? "✓" : state === "error" ? "✗" : "▶"}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="font-medium truncate">{job.label}</div>
+                    <div className="text-[10px] opacity-60 truncate">{job.cron}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[10px] text-text-secondary mt-3">
+            ✓ = dispatched to backend · jobs may take several minutes · check Audit Log below for status
+          </p>
         </div>
       )}
 

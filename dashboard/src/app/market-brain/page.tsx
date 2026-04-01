@@ -171,7 +171,7 @@ export default function MarketBrainPage() {
         </div>
       </div>
 
-      <p className="text-xs text-text-secondary text-right">As of: {brain.asof_ts}</p>
+      <p className="text-xs text-text-secondary text-right">As of: {brain.asof_ts ?? "—"}</p>
     </div>
   );
 }

@@ -55,6 +55,8 @@ export const NAV_ITEMS = [
   { label: "Signals", href: "/signals", icon: "Zap" },
   { label: "Journal", href: "/journal", icon: "BookOpen" },
   { label: "Universe", href: "/universe", icon: "Globe" },
+  { label: "Sectors", href: "/sectors", icon: "PieChart" },
+  { label: "Data History", href: "/history", icon: "Database" },
   { label: "Pipeline", href: "/pipeline", icon: "Activity" },
   { label: "Analytics", href: "/analytics", icon: "BarChart3" },
   { label: "Settings", href: "/settings", icon: "Settings" },

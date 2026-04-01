@@ -133,27 +133,27 @@ export default function SignalsPage() {
         key: "ltp",
         label: "LTP",
         className: "text-right font-mono",
-        render: (r) => <span>{r.ltp.toFixed(2)}</span>,
+        render: (r) => <span>{r.ltp?.toFixed(2) ?? "—"}</span>,
       },
       {
         key: "sl",
         label: "SL",
         className: "text-right font-mono text-loss/80",
-        render: (r) => <span>{r.sl.toFixed(2)}</span>,
+        render: (r) => <span>{r.sl?.toFixed(2) ?? "—"}</span>,
       },
       {
         key: "target",
         label: "Target",
         className: "text-right font-mono text-profit/80",
-        render: (r) => <span>{r.target.toFixed(2)}</span>,
+        render: (r) => <span>{r.target?.toFixed(2) ?? "—"}</span>,
       },
       {
         key: "rr",
         label: "R:R",
         className: "text-right font-mono",
         render: (r) => {
-          const risk = Math.abs(r.ltp - r.sl);
-          const reward = Math.abs(r.target - r.ltp);
+          const risk = Math.abs((r.ltp ?? 0) - (r.sl ?? 0));
+          const reward = Math.abs((r.target ?? 0) - (r.ltp ?? 0));
           const rr = risk > 0 ? (reward / risk).toFixed(1) : "—";
           return <span>{rr}</span>;
         },
