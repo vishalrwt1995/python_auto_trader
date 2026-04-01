@@ -17,6 +17,7 @@ interface Props {
 }
 
 export function RegimeBadge({ regime, size = "md" }: Props) {
+  if (!regime) return null;
   const color = regimeColors[regime] ?? "#6b7280";
   const text = regime.replace(/_/g, " ");
   const fontSize = size === "sm" ? 10 : size === "lg" ? 14 : 12;

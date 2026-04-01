@@ -14,6 +14,7 @@ interface Props {
 }
 
 export function RiskModeBadge({ mode }: Props) {
+  if (!mode) return null;
   const color = riskColors[mode] ?? "#6b7280";
 
   return (
