@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { signOut } from "firebase/auth";
 import type { AppUser, UserRole } from "@/lib/types";
 
 interface AuthState {
@@ -8,6 +9,7 @@ interface AuthState {
   setLoading: (loading: boolean) => void;
   isAdmin: () => boolean;
   hasRole: (role: UserRole) => boolean;
+  logout: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -17,4 +19,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   setLoading: (loading) => set({ loading }),
   isAdmin: () => get().user?.role === "admin",
   hasRole: (role) => get().user?.role === role,
+  logout: async () => {
+    const { auth } = await import("@/lib/firebase");
+    await signOut(auth);
+    set({ user: null });
+  },
 }));

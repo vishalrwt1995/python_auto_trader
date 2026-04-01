@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useAuthStore } from "@/stores/authStore";
 
 const NAV = [
   { id: "/", icon: "⚡", label: "Command Center" },
@@ -19,8 +20,10 @@ const NAV = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const voiceEnabled = useSettingsStore((s) => s.voiceEnabled);
   const toggleVoice = useSettingsStore((s) => s.toggleVoice);
+  const logout = useAuthStore((s) => s.logout);
 
   return (
     <aside
@@ -94,6 +97,30 @@ export function Sidebar() {
             }}
           />
         </div>
+      </div>
+
+      {/* Logout */}
+      <div style={{ padding: "8px 16px 12px", borderTop: "1px solid #1e293b" }}>
+        <button
+          onClick={() => { logout(); router.push("/login"); }}
+          style={{
+            width: "100%",
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "none",
+            background: "transparent",
+            color: "#ef4444",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            textAlign: "left",
+            transition: "background 0.15s",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "#ef444418")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+        >
+          🚪 Sign Out
+        </button>
       </div>
     </aside>
   );
