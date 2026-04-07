@@ -1,4 +1,4 @@
-const CACHE_NAME = "autotrader-v1";
+const CACHE_NAME = "smarttrader-v1";
 const OFFLINE_URL = "/";
 
 self.addEventListener("install", (event) => {

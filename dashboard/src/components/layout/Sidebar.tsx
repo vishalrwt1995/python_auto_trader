@@ -35,7 +35,7 @@ export function Sidebar() {
       {/* Logo */}
       <div style={{ padding: "20px 18px 16px", borderBottom: "1px solid #1e293b" }}>
         <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -0.5 }}>
-          <span style={{ color: "#3b82f6" }}>Auto</span>
+          <span style={{ color: "#3b82f6" }}>Smart</span>
           <span style={{ color: "#e2e8f0" }}>Trader</span>
         </div>
         <div style={{ fontSize: 10, color: "#475569", marginTop: 2, letterSpacing: 1, textTransform: "uppercase" }}>

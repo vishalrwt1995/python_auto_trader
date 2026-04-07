@@ -15,8 +15,8 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AutoTrader Dashboard",
-  description: "Real-time trading dashboard for AutoTrader GCP",
+  title: "SmartTrader Dashboard",
+  description: "Real-time trading dashboard — SmartTrader GCP",
   manifest: "/manifest.json",
 };
 

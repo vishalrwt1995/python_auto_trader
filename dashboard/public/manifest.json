@@ -1,7 +1,7 @@
 {
-  "name": "AutoTrader Dashboard",
-  "short_name": "AutoTrader",
-  "description": "Real-time trading dashboard for AutoTrader GCP",
+  "name": "SmartTrader Dashboard",
+  "short_name": "SmartTrader",
+  "description": "Real-time trading dashboard — SmartTrader GCP",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0e17",

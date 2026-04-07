@@ -49,7 +49,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm bg-bg-secondary rounded-xl border border-bg-tertiary p-8">
         <div className="flex items-center justify-center gap-2 mb-8">
           <TrendingUp className="h-8 w-8 text-accent" />
-          <h1 className="text-xl font-bold">AutoTrader</h1>
+          <h1 className="text-xl font-bold">SmartTrader</h1>
         </div>
 
         <form onSubmit={handleEmail} className="space-y-4">
