@@ -300,6 +300,24 @@ class TradingService:
             scanner_run_id = _uuid.uuid4().hex[:12]
             qualified = 0
 
+            # Batch-fetch real-time LTP for all watchlist symbols before the scan loop.
+            # This replaces candle close (up to 15-min stale) with live price at entry time.
+            # Indicators (EMA/RSI/MACD/SuperTrend) still use candle history — correct.
+            live_ltp_map: dict[str, float] = {}
+            _all_iks = [ik for ik in key_by_symbol.values() if ik]
+            if _all_iks:
+                try:
+                    _chunk_size = 500
+                    for _ci in range(0, len(_all_iks), _chunk_size):
+                        _chunk = _all_iks[_ci : _ci + _chunk_size]
+                        _quotes = self.upstox.get_ltp_v3(_chunk)
+                        for _ik, _q in _quotes.items():
+                            if _q.ltp > 0:
+                                live_ltp_map[_ik] = _q.ltp
+                    logger.info("live_ltp_prefetch fetched=%d of %d", len(live_ltp_map), len(_all_iks))
+                except Exception:
+                    logger.warning("live_ltp_prefetch_failed — falling back to candle close", exc_info=True)
+
             for w in subset:
                 instrument_key = key_by_symbol.get(str(w.symbol).strip().upper(), "")
                 candles = self._fetch_candles(
@@ -334,7 +352,9 @@ class TradingService:
                 direction = determine_direction(ind, regime)
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy)
                 adjusted_score = max(0, min(100, int(self.market_brain_service.adjust_signal(meta.score, brain_state))))
-                ltp = ind.close
+                # Use live LTP (real-time) for entry price; candle close as fallback if API unavailable
+                _live = live_ltp_map.get(instrument_key, 0.0)
+                ltp = _live if _live > 0 else ind.close
                 pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy)
                 setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
                 liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
@@ -380,6 +400,12 @@ class TradingService:
                     policy_block_reason = "policy_strategy_blocked"
                 elif qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
+                # Live VWAP guard: if price drifted to wrong side of VWAP since candle close, reject entry.
+                # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
+                elif direction == "BUY" and _live > 0 and ltp < ind.vwap:
+                    policy_block_reason = "live_price_below_vwap"
+                elif direction == "SELL" and _live > 0 and ltp > ind.vwap:
+                    policy_block_reason = "live_price_above_vwap"
 
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
                 if direction != "HOLD" and adjusted_score >= self.settings.strategy.min_signal_score and is_entry_window_open_ist() and not policy_block_reason:
