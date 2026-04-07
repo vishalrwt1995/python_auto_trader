@@ -103,6 +103,45 @@ def calc_atr(candles: list[Candle], period: int = 14) -> float:
     return atr
 
 
+def calc_adx(candles: list[Candle], period: int = 14) -> float:
+    """Compute ADX using Wilder's smoothing. Returns last ADX value (0-100)."""
+    if len(candles) < period * 2 + 1:
+        return 25.0
+    plus_dm_list: list[float] = []
+    minus_dm_list: list[float] = []
+    tr_list: list[float] = []
+    for i in range(1, len(candles)):
+        h, l, pc = candles[i][2], candles[i][3], candles[i - 1][4]
+        ph, pl = candles[i - 1][2], candles[i - 1][3]
+        up_move = h - ph
+        down_move = pl - l
+        plus_dm_list.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm_list.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+        tr_list.append(max(h - l, abs(h - pc), abs(l - pc)))
+    if len(tr_list) < period:
+        return 25.0
+    s_tr = sum(tr_list[:period])
+    s_plus = sum(plus_dm_list[:period])
+    s_minus = sum(minus_dm_list[:period])
+    dx_list: list[float] = []
+    for i in range(period, len(tr_list)):
+        s_tr = s_tr - (s_tr / period) + tr_list[i]
+        s_plus = s_plus - (s_plus / period) + plus_dm_list[i]
+        s_minus = s_minus - (s_minus / period) + minus_dm_list[i]
+        if s_tr == 0:
+            continue
+        plus_di = 100.0 * s_plus / s_tr
+        minus_di = 100.0 * s_minus / s_tr
+        di_sum = plus_di + minus_di
+        dx_list.append(100.0 * abs(plus_di - minus_di) / di_sum if di_sum > 0 else 0.0)
+    if not dx_list:
+        return 25.0
+    adx = sum(dx_list[:period]) / min(period, len(dx_list))
+    for dx in dx_list[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return round(adx, 2)
+
+
 def calc_supertrend(candles: list[Candle], atr_p: int = 10, mult: float = 3.0) -> tuple[list[float | None], list[int]]:
     closes = [c[4] for c in candles]
     highs = [c[2] for c in candles]

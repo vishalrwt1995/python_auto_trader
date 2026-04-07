@@ -26,16 +26,14 @@ def health() -> None:
 @app.command("bootstrap-sheets")
 def bootstrap_sheets() -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
     _print({"ok": True, "spreadsheetId": c.settings.gcp.spreadsheet_id})
 
 
 @app.command("universe-sync")
 def universe_sync(limit: int = typer.Option(0)) -> None:
     c = get_container()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action("Universe", "sync", "START", "", {"limit": limit})
-    c.sheets.ensure_core_sheets()
     rows = c.universe_service().sync_universe_from_upstox_instruments(limit=limit)
     sink.action("Universe", "sync", "DONE", "universe synced", {"rows": rows})
     sink.flush_all()
@@ -45,8 +43,7 @@ def universe_sync(limit: int = typer.Option(0)) -> None:
 @app.command("raw-universe-refresh")
 def raw_universe_refresh() -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action("Universe", "raw_universe_refresh", "START")
     out = c.universe_service().refresh_raw_universe_from_upstox()
     sink.action("Universe", "raw_universe_refresh", "DONE", "upstox raw universe snapshot stored", out)
@@ -57,8 +54,7 @@ def raw_universe_refresh() -> None:
 @app.command("universe-build")
 def universe_build(limit: int = typer.Option(0), replace: bool = typer.Option(False)) -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action("Universe", "build_from_raw", "START", "", {"limit": limit, "replace": replace})
     out = c.universe_service().build_trading_universe_from_upstox_raw(limit=limit, replace=replace)
     sink.action("Universe", "build_from_raw", "DONE", "trading universe built/appended", out)
@@ -75,8 +71,7 @@ def universe_v2_refresh(
     write_v2_eligibility: bool = typer.Option(False),
 ) -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action(
         "Universe",
         "universe_v2_refresh",
@@ -105,8 +100,7 @@ def universe_v2_refresh(
 @app.command("universe-v2-audit")
 def universe_v2_audit() -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action("Universe", "universe_v2_audit", "START")
     out = c.universe_service().audit_universe_v2_integrity()
     sink.action("Universe", "universe_v2_audit", "DONE", "universe integrity audit complete", out)
@@ -135,12 +129,9 @@ def premarket_precompute(
     min_watchlist_score: int = typer.Option(1),
 ) -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     market_state = c.market_brain_service().build_premarket_market_brain(now_ist().isoformat())
     market_policy = c.market_brain_service().derive_market_policy(market_state)
-    if hasattr(c.sheets, "write_market_brain_v2"):
-        c.sheets.write_market_brain_v2(market_state, market_policy)
     sink.action("Universe", "premarket_precompute", "START", "", {"targetSize": target_size})
     v2_out = c.universe_service().recompute_universe_v2_from_cache()
     wl_out = c.universe_service().build_watchlist(
@@ -171,8 +162,7 @@ def score_cache_prefetch(
     min_bars: int = typer.Option(320),
 ) -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action("Universe", "score_cache_prefetch", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
     out = c.universe_service().prefetch_score_cache_batch(api_cap=max(0, api_cap), lookback_days=lookback_days, min_bars=min_bars)
     sink.action("Universe", "score_cache_prefetch", "DONE", "score cache prefetch complete", out)
@@ -187,8 +177,7 @@ def score_cache_backfill_full(
     min_bars: int = typer.Option(320),
 ) -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action("Universe", "score_cache_backfill_full", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars})
     out = c.universe_service().prefetch_score_cache_batch(api_cap=max(0, api_cap), lookback_days=max(3650, lookback_days), min_bars=min_bars)
     sink.action("Universe", "score_cache_backfill_full", "DONE", "full score-cache backfill batch complete", out)
@@ -204,8 +193,7 @@ def score_cache_update_close(
     retry_stale_terminal_today: bool = typer.Option(False),
 ) -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sink.action("Universe", "score_cache_update_close", "START", "", {"apiCap": api_cap, "lookbackDays": lookback_days, "minBars": min_bars, "retryStaleTerminalToday": retry_stale_terminal_today})
     out = c.universe_service().prefetch_score_cache_batch(
         api_cap=max(0, api_cap),
@@ -224,7 +212,6 @@ def scan_once(
     allow_live_orders: bool = typer.Option(False, help="Unsafe unless paper mode is disabled and broker mapping validated."),
 ) -> None:
     c = get_container()
-    c.sheets.ensure_core_sheets()
     out = c.trading_service().run_scan_once(allow_live_orders=allow_live_orders, force=force)
     _print(out)
 

@@ -83,10 +83,13 @@ export default function CommandCenter() {
   const swingCount = watchlist.filter((r) => r.eligible_swing).length;
   const intradayCount = watchlist.filter((r) => r.eligible_intraday).length;
 
-  const watchlistPieData = useMemo(() => [
-    { name: "Swing", value: swingCount || 1 },
-    { name: "Intraday", value: intradayCount || 1 },
-  ], [swingCount, intradayCount]);
+  const watchlistPieData = useMemo(() => {
+    if (swingCount === 0 && intradayCount === 0) return [];
+    return [
+      ...(swingCount > 0 ? [{ name: "Swing", value: swingCount }] : []),
+      ...(intradayCount > 0 ? [{ name: "Intraday", value: intradayCount }] : []),
+    ];
+  }, [swingCount, intradayCount]);
 
   if (loading) return <LoadingSkeleton lines={8} className="max-w-3xl" />;
   if (!user) return null;

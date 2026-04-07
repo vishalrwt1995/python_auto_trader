@@ -17,7 +17,8 @@ import httpx
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
 from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
-from autotrader.domain.indicators import calc_atr
+from autotrader.domain.indicators import calc_adx, calc_atr, compute_indicators
+from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
 from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot, UniverseRow
 from autotrader.services.universe_v2 import (
     UNIVERSE_V2_HEADERS,
@@ -2602,6 +2603,31 @@ class UniverseService:
                         last_error=row_last_error,
                     )
                 )
+                # Write 1D freshness + universe score to Firestore for already-fresh symbols (fast path)
+                if self.state is not None:
+                    try:
+                        last_ts_1d = self._last_candle_ts(cached)
+                        last_1d_date = last_ts_1d.astimezone(IST).date().isoformat() if last_ts_1d else ""
+                        u_score = 0
+                        score_calc_str = ""
+                        try:
+                            ind = compute_indicators(cached, self.cfg)
+                            if ind is not None:
+                                u_score, parts = compute_universe_score_breakdown(ind)
+                                score_calc_str = format_universe_score_calc_short(u_score, parts)
+                        except Exception:
+                            pass
+                        self.state.update_universe_row(u.symbol, {
+                            "last_1d_date": last_1d_date,
+                            "bars_1d": len(cached),
+                            "data_quality_flag": "GOOD",
+                            "stale_days": 0,
+                            "last_1d_updated_at": updated_at,
+                            "universe_score": u_score,
+                            "score_calc": score_calc_str,
+                        })
+                    except Exception as _e:
+                        logger.debug("firestore_1d_update_skipped symbol=%s error=%s", u.symbol, _e)
                 continue
             if before_ready:
                 ready += 1
@@ -2722,7 +2748,7 @@ class UniverseService:
                 )
             )
 
-            # Write 1D freshness fields to Firestore for dashboard monitoring (mirrors 5M pattern)
+            # Write 1D freshness fields + universe score to Firestore for dashboard monitoring
             if self.state is not None:
                 try:
                     last_ts_1d = self._last_candle_ts(candles)
@@ -2732,7 +2758,7 @@ class UniverseService:
                     elif not candles or not after_ready:
                         dq_flag = "MISSING"
                     elif after_fresh:
-                        dq_flag = "FRESH"
+                        dq_flag = "GOOD"
                     else:
                         dq_flag = "STALE"
                     stale_days_1d = 0
@@ -2742,12 +2768,24 @@ class UniverseService:
                             stale_days_1d = (_date.fromisoformat(expected) - _date.fromisoformat(last_1d_date)).days
                         except Exception:
                             stale_days_1d = 0
+                    u_score = 0
+                    score_calc_str = ""
+                    if candles and after_ready:
+                        try:
+                            ind = compute_indicators(candles, self.cfg)
+                            if ind is not None:
+                                u_score, parts = compute_universe_score_breakdown(ind)
+                                score_calc_str = format_universe_score_calc_short(u_score, parts)
+                        except Exception:
+                            pass
                     self.state.update_universe_row(u.symbol, {
                         "last_1d_date": last_1d_date,
                         "bars_1d": len(candles),
                         "data_quality_flag": dq_flag,
                         "stale_days": max(0, stale_days_1d),
                         "last_1d_updated_at": updated_at,
+                        "universe_score": u_score,
+                        "score_calc": score_calc_str,
                     })
                 except Exception as _e:
                     logger.debug("firestore_1d_update_skipped symbol=%s error=%s", u.symbol, _e)
@@ -3468,9 +3506,8 @@ class UniverseService:
                     for (sym, ex), v in sorted(mapping.items())
                     if sym
                 ]
-                self.sheets.replace_sector_mapping(rows_to_write)
             except Exception:
-                logger.debug("sector_mapping replace failed", exc_info=True)
+                logger.debug("sector_mapping build failed", exc_info=True)
 
         metrics = self._sector_mapping_coverage_metrics(universe_rows, mapping, source_origin)
         coverage_pct = float(metrics.get("coverage_pct", 0.0) or 0.0)
@@ -3697,8 +3734,6 @@ class UniverseService:
             for (sym, ex), v in sorted(current_map.items())
             if sym
         ]
-        self.sheets.replace_sector_mapping(out_rows)
-
         # Persist a reusable JSON snapshot for future runs.
         try:
             self.gcs.write_json(
@@ -4398,8 +4433,17 @@ class UniverseService:
             ema20 = self._ema_last(closes, 20)
             ema50 = self._ema_last(closes, 50)
             ema200 = self._ema_last(closes, 200)
-            ema50_prev = self._ema_last(closes[:-20], 50) if len(closes) > 70 else ema50
+            ema50_prev = self._ema_last(closes[:-20], 50) if len(closes) > 90 else ema50
             atr14 = float(calc_atr(daily[-260:], period=14) or 0.0) if len(daily) >= 20 else 0.0
+            adx14 = float(calc_adx(daily[-60:], period=14)) if len(daily) >= 29 else 25.0
+            low_252 = min(float(c[3] or 0.0) for c in daily[-252:]) if len(daily) >= 60 else low_20
+            vol_last3 = statistics.mean(vols[-3:]) if len(vols) >= 3 else (vols[-1] if vols else 0.0)
+            vol_prev3 = statistics.mean(vols[-6:-3]) if len(vols) >= 6 else vol_last3
+            recent_event_flag = any(
+                abs(float(daily[i][1] or 0.0) / closes[i - 1] - 1.0) > 0.05
+                for i in range(max(1, len(daily) - 5), len(daily))
+                if closes[i - 1] > 0
+            )
             swing_work.append(
                 {
                     **r,
@@ -4412,8 +4456,13 @@ class UniverseService:
                     "ema200": ema200,
                     "ema50Prev": ema50_prev,
                     "atr14": atr14 if atr14 > 0 else float(r.get("atr14") or 0.0),
+                    "adx14": adx14,
                     "high20": high_20,
                     "low20": low_20,
+                    "low252": low_252,
+                    "volLast3": vol_last3,
+                    "volPrev3": vol_prev3,
+                    "recentEventFlag": recent_event_flag,
                     "returnsByDate": self._daily_returns_by_date(daily, lookback=60),
                 }
             )
@@ -4421,26 +4470,49 @@ class UniverseService:
         ret_mean = float(statistics.mean(ret60_values)) if ret60_values else 0.0
         ret_std = float(statistics.pstdev(ret60_values)) if len(ret60_values) > 1 else 0.0
 
+        # Fix 5: sector-relative RS — z-score within peer group, not universe-wide
+        sector_ret60_map: dict[str, list[float]] = {}
+        for _r in swing_work:
+            _sec = str(_r.get("sector") or "UNKNOWN").upper()
+            sector_ret60_map.setdefault(_sec, []).append(float(_r.get("ret60") or 0.0))
+        sector_ret_stats: dict[str, tuple[float, float]] = {
+            sec: (statistics.mean(vals), statistics.pstdev(vals) if len(vals) > 1 else 0.0)
+            for sec, vals in sector_ret60_map.items()
+        }
+
         swing_scored: list[dict[str, Any]] = []
+        is_bearish_regime = canonical_regime in {"PANIC", "TREND_DOWN"}
         for r in swing_work:
             close = float(r.get("close") or 0.0)
             if close <= 0:
                 continue
-            z = ((float(r.get("ret60") or 0.0) - ret_mean) / ret_std) if ret_std > 1e-9 else 0.0
-            rs_component = self._norm_minmax_clip(max(-3.0, min(3.0, z)), -3.0, 3.0)
+
+            # Fix 5: sector-blended RS (60% sector-relative, 40% universe-relative)
+            ret60_val = float(r.get("ret60") or 0.0)
+            z_universe = ((ret60_val - ret_mean) / ret_std) if ret_std > 1e-9 else 0.0
+            sec_key = str(r.get("sector") or "UNKNOWN").upper()
+            sec_mean, sec_std = sector_ret_stats.get(sec_key, (ret_mean, ret_std))
+            z_sector = ((ret60_val - sec_mean) / sec_std) if sec_std > 1e-9 else z_universe
+            z_long = 0.60 * z_sector + 0.40 * z_universe
+            rs_component = self._norm_minmax_clip(max(-3.0, min(3.0, z_long)), -3.0, 3.0)
+
             high20 = float(r.get("high20") or 0.0)
             low20 = float(r.get("low20") or 0.0)
             dist_to_high = ((high20 - close) / high20) if high20 > 0 else 0.0
             breakout_component = max(0.0, 1.0 - (dist_to_high * 5.0))
             volume_component = min(2.0, float(r.get("volRatio") or 0.0)) / 2.0
             trend_component = 1.0 if (close > float(r.get("ema50") or 0.0) > float(r.get("ema200") or 0.0)) else 0.0
-            breakout = self._clip01((0.35 * rs_component) + (0.30 * breakout_component) + (0.20 * volume_component) + (0.15 * trend_component)) * 100.0
+            # Fix 6: ADX component — trending stocks score higher
+            adx_val = float(r.get("adx14") or 25.0)
+            adx_component = self._norm_minmax_clip(adx_val, 15.0, 40.0)
+            breakout = self._clip01((0.30 * rs_component) + (0.25 * breakout_component) + (0.15 * volume_component) + (0.15 * trend_component) + (0.15 * adx_component)) * 100.0
 
             atr14 = float(r.get("atr14") or 0.0)
             ema20 = float(r.get("ema20") or 0.0)
             ema50 = float(r.get("ema50") or 0.0)
             ema200 = float(r.get("ema200") or 0.0)
             ema50_prev = float(r.get("ema50Prev") or ema50)
+            # Fix 2: use live-computed atr_pct, not stale stored value
             atr_pct = float((atr14 / close) if close > 0 else 0.0)
             if ema50 > ema200 and atr14 > 0:
                 pullback_depth = (ema20 - close) / atr14
@@ -4451,13 +4523,22 @@ class UniverseService:
             else:
                 pullback_component = 0.0
                 trend_strength = 0.0
-            volume_contraction = 1.0 if float(r.get("volRatio") or 0.0) < 1.0 else 0.0
+            # Fix 4: 3-bar rolling vol contraction instead of single-day
+            vol_last3 = float(r.get("volLast3") or 0.0)
+            vol_prev3 = float(r.get("volPrev3") or vol_last3)
+            if vol_prev3 > 0 and vol_last3 < vol_prev3 * 0.85:
+                volume_contraction = 1.0
+            elif float(r.get("volRatio") or 0.0) < 1.0:
+                volume_contraction = 0.5
+            else:
+                volume_contraction = 0.0
             pullback = self._clip01((0.40 * trend_strength) + (0.40 * pullback_component) + (0.20 * volume_contraction)) * 100.0
 
             range_den = max(1e-6, high20 - low20)
             range_pos = (close - low20) / range_den
             mr_component = self._clip01(1.0 - range_pos)
-            vol_sanity = 1.0 if 0.01 <= float(r.get("atrPct14D") or 0.0) <= 0.035 else 0.0
+            # Fix 2: use live atr_pct not stored atrPct14D
+            vol_sanity = 1.0 if 0.01 <= atr_pct <= 0.035 else 0.0
             mean_rev = self._clip01((0.60 * mr_component) + (0.40 * vol_sanity)) * 100.0
 
             if regime_v2["regimeDaily"] == "TREND":
@@ -4469,14 +4550,52 @@ class UniverseService:
 
             setup_scores = {"BREAKOUT": breakout, "PULLBACK": pullback, "MEAN_REVERSION": mean_rev}
             setup_label = max(setup_scores.items(), key=lambda kv: kv[1])[0]
+            trade_direction = "BUY"
+
+            # Fix 3: short-side scoring in bearish regimes (PANIC / TREND_DOWN)
+            if is_bearish_regime:
+                z_short = 0.60 * (-z_sector) + 0.40 * (-z_universe)
+                rs_short = self._norm_minmax_clip(max(-3.0, min(3.0, z_short)), -3.0, 3.0)
+                low252 = float(r.get("low252") or low20)
+                dist_to_low = ((close - low252) / close) if close > 0 else 1.0
+                breakdown_component = max(0.0, 1.0 - (dist_to_low * 5.0))
+                trend_short = 1.0 if (ema50 < ema200 and close < ema50) else 0.0
+                if ema50 < ema200 and atr14 > 0:
+                    short_pb_depth = (close - ema20) / atr14
+                    short_pb_component = self._clip01(short_pb_depth / 2.0)
+                    short_slope = (ema50_prev - ema50) / 20.0
+                    short_trend_str = self._clip01(short_slope / max(1e-6, atr_pct * close))
+                else:
+                    short_pb_component = 0.0
+                    short_trend_str = 0.0
+                vol_expansion = min(1.0, float(r.get("volRatio") or 0.0) / 2.0)
+                short_breakout = self._clip01((0.30 * rs_short) + (0.25 * breakdown_component) + (0.15 * vol_expansion) + (0.15 * trend_short) + (0.15 * adx_component)) * 100.0
+                short_pullback = self._clip01((0.40 * short_trend_str) + (0.40 * short_pb_component) + (0.20 * vol_expansion)) * 100.0
+                if canonical_regime == "PANIC":
+                    short_final = (0.65 * short_breakout) + (0.25 * short_pullback) + (0.10 * mean_rev)
+                else:
+                    short_final = (0.50 * short_breakout) + (0.35 * short_pullback) + (0.15 * mean_rev)
+                if short_final > final_score:
+                    final_score = short_final
+                    setup_label = "SHORT_BREAKDOWN" if short_breakout >= short_pullback else "SHORT_PULLBACK"
+                    trade_direction = "SELL"
+                    setup_scores = {"SHORT_BREAKDOWN": short_breakout, "SHORT_PULLBACK": short_pullback, "MEAN_REVERSION": mean_rev}
+
+            # Fix 7: 20% penalty for stocks with a recent large-gap event (proxy for earnings)
+            if bool(r.get("recentEventFlag")):
+                final_score *= 0.80
+
             swing_scored.append(
                 {
                     **r,
                     "score": float(round(max(0.0, min(100.0, final_score)), 2)),
                     "setupLabel": setup_label,
+                    "tradeDirection": trade_direction,
                     "breakout": breakout,
                     "pullback": pullback,
                     "meanRev": mean_rev,
+                    "adx14Score": float(round(adx_component * 100.0, 1)),
+                    "recentEventFlag": bool(r.get("recentEventFlag")),
                 }
             )
 
@@ -4507,7 +4626,10 @@ class UniverseService:
             rank = int(r.get("turnoverRank60D") or mode_thresholds.intraday_topn_turnover_60d)
             liquidity_component = 1.0 - self._norm_minmax_clip(float(rank), 1.0, float(max(2, mode_thresholds.intraday_topn_turnover_60d)))
             vol_sanity_component = 1.0 - self._norm_minmax_clip(float(r.get("atrPct14D") or 0.0), 0.01, 0.12)
-            phase1_score = self._clip01((0.40 * momentum_component) + (0.30 * liquidity_component) + (0.30 * vol_sanity_component)) * 100.0
+            # Fix 6: ADX component — reward trending stocks in Phase1
+            adx_p1 = float(calc_adx(daily[-40:], period=14)) if len(daily) >= 29 else 25.0
+            adx_p1_component = self._norm_minmax_clip(adx_p1, 15.0, 40.0)
+            phase1_score = self._clip01((0.40 * momentum_component) + (0.25 * liquidity_component) + (0.20 * vol_sanity_component) + (0.15 * adx_p1_component)) * 100.0
             intraday_phase1.append(
                 {
                     **r,
@@ -4516,6 +4638,7 @@ class UniverseService:
                     "momentumComponent": momentum_component,
                     "liquidityComponent": liquidity_component,
                     "volSanityComponent": vol_sanity_component,
+                    "adxComponent": float(round(adx_p1_component, 4)),
                     "returnsByDate": self._daily_returns_by_date(daily, lookback=60),
                 }
             )
@@ -4925,11 +5048,63 @@ class UniverseService:
             )
 
         swing_written = bool(premarket)
-        if swing_written:
-            self.sheets.replace_watchlist_swing_v2(swing_rows)
-        else:
+        if not swing_written:
             logger.info("build_watchlist_v2 swing write skipped premarket=%s runBlock=%s", premarket, run_block)
-        self.sheets.replace_watchlist_intraday_v2(intraday_rows)
+
+        # --- Firestore write: persist watchlist for dashboard real-time display ---
+        try:
+            if self.state is not None:
+                fs_rows: list[dict] = []
+                for r in intraday_selected:
+                    fs_rows.append({
+                        "symbol": str(r.get("symbol", "")),
+                        "exchange": str(r.get("exchange", "NSE")),
+                        "setuplabel": str(r.get("setupLabel", "")),
+                        "confidence": float(round(float(r.get("confidence") or r.get("score") or 0.0), 2)),
+                        "score": float(round(float(r.get("score") or 0.0), 2)),
+                        "source": str(r.get("source", "")),
+                        "sector": str(r.get("sector", "")),
+                        "macroSector": str(r.get("macroSector", "")),
+                        "phase2eligibility": "Y" if bool(r.get("phase2Eligibility")) else "N",
+                        "vwapBias": str(r.get("vwapBias", "")),
+                        "turnoverRank60D": r.get("turnoverRank60D"),
+                        "liquidityBucket": str(r.get("liquidityBucket", "")),
+                        "atrPct14D": float(round(float(r.get("atrPct14D") or 0.0), 6)),
+                        "wlType": "intraday",
+                    })
+                for r in swing_selected:
+                    fs_rows.append({
+                        "symbol": str(r.get("symbol", "")),
+                        "exchange": str(r.get("exchange", "NSE")),
+                        "setuplabel": str(r.get("setupLabel", "")),
+                        "confidence": float(round(float(r.get("score") or 0.0), 2)),
+                        "score": float(round(float(r.get("score") or 0.0), 2)),
+                        "source": "SWING_DAILY",
+                        "sector": str(r.get("sector", "")),
+                        "macroSector": str(r.get("macroSector", "")),
+                        "phase2eligibility": "N",
+                        "wlType": "swing",
+                    })
+                intraday_syms = [str(r.get("symbol", "")) for r in intraday_selected if r.get("symbol")]
+                swing_syms = [str(r.get("symbol", "")) for r in swing_selected if r.get("symbol")]
+                all_syms = list(dict.fromkeys(intraday_syms + swing_syms))
+                self.state.save_watchlist({
+                    "generated_at": run_ts,
+                    "run_date": run_date,
+                    "run_block": run_block,
+                    "regime": canonical_regime,
+                    "risk_mode": risk_mode,
+                    "selected": len(fs_rows),
+                    "symbols": all_syms,
+                    "rows": fs_rows,
+                })
+                logger.info(
+                    "build_watchlist_v2 firestore_write rows=%d intraday=%d swing=%d",
+                    len(fs_rows), len(intraday_syms), len(swing_syms),
+                )
+        except Exception:
+            logger.warning("build_watchlist_v2 firestore_write_failed", exc_info=True)
+
         phase2_diag_payload = {
             "phase2BranchEntered": bool(phase2_branch_entered),
             "phase2BranchCompleted": bool(phase2_branch_completed),

@@ -33,7 +33,7 @@ interface HistorySymbol {
   status_5m: string;
 }
 
-type FilterTab = "all" | "issues" | "no_5m" | "fresh";
+type FilterTab = "all" | "fresh" | "issues";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -175,9 +175,8 @@ export default function HistoryPage() {
     let data = symbols;
     const q = search.toLowerCase();
     if (q) data = data.filter((r) => r.symbol.toLowerCase().includes(q) || r.sector.toLowerCase().includes(q));
-    if (tab === "issues") data = data.filter((r) => r.status_1d !== "FRESH" || r.status_5m !== "FRESH");
-    if (tab === "no_5m")  data = data.filter((r) => r.status_5m === "NO_DATA" || !r.last_5m_date);
     if (tab === "fresh")  data = data.filter((r) => r.status_1d === "FRESH" && r.status_5m === "FRESH");
+    if (tab === "issues") data = data.filter((r) => r.status_1d !== "FRESH" || r.status_5m !== "FRESH");
     if (filter1d) data = data.filter((r) => r.status_1d === filter1d);
     if (filter5m) data = data.filter((r) => r.status_5m === filter5m);
     return data;
@@ -185,9 +184,8 @@ export default function HistoryPage() {
 
   const tabCounts = useMemo(() => ({
     all:    symbols.length,
-    issues: symbols.filter((r) => r.status_1d !== "FRESH" || r.status_5m !== "FRESH").length,
-    no_5m:  symbols.filter((r) => r.status_5m === "NO_DATA" || !r.last_5m_date).length,
     fresh:  symbols.filter((r) => r.status_1d === "FRESH" && r.status_5m === "FRESH").length,
+    issues: symbols.filter((r) => r.status_1d !== "FRESH" || r.status_5m !== "FRESH").length,
   }), [symbols]);
 
   const columns: Column<HistorySymbol>[] = useMemo(() => [
@@ -238,23 +236,6 @@ export default function HistoryPage() {
       className: "text-right font-mono text-xs",
       tooltip: "Total daily candles stored in the GCS score cache for this symbol.",
       render: (r) => <span className="text-text-secondary">{r.bars_1d ?? "—"}</span>,
-    },
-    {
-      key: "stale_days",
-      label: "Stale Days",
-      sortable: true,
-      sortValue: (r) => r.stale_days ?? 0,
-      className: "text-right font-mono text-xs",
-      tooltip: "Days between the last available candle date and the expected last completed trading day.",
-      render: (r) => {
-        const v = r.stale_days;
-        if (!v) return <span className="text-text-secondary">—</span>;
-        return (
-          <span className={v > 5 ? "text-red-400" : v > 2 ? "text-amber-400" : "text-text-secondary"}>
-            {v}d
-          </span>
-        );
-      },
     },
     {
       key: "status_5m",
@@ -386,14 +367,11 @@ export default function HistoryPage() {
             <button className={tabClass("all")}    onClick={() => { setTab("all");    setFilter1d(""); setFilter5m(""); }}>
               All <span className="ml-1 text-[10px] opacity-70">{tabCounts.all.toLocaleString()}</span>
             </button>
-            <button className={tabClass("issues")} onClick={() => { setTab("issues"); setFilter1d(""); setFilter5m(""); }}>
-              Issues <span className={cn("ml-1 text-[10px]", tabCounts.issues > 0 ? "text-amber-400" : "opacity-70")}>{tabCounts.issues.toLocaleString()}</span>
-            </button>
-            <button className={tabClass("no_5m")}  onClick={() => { setTab("no_5m");  setFilter1d(""); setFilter5m(""); }}>
-              No 5M <span className="ml-1 text-[10px] opacity-70">{tabCounts.no_5m.toLocaleString()}</span>
-            </button>
             <button className={tabClass("fresh")}  onClick={() => { setTab("fresh");  setFilter1d(""); setFilter5m(""); }}>
               Fresh <span className="ml-1 text-[10px] opacity-70">{tabCounts.fresh.toLocaleString()}</span>
+            </button>
+            <button className={tabClass("issues")} onClick={() => { setTab("issues"); setFilter1d(""); setFilter5m(""); }}>
+              Issues <span className={cn("ml-1 text-[10px]", tabCounts.issues > 0 ? "text-amber-400" : "opacity-70")}>{tabCounts.issues.toLocaleString()}</span>
             </button>
           </div>
 

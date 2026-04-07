@@ -16,6 +16,7 @@ interface DashboardState {
 
   /* LTP cache */
   ltpCache: Record<string, number>;
+  ltpUpdatedAt: number; // epoch ms of last updateLtp call
   updateLtp: (updates: Record<string, number>) => void;
 
   /* Selected symbol (for drawers) */
@@ -38,8 +39,9 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   setPositions: (positions) => set({ positions }),
 
   ltpCache: {},
+  ltpUpdatedAt: 0,
   updateLtp: (updates) =>
-    set((state) => ({ ltpCache: { ...state.ltpCache, ...updates } })),
+    set((state) => ({ ltpCache: { ...state.ltpCache, ...updates }, ltpUpdatedAt: Date.now() })),
 
   selectedSymbol: null,
   setSelectedSymbol: (selectedSymbol) => set({ selectedSymbol }),

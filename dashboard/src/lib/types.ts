@@ -48,15 +48,28 @@ export interface WatchlistRow {
   enabled: string;
   setup: string;
   sector: string;
+  macro_sector?: string;
   beta: number;
   reason: string;
   score?: number;
   eligible_swing?: boolean;
   eligible_intraday?: boolean;
+  wl_type?: "swing" | "intraday" | string;
+  vwap_bias?: string;
+  liquidity_bucket?: string;
+  turnover_rank?: number | null;
+  phase2_eligible?: boolean;
 }
 
 export interface WatchlistDoc {
   rows: WatchlistRow[];
+  regime?: string;
+  risk_mode?: string;
+  run_block?: string;
+  generated_at?: string;
+  run_date?: string;
+  selected?: number;
+  symbols?: string[];
   updated_at?: { seconds: number; nanoseconds: number };
 }
 
@@ -161,6 +174,7 @@ export interface AuditLogEntry {
   message: string;
   context: Record<string, unknown>;
   exec_id: string;
+  scheduler_job?: string;
 }
 
 /* ── Trade Summary (from API) ── */

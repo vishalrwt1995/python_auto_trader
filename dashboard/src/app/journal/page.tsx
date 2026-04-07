@@ -97,7 +97,8 @@ export default function JournalPage() {
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const map = days.map((d) => ({ name: d, pnl: 0, count: 0 }));
     trades.forEach((t) => {
-      const day = new Date(t.trade_date).getDay();
+      // trade_date is YYYY-MM-DD in IST; append T00:00:00 to avoid UTC date shift
+      const day = new Date(t.trade_date + "T00:00:00").getDay();
       map[day].pnl += t.pnl;
       map[day].count++;
     });

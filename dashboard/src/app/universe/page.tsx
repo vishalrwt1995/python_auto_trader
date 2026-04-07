@@ -12,6 +12,7 @@ import {
   ResponsiveContainer,
   Tooltip,
 } from "recharts";
+import { InfoBadge, Tooltip as AppTooltip } from "@/components/shared/Tooltip";
 
 const PIE_COLORS = [
   "#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#8b5cf6",
@@ -35,26 +36,9 @@ const DQ_COLOR: Record<string, string> = {
   "": "#6b7280",
 };
 
-// ── InfoTooltip ──────────────────────────────────────────────────────────────
-
+// InfoTooltip → now uses shared InfoBadge
 function InfoTooltip({ text }: { text: string }) {
-  return (
-    <span className="relative group inline-flex ml-1.5 align-middle">
-      <span className="w-3.5 h-3.5 rounded-full bg-bg-tertiary text-[9px] font-bold inline-flex items-center justify-center cursor-help text-text-secondary border border-bg-tertiary leading-none select-none">
-        ?
-      </span>
-      <span
-        className={cn(
-          "absolute z-50 top-full left-0 mt-1 w-60 p-2.5",
-          "bg-gray-950 border border-gray-700 rounded-lg text-[11px] text-text-secondary leading-relaxed",
-          "opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-150 shadow-xl",
-          "whitespace-normal",
-        )}
-      >
-        {text}
-      </span>
-    </span>
-  );
+  return <InfoBadge text={text} />;
 }
 
 // ── Active filter pill ───────────────────────────────────────────────────────
@@ -85,7 +69,9 @@ interface UniverseSymbol {
   beta: number;
   eligible_swing: boolean;
   eligible_intraday: boolean;
-  score?: number;
+  universe_score?: number;   // 0-100 computed indicator score (EMA/RSI/MACD/Breakout/Volume)
+  score_calc?: string;       // breakdown string e.g. "E20|P10|R15|M10|B15|V15|O5|N-5|S85"
+  priority?: number;         // manual priority (legacy)
   price_last?: number;
   atr_pct_14d?: number;
   atr_14?: number;
@@ -255,6 +241,29 @@ export default function UniversePage() {
         sortable: true,
         sortValue: (r) => r.sector,
         render: (r) => <span className="text-xs text-text-secondary">{r.sector || "—"}</span>,
+      },
+      {
+        key: "universe_score",
+        label: "Score",
+        tooltip: "0–100 indicator score computed from daily candles: EMA stack, RSI, MACD, Breakout proximity, Volume, OBV. Hover the value to see breakdown.",
+        sortable: true,
+        sortValue: (r) => r.universe_score ?? -1,
+        className: "text-center",
+        render: (r) => {
+          const s = r.universe_score;
+          if (s == null) return <span className="text-text-secondary text-xs">—</span>;
+          const color = s >= 60 ? "#22c55e" : s >= 40 ? "#f59e0b" : "#6b7280";
+          return (
+            <AppTooltip text={r.score_calc || `Score: ${s}`}>
+              <span
+                className="font-mono text-xs font-semibold px-1.5 py-0.5 rounded cursor-default"
+                style={{ color, background: `${color}18` }}
+              >
+                {s}
+              </span>
+            </AppTooltip>
+          );
+        },
       },
       {
         key: "price",

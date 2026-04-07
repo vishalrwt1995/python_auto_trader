@@ -10,16 +10,17 @@ import { useAuthStore } from "@/stores/authStore";
 import type { AuditLogEntry } from "@/lib/types";
 import { RefreshCw } from "lucide-react";
 
+// schedulerJobHint: substring matched against entry.scheduler_job (Cloud Scheduler job name in ctx).
 const PIPELINE_JOBS = [
-  { name: "token_refresh",       label: "Token Refresh",    cron: "03:35 IST", desc: "Upstox OAuth token renewal" },
-  { name: "universe_refresh",    label: "Universe Refresh", cron: "06:15 IST", desc: "Raw universe refresh + new-symbol backfill" },
-  { name: "candle_cache",        label: "Candle Cache",     cron: "07:05 IST", desc: "1D + 5m fetch for all symbols (api_cap=1800)" },
-  { name: "candle_finalize",     label: "Candle Finalize",  cron: "07:40 IST", desc: "Terminalize stragglers, no new API fetches" },
-  { name: "score_refresh",       label: "Score Refresh",    cron: "08:30 IST", desc: "Compute scores + universe eligibility (cache-only)" },
-  { name: "premarket_watchlist", label: "Watchlist Pre",    cron: "09:00 IST", desc: "Pre-market watchlist build" },
-  { name: "scanner",             label: "Scanner 5m",       cron: "09:20 IST", desc: "Live signal scan loop (every 5 min)" },
-  { name: "watchlist_5m",        label: "Watchlist 5m",     cron: "09:30 IST", desc: "Intraday watchlist refresh" },
-  { name: "eod_recon",           label: "EOD Recon",        cron: "15:10 IST", desc: "Force-close open positions (3 passes)" },
+  { name: "token_refresh",       label: "Token Refresh",    cron: "03:35 IST", desc: "Upstox OAuth token renewal",                        schedulerJobHint: "upstox-token-request" },
+  { name: "universe_refresh",    label: "Universe Refresh", cron: "06:15 IST", desc: "Raw universe refresh + new-symbol backfill",         schedulerJobHint: "universe-v2-refresh" },
+  { name: "candle_cache",        label: "Candle Cache",     cron: "07:05 IST", desc: "1D + 5m fetch for all symbols (api_cap=1800)",       schedulerJobHint: "cache-update-close-0705" },
+  { name: "candle_finalize",     label: "Candle Finalize",  cron: "07:40 IST", desc: "Terminalize stragglers, no new API fetches",         schedulerJobHint: "cache-update-close-0740" },
+  { name: "score_refresh",       label: "Score Refresh",    cron: "08:30 IST", desc: "Compute scores + universe eligibility (cache-only)", schedulerJobHint: "score-0830" },
+  { name: "premarket_watchlist", label: "Watchlist Pre",    cron: "09:00 IST", desc: "Pre-market watchlist build",                         schedulerJobHint: "premarket-0900" },
+  { name: "scanner",             label: "Scanner 5m",       cron: "09:20 IST", desc: "Live signal scan loop (every 5 min)",                schedulerJobHint: "scan-market-5m" },
+  { name: "watchlist_5m",        label: "Watchlist 5m",     cron: "09:30 IST", desc: "Intraday watchlist refresh",                         schedulerJobHint: "watchlist-v2-5m-0930" },
+  { name: "eod_recon",           label: "EOD Recon",        cron: "15:10 IST", desc: "Force-close open positions (3 passes)",              schedulerJobHint: "eod-recon" },
 ];
 
 export default function PipelinePage() {
@@ -47,13 +48,12 @@ export default function PipelinePage() {
 
   const jobStatuses = useMemo(() => {
     return PIPELINE_JOBS.map((job) => {
-      const keyword = job.name.replace(/_/g, "").toLowerCase();
-      const matching = entries.filter(
-        (e) =>
-          e.module?.toLowerCase().replace(/[_\s]/g, "").includes(keyword) ||
-          e.action?.toLowerCase().replace(/[_\s]/g, "").includes(keyword),
+      // Match by schedulerJob substring (from ctx.schedulerJob parsed by backend)
+      const matching = entries.filter((e) =>
+        !!e.scheduler_job && e.scheduler_job.includes(job.schedulerJobHint),
       );
-      const latest = matching[0];
+      // Prefer terminal state (success/error/skipped) over a stale "running" START entry
+      const latest = matching.find((e) => e.status !== "running") ?? matching[0];
       return {
         ...job,
         status: latest?.status ?? "pending",
@@ -74,10 +74,11 @@ export default function PipelinePage() {
     if (status === "ok" || status === "success") return "#22c55e";
     if (status === "running") return "#f59e0b";
     if (status === "error" || status === "failed") return "#ef4444";
+    if (status === "skipped") return "#6366f1";
     return "#374151";
   };
 
-  const passedCount = jobStatuses.filter((j) => j.status === "ok" || j.status === "success").length;
+  const passedCount = jobStatuses.filter((j) => j.status === "ok" || j.status === "success" || j.status === "skipped").length;
   const runningCount = jobStatuses.filter((j) => j.status === "running").length;
 
   const columns: Column<AuditLogEntry>[] = useMemo(
@@ -116,7 +117,9 @@ export default function PipelinePage() {
                 ? "bg-profit/20 text-profit"
                 : r.status === "error" || r.status === "failed"
                   ? "bg-loss/20 text-loss"
-                  : "bg-bg-tertiary text-text-secondary",
+                  : r.status === "skipped"
+                    ? "bg-indigo-500/20 text-indigo-400"
+                    : "bg-bg-tertiary text-text-secondary",
             )}
           >
             {r.status}

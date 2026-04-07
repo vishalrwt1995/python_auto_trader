@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -20,6 +22,68 @@ from autotrader.container import get_container
 from autotrader.time_utils import now_ist
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Firebase token cache — avoid blocking network call on every request
+# ---------------------------------------------------------------------------
+
+_TOKEN_CACHE: dict[str, tuple[dict[str, Any], float]] = {}  # token → (claims, exp_ts)
+_TOKEN_CACHE_LOCK = threading.Lock()
+_TOKEN_CACHE_TTL = 3600  # seconds — re-verify after 1 hour
+
+
+def _cached_verify_firebase_token(id_token: str) -> dict[str, Any]:
+    """Verify a Firebase token, using an in-process cache to avoid a network
+    call on every request.  Cache entries expire after 1 hour."""
+    now = time.time()
+    with _TOKEN_CACHE_LOCK:
+        entry = _TOKEN_CACHE.get(id_token)
+        if entry and now < entry[1]:
+            return entry[0]
+    # Not cached or expired — do the actual verification
+    claims: dict[str, Any] = google.oauth2.id_token.verify_firebase_token(
+        id_token,
+        google.auth.transport.requests.Request(),
+    )
+    exp_ts = now + _TOKEN_CACHE_TTL
+    with _TOKEN_CACHE_LOCK:
+        # Evict stale entries to avoid unbounded growth
+        if len(_TOKEN_CACHE) > 500:
+            stale = [k for k, v in _TOKEN_CACHE.items() if now >= v[1]]
+            for k in stale:
+                del _TOKEN_CACHE[k]
+        _TOKEN_CACHE[id_token] = (claims, exp_ts)
+    return claims
+
+
+# ---------------------------------------------------------------------------
+# Input sanitisation helpers
+# ---------------------------------------------------------------------------
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SAFE_STR_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _safe_date(value: str | None, default: str) -> str:
+    """Return value if it's a valid YYYY-MM-DD date string, else default."""
+    if not value:
+        return default
+    if not _DATE_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {value!r}")
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date value: {value!r}")
+    return value
+
+
+def _safe_str(value: str | None) -> str | None:
+    """Return value only if it contains safe characters, else raise 400."""
+    if value is None:
+        return None
+    if not _SAFE_STR_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid parameter value: {value!r}")
+    return value
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -45,10 +109,7 @@ def verify_firebase_token(
         raise HTTPException(status_code=401, detail="Empty Bearer token")
 
     try:
-        claims: dict[str, Any] = google.oauth2.id_token.verify_firebase_token(
-            id_token,
-            _firebase_request_adapter,
-        )
+        claims: dict[str, Any] = _cached_verify_firebase_token(id_token)
     except Exception as exc:
         logger.warning("Firebase token validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid or expired Firebase token") from exc
@@ -170,12 +231,13 @@ def get_trades_list(
     """Paginated trade list from BQ."""
     c = get_container()
     today = now_ist().strftime("%Y-%m-%d")
-    td = to_date or today
-    fd = from_date or (date.fromisoformat(td) - timedelta(days=30)).isoformat()
+    td = _safe_date(to_date, today)
+    fd = _safe_date(from_date, (date.fromisoformat(td) - timedelta(days=30)).isoformat())
+    strategy_safe = _safe_str(strategy)
 
     where = f"trade_date BETWEEN '{fd}' AND '{td}'"
-    if strategy:
-        where += f" AND strategy = '{strategy}'"
+    if strategy_safe:
+        where += f" AND strategy = '{strategy_safe}'"
 
     q = f"""
         SELECT *
@@ -315,7 +377,9 @@ def get_universe_list(
                 "beta": data.get("beta", 0),
                 "eligible_swing": s,
                 "eligible_intraday": i,
-                "score": data.get("priority"),
+                "universe_score": data.get("universe_score"),       # 0-100 computed indicator score
+                "score_calc": data.get("score_calc", ""),            # E|P|R|M|B|V|O|N|S breakdown string
+                "priority": data.get("priority"),                    # manual priority (legacy field)
                 # Tradability metrics
                 "price_last": data.get("price_last"),
                 "atr_pct_14d": data.get("atr_pct_14d"),
@@ -571,7 +635,7 @@ def get_sector_detail(
 
 def _normalize_status_1d(flag: str) -> str:
     f = (flag or "").upper()
-    if f == "GOOD": return "FRESH"
+    if f in ("GOOD", "FRESH"): return "FRESH"  # "FRESH" was written by an earlier bug; treat as alias
     if f == "STALE": return "STALE"
     if f == "MISSING": return "MISSING"
     if "INVALID" in f: return "INVALID"
@@ -600,16 +664,21 @@ def get_history_summary(user: dict[str, Any] = Depends(verify_firebase_token)) -
         last_5m_dates: list[str] = []
 
         for row in rows:
-            s1d = _normalize_status_1d(row.get("data_quality_flag", ""))
+            # normalize returns uppercase ("FRESH", "STALE"…); store as lowercase to match frontend keys
+            s1d = _normalize_status_1d(row.get("data_quality_flag", "")).lower()
             d1[s1d] = d1.get(s1d, 0) + 1
-            s5m = _normalize_status_5m(row.get("status_5m", ""))
+            s5m = _normalize_status_5m(row.get("status_5m", "")).lower()
             d5[s5m] = d5.get(s5m, 0) + 1
             d = _fmt_date(row.get("last_1d_date"))
             if d: last_1d_dates.append(d)
             d5m = str(row.get("last_5m_date") or "")[:10]
             if d5m: last_5m_dates.append(d5m)
 
-        expected_lcd = max(last_1d_dates) if last_1d_dates else ""
+        # Use system-computed expected LCD (holiday-aware) — don't derive from stale Firestore dates
+        try:
+            expected_lcd = str(c.universe_service()._expected_lcd_context().get("expectedLCD") or "")
+        except Exception:
+            expected_lcd = max(last_1d_dates) if last_1d_dates else ""
         last_5m_run = max(last_5m_dates) if last_5m_dates else ""
         return {
             "total": total,
@@ -620,7 +689,7 @@ def get_history_summary(user: dict[str, Any] = Depends(verify_firebase_token)) -
             "fresh_pct_1d": round(d1["fresh"] / total * 100, 1) if total else 0,
             "fresh_pct_5m": round(d5["fresh"] / total * 100, 1) if total else 0,
             "issues_1d": d1["stale"] + d1["missing"] + d1["invalid"],
-            "issues_5m": d5["stale"] + d5["missing"] + d5["invalid"] + d5["no_data"],
+            "issues_5m": d5["stale"] + d5["missing"] + d5["invalid"] + d5.get("no_data", 0),
         }
     except Exception as exc:
         logger.error("history/summary failed: %s", exc)
@@ -684,27 +753,111 @@ def get_history_symbols(
 # ---------------------------------------------------------------------------
 
 
+def _parse_action_log(text: str) -> dict[str, str] | None:
+    """Parse a log_sink action log line into structured fields.
+
+    Input format (from logger.info):
+      ...log_sink action module=X action=Y status=Z message=... ctx={...} execId=ABC
+    """
+    marker = "action module="
+    idx = text.find(marker)
+    if idx < 0:
+        return None
+    tail = text[idx + len("action module="):]
+
+    # Split off ctx= and execId= from the right (ctx is always a JSON object)
+    idx_ctx = tail.rfind(" ctx=")
+    idx_exec = tail.rfind(" execId=")
+    if idx_ctx < 0 or idx_exec < 0:
+        return None
+
+    header = tail[:idx_ctx]
+    ctx_str = tail[idx_ctx + len(" ctx="):idx_exec].strip()
+    exec_id = tail[idx_exec + len(" execId="):].strip()
+
+    # header looks like: "Universe action=score_refresh status=DONE message=some text here"
+    parts = header.split()
+    module = parts[0] if parts else ""
+    action = status = ""
+    for part in parts[1:]:
+        if part.startswith("action="):
+            action = part[7:]
+        elif part.startswith("status="):
+            status = part[7:]
+
+    # message= is everything after "status=XXX message=" until end of header
+    msg_prefix = f"status={status} message="
+    msg_pos = header.find(msg_prefix)
+    message = header[msg_pos + len(msg_prefix):].strip() if msg_pos >= 0 else ""
+
+    # Extract schedulerJob from ctx JSON so the frontend can match specific scheduled runs
+    scheduler_job = ""
+    try:
+        import json as _json
+        ctx_obj = _json.loads(ctx_str)
+        scheduler_job = ctx_obj.get("schedulerJob", "")
+    except Exception:
+        pass
+
+    # Normalize log_sink status values to what the frontend expects
+    status_map = {"DONE": "success", "START": "running", "ERROR": "error", "SKIP": "skipped", "LOCK_BUSY": "skipped"}
+    status_norm = status_map.get(status.upper(), status.lower())
+
+    return {
+        "module": module,
+        "action": action,
+        "status": status_norm,
+        "message": message,
+        "exec_id": exec_id,
+        "scheduler_job": scheduler_job,
+    }
+
+
 @router.get("/pipeline/status")
 def get_pipeline_status(
     user: dict[str, Any] = Depends(verify_firebase_token),
 ) -> dict[str, Any]:
-    """Recent audit log entries for pipeline monitoring."""
+    """Recent pipeline audit log entries read from Cloud Logging."""
     c = get_container()
     today = now_ist().strftime("%Y-%m-%d")
-    q = f"""
-        SELECT log_ts, module, action, status, message, exec_id
-        FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.audit_log`
-        WHERE run_date = '{today}'
-        ORDER BY log_ts DESC
-        LIMIT 50
-    """
     try:
-        rows = c.bq.query(q)
-        for r in rows:
-            for k, v in r.items():
-                if hasattr(v, "isoformat"):
-                    r[k] = v.isoformat()
-        return {"date": today, "entries": rows}
+        import google.auth
+        import google.auth.transport.requests as ga_requests
+
+        # On Cloud Run, default() returns Compute credentials with cloud-platform scope
+        # which already covers logging.logEntries.list — don't restrict with custom scopes
+        creds, _ = google.auth.default()
+        creds.refresh(ga_requests.Request())
+
+        filter_str = (
+            'resource.type="cloud_run_revision" '
+            'resource.labels.service_name="autotrader" '
+            'textPayload=~"log_sink action module=" '
+            f'timestamp>="{today}T00:00:00+05:30"'
+        )
+        resp = httpx.post(
+            "https://logging.googleapis.com/v2/entries:list",
+            headers={"Authorization": f"Bearer {creds.token}"},
+            json={
+                "resourceNames": [f"projects/{c.settings.gcp.project_id}"],
+                "filter": filter_str,
+                "orderBy": "timestamp desc",
+                "pageSize": 100,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+
+        entries = []
+        for entry in resp.json().get("entries", []):
+            tp = entry.get("textPayload", "")
+            parsed = _parse_action_log(tp)
+            if parsed:
+                # Use Cloud Logging timestamp (UTC ISO) — browser's new Date() handles it fine
+                parsed["log_ts"] = entry.get("timestamp", "")
+                entries.append(parsed)
+
+        return {"date": today, "entries": entries}
     except Exception as exc:
         logger.error("pipeline/status query failed: %s", exc)
         return {"date": today, "entries": [], "error": str(exc)}

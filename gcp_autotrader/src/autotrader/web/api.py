@@ -15,12 +15,19 @@ from autotrader.time_utils import now_ist, now_utc, parse_any_ts
 
 app = FastAPI(title="GCP AutoTrader", version="0.1.0")
 
+_DASHBOARD_ORIGINS = [
+    "https://autotrader-dashboard-147177395303.asia-south1.run.app",
+    # Allow localhost for local development
+    "http://localhost:3000",
+    "http://localhost:3001",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_DASHBOARD_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Job-Token",
+                   "X-CloudScheduler-JobName", "X-CloudScheduler-ScheduleTime"],
 )
 logger = logging.getLogger(__name__)
 
@@ -140,11 +147,7 @@ def _market_brain_response_payload(c, market_state: Any, market_policy: Any) -> 
 
 
 def _write_market_brain_best_effort(c, market_state: Any, market_policy: Any) -> None:
-    try:
-        if hasattr(c.sheets, "write_market_brain_v2"):
-            c.sheets.write_market_brain_v2(market_state, market_policy)
-    except Exception:
-        logger.exception("market_brain_write_failed")
+    pass  # Sheets removed; market brain persisted in Firestore via state.save_market_brain()
 
 
 def _acquire_named_locks(state, names: list[str], *, ttl_seconds: int) -> tuple[list[Any], str | None]:
@@ -215,12 +218,11 @@ def run_bootstrap_sheets(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:
         sink.action("System", "bootstrap_sheets", "START", "", sched_ctx)
-        c.sheets.ensure_core_sheets()
         out = {"ok": True}
         sink.action("System", "bootstrap_sheets", "DONE", "core sheets ensured", {**sched_ctx, **_duration_ctx(started_perf), **out})
         sink.flush_all()
@@ -240,8 +242,7 @@ def run_universe_sync(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:
@@ -265,8 +266,7 @@ def run_raw_universe_refresh(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("raw_universe_refresh", ttl_seconds=1800)
     if lease is None:
@@ -304,8 +304,7 @@ def run_universe_build(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("universe_build", ttl_seconds=1800)
     if lease is None:
@@ -341,7 +340,7 @@ def run_upstox_token_request(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:
@@ -389,8 +388,7 @@ def run_premarket_precompute(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("premarket_precompute", ttl_seconds=3600)
     if lease is None:
@@ -490,8 +488,7 @@ def run_watchlist_refresh(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("watchlist_refresh", ttl_seconds=1800)
     if lease is None:
@@ -596,8 +593,7 @@ def run_score_refresh(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("score_refresh", ttl_seconds=3600)
     if lease is None:
@@ -686,8 +682,7 @@ def run_score_cache_prefetch(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("score_cache_prefetch", ttl_seconds=3600)
     if lease is None:
@@ -730,8 +725,7 @@ def run_score_cache_backfill_full(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("score_cache_backfill_full", ttl_seconds=3600)
     if lease is None:
@@ -774,8 +768,7 @@ def run_score_cache_update_close(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lock_names = ["score_cache_update_close"]
     if run_intraday_update:
@@ -881,8 +874,7 @@ def run_universe_refresh_append_backfill(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lock_names = ["raw_universe_refresh", "universe_build"]
     if run_backfill:
@@ -939,8 +931,8 @@ def run_universe_refresh_append_backfill(
             # Newly appended rows are appended at the bottom of the universe sheet. Prioritize them in the kickoff backfill
             # so the 06:15 chained job updates their history immediately even when api_cap is reached.
             try:
-                universe_rows = c.sheets.read_universe_rows()
-                priority_symbols = [u.symbol for u in universe_rows[-appended:]] if appended <= len(universe_rows) else []
+                all_symbols = list(c.state.get_all_universe_symbols())
+                priority_symbols = all_symbols[-appended:] if appended <= len(all_symbols) else []
             except Exception:
                 priority_symbols = []
         backfill_runs: list[dict[str, Any]] = []
@@ -1039,8 +1031,7 @@ def run_universe_v2_refresh(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lock_names = [
         "universe_v2_refresh",
@@ -1242,8 +1233,7 @@ def run_universe_v2_audit(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:
@@ -1274,8 +1264,7 @@ def run_intraday_cache_backfill_full(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("intraday_cache_backfill_full_5m", ttl_seconds=7200)
     if lease is None:
@@ -1336,8 +1325,7 @@ def run_sector_mapping_refresh(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("sector_mapping_refresh", ttl_seconds=3600)
     if lease is None:
@@ -1393,8 +1381,7 @@ def run_intraday_cache_backfill_appended(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("intraday_cache_backfill_appended_5m", ttl_seconds=7200)
     if lease is None:
@@ -1480,8 +1467,7 @@ def run_intraday_cache_update_close(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     lease = c.state.try_acquire_lock("intraday_cache_update_close_5m", ttl_seconds=7200)
     if lease is None:
@@ -1549,8 +1535,7 @@ def run_eod_close_update_score(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     leases, blocked_lock = _acquire_named_locks(
         c.state,
@@ -1684,8 +1669,7 @@ def run_scan_once(
 ) -> dict[str, Any]:
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    c.sheets.ensure_core_sheets()
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:
@@ -1725,7 +1709,7 @@ def run_eod_position_reconcile(
     """
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    sink = LogSink(c.sheets)
+    sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:

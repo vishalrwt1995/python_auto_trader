@@ -188,10 +188,10 @@ def compute_universe_score_breakdown(ind: IndicatorSnapshot) -> tuple[int, dict[
     if ind.macd.crossed == "BUY":
         parts["M"] += 5
 
-    if ind.near_breakout:
-        parts["B"] += 10
     if ind.breakout:
         parts["B"] += 15
+    elif ind.near_breakout:
+        parts["B"] += 10
     elif ind.dist_from_52w_high < 10:
         parts["B"] += 8
 

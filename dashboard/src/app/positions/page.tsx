@@ -11,10 +11,15 @@ import { api } from "@/lib/api";
 import type { Position, PendingOrder } from "@/lib/types";
 import { AlertTriangle } from "lucide-react";
 
+const LTP_STALE_MS = 5 * 60 * 1000; // 5 minutes
+
 export default function PositionsPage() {
   const positions = useDashboardStore((s) => s.positions);
   const ltpCache = useDashboardStore((s) => s.ltpCache);
+  const ltpUpdatedAt = useDashboardStore((s) => s.ltpUpdatedAt);
   const isAdmin = useAuthStore((s) => s.isAdmin);
+
+  const isLtpStale = ltpUpdatedAt > 0 && Date.now() - ltpUpdatedAt > LTP_STALE_MS;
   const { data: pendingOrders } = usePendingOrders();
 
   const [paperMode, setPaperMode] = useState(true);
@@ -291,6 +296,14 @@ export default function PositionsPage() {
           )}
         </div>
       </div>
+
+      {/* LTP Staleness Warning */}
+      {isLtpStale && (
+        <div className="flex items-center gap-2 text-xs text-neutral bg-neutral/10 border border-neutral/20 rounded px-3 py-2">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          LTP data is stale (last updated over 5 minutes ago). Unrealized P&amp;L may be inaccurate.
+        </div>
+      )}
 
       {/* Active Positions */}
       <section>

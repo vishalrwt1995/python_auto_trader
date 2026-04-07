@@ -135,21 +135,50 @@ def migrate_universe(
                 pass
         instrument_key = r.get("instrument key", "") or raw_json.get("instrument_key", "")
         payload: dict[str, Any] = {
+            # --- Identity ---
             "symbol": symbol,
             "exchange": r.get("exchange", "NSE"),
             "segment": r.get("segment", "CASH"),
+            "security_type": r.get("security type", "EQ"),
+            "isin": raw_json.get("isin", ""),
+            "canonical_id": r.get("canonical id", ""),
+            "primary_exchange": r.get("primary exchange", ""),
+            "secondary_exchange": r.get("secondary exchange", ""),
+            "secondary_instrument_key": r.get("secondary instrument key", ""),
+            # --- Trading config ---
             "allowed_product": r.get("allowed product", "BOTH"),
             "strategy_pref": r.get("strategy", "AUTO"),
-            "sector": r.get("sector", ""),
-            "beta": _safe_float(r.get("beta")),
             "enabled": _safe_bool(r.get("enabled"), default=True),
             "priority": _safe_float(r.get("priority")),
             "notes": r.get("notes", ""),
             "provider": r.get("data provider", "upstox"),
             "instrument_key": instrument_key,
             "source_segment": r.get("source segment", ""),
-            "security_type": r.get("security type", "EQ"),
-            "isin": raw_json.get("isin", ""),
+            # --- Sector ---
+            "sector": r.get("sector", ""),
+            "sector_source": r.get("sector source", ""),
+            "sector_updated_at": _parse_ts(r.get("sector updated at")),
+            # --- Risk ---
+            "beta": _safe_float(r.get("beta")),
+            # --- Tradability metrics ---
+            "bars_1d": _safe_int(r.get("bars 1d")),
+            "last_1d_date": _parse_ts(r.get("last 1d date")),
+            "price_last": _safe_float(r.get("price last")),
+            "turnover_med_60d": _safe_float(r.get("turnover med 60d")),
+            "atr_14": _safe_float(r.get("atr 14")),
+            "atr_pct_14d": _safe_float(r.get("atr pct 14d")),
+            "gap_risk_60d": _safe_float(r.get("gap risk 60d")),
+            "turnover_rank_60d": _safe_int(r.get("turnover rank 60d")),
+            "liquidity_bucket": r.get("liquidity bucket", ""),
+            # --- Data quality ---
+            "data_quality_flag": r.get("data quality flag", ""),
+            "stale_days": _safe_int(r.get("stale days")),
+            # --- Eligibility ---
+            "eligible_swing": _safe_bool(r.get("eligible swing")),
+            "eligible_intraday": _safe_bool(r.get("eligible intraday")),
+            "disable_reason": r.get("disable reason", ""),
+            "universe_mode": r.get("universe mode", ""),
+            "universe_v2_updated_at": _parse_ts(r.get("universe v2 updated at")),
         }
         logger.info("  universe %s", symbol)
         if not dry_run:

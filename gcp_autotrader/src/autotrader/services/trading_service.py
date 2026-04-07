@@ -71,12 +71,11 @@ class TradingService:
                     logger.debug("watchlist_read_source=firestore count=%d", len(rows))
                     return rows
         except Exception:
-            logger.warning("firestore_watchlist_read_failed — falling back to Sheets", exc_info=True)
-        logger.debug("watchlist_read_source=sheets")
-        return self.sheets.read_watchlist()
+            logger.warning("firestore_watchlist_read_failed", exc_info=True)
+        return rows
 
     def _read_universe_instrument_keys(self, symbol_set: set[str]) -> dict[str, str]:
-        """Return {symbol: instrument_key} — Firestore primary, Sheets fallback."""
+        """Return {symbol: instrument_key} from Firestore."""
         result: dict[str, str] = {}
         try:
             universe_rows = self.state.list_universe(limit=3000)
@@ -85,20 +84,9 @@ class TradingService:
                 ik = str(row.get("instrument_key", "") or "").strip()
                 if sym and ik and sym in symbol_set:
                     result[sym] = ik
-            if result:
-                logger.debug("universe_key_map_source=firestore count=%d", len(result))
-                return result
+            logger.debug("universe_key_map_source=firestore count=%d", len(result))
         except Exception:
-            logger.warning("firestore_universe_read_failed — falling back to Sheets", exc_info=True)
-        # Sheets fallback
-        try:
-            for u in self.sheets.read_universe_rows():
-                sym = str(u.symbol or "").strip().upper()
-                ik = str(u.instrument_key or "").strip()
-                if sym and ik and sym in symbol_set:
-                    result[sym] = ik
-        except Exception:
-            logger.warning("sheets_universe_read_failed", exc_info=True)
+            logger.warning("firestore_universe_read_failed", exc_info=True)
         return result
 
     @staticmethod
@@ -239,11 +227,6 @@ class TradingService:
                 return {"skipped": "market_brain_v2_unavailable"}
 
             regime = MarketRegimeService.from_market_brain_state(brain_state)
-            try:
-                if hasattr(self.sheets, "write_market_brain_v2"):
-                    self.sheets.write_market_brain_v2(brain_state, market_policy)
-            except Exception:
-                logger.exception("market_brain_write_failed")
             self.log_sink.decision(
                 "REGIME",
                 "NIFTY",
@@ -350,7 +333,7 @@ class TradingService:
                     continue
                 direction = determine_direction(ind, regime)
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy)
-                adjusted_score = int(self.market_brain_service.adjust_signal(meta.score, brain_state))
+                adjusted_score = max(0, min(100, int(self.market_brain_service.adjust_signal(meta.score, brain_state))))
                 ltp = ind.close
                 pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy)
                 setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
@@ -458,11 +441,9 @@ class TradingService:
 
                 time.sleep(0.08)
 
-            self.sheets.replace_scan_rows(scan_rows)
             run_ts = now_ist_str()
             self.state.set_runtime_prop("runtime:scanner_last_run_ts", run_ts)
             if signal_rows:
-                self.sheets.append_signals(signal_rows)
                 self.state.set_runtime_prop("runtime:signals_last_write_ts", run_ts)
             # Publish signals to Pub/Sub + BigQuery (best-effort)
             if bq_signals:

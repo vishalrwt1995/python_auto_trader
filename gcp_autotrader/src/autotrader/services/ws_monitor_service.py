@@ -47,7 +47,7 @@ def _ist_minutes_now() -> int:
 class WsMonitorService:
     """Real-time position monitor via Upstox WebSocket."""
 
-    POSITION_REFRESH_INTERVAL = 60  # seconds
+    POSITION_REFRESH_INTERVAL = 15  # seconds — reduced from 60 to catch new positions faster
 
     def __init__(
         self,

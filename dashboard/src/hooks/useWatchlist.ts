@@ -6,22 +6,31 @@ import { useDashboardStore } from "@/stores/dashboardStore";
 import type { WatchlistDoc, WatchlistRow } from "@/lib/types";
 
 /**
- * Firestore watchlist rows use lowercase keys (setuplabel, confidence, pricelast, etc.)
+ * Firestore watchlist rows use lowercase keys (setuplabel, confidence, wlType, etc.)
  * while the dashboard WatchlistRow interface uses snake_case (setup, score, beta, etc.).
- * This mapper bridges the two.
+ * wlType = "swing" | "intraday" — written by build_watchlist() Firestore path.
  */
 function mapRow(raw: Record<string, unknown>): WatchlistRow {
+  const wlType = String(raw.wlType ?? "");
+  const source = String(raw.source ?? "");
+  const setupLabel = String(raw.setuplabel ?? raw.setup ?? raw.setupLabel ?? "");
   return {
     symbol: String(raw.symbol ?? ""),
     exchange: String(raw.exchange ?? ""),
     enabled: String(raw.enabled ?? ""),
-    setup: String(raw.setuplabel ?? raw.setup ?? ""),
+    setup: setupLabel,
     sector: String(raw.sector ?? ""),
+    macro_sector: String(raw.macroSector ?? raw.macro_sector ?? ""),
     beta: 0, // not available in current pipeline output
-    reason: String(raw.reason ?? ""),
+    reason: String(raw.reason ?? setupLabel),
     score: Number(raw.confidence ?? raw.score ?? 0),
-    eligible_swing: String(raw.source ?? "").includes("DAILY") || String(raw.phase2eligibility ?? "") === "Y",
-    eligible_intraday: String(raw.intradayscorev2 ?? "0") !== "0" && Number(raw.intradayscorev2 ?? 0) > 50,
+    wl_type: wlType || (source.includes("SWING") ? "swing" : "intraday"),
+    vwap_bias: raw.vwapBias != null ? String(raw.vwapBias) : undefined,
+    liquidity_bucket: raw.liquidityBucket != null ? String(raw.liquidityBucket) : undefined,
+    turnover_rank: raw.turnoverRank60D != null ? Number(raw.turnoverRank60D) : null,
+    phase2_eligible: String(raw.phase2eligibility ?? "") === "Y",
+    eligible_swing: wlType === "swing" || source.includes("SWING"),
+    eligible_intraday: wlType === "intraday" || (wlType === "" && !source.includes("SWING")),
   };
 }
 

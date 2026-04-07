@@ -59,13 +59,16 @@ export default function AnalyticsPage() {
       .map(([month, pnl]) => ({ month, pnl }));
   }, [trades]);
 
-  // Weekly P&L
+  // Weekly P&L — use IST date and Monday-based week
   const weeklyPnl = useMemo(() => {
     const map: Record<string, number> = {};
     trades.forEach((t) => {
-      const d = new Date(t.trade_date);
+      // trade_date is already YYYY-MM-DD in IST from backend
+      const d = new Date(t.trade_date + "T00:00:00");
+      const day = d.getDay(); // 0=Sun … 6=Sat
+      const diff = day === 0 ? -6 : 1 - day; // shift to Monday
       const weekStart = new Date(d);
-      weekStart.setDate(d.getDate() - d.getDay());
+      weekStart.setDate(d.getDate() + diff);
       const key = weekStart.toISOString().split("T")[0];
       map[key] = (map[key] ?? 0) + t.pnl;
     });
@@ -103,12 +106,15 @@ export default function AnalyticsPage() {
     return { maxWin, maxLoss };
   }, [trades]);
 
-  // Hourly distribution
+  // Hourly distribution — convert entry_ts to IST before extracting hour
   const hourlyDist = useMemo(() => {
     const hours: Record<number, { count: number; pnl: number }> = {};
     trades.forEach((t) => {
       if (!t.entry_ts) return;
-      const h = new Date(t.entry_ts).getHours();
+      const istDate = new Date(
+        new Date(t.entry_ts).toLocaleString("en-US", { timeZone: "Asia/Kolkata" }),
+      );
+      const h = istDate.getHours();
       if (!hours[h]) hours[h] = { count: 0, pnl: 0 };
       hours[h].count++;
       hours[h].pnl += t.pnl;

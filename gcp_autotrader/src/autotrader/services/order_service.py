@@ -19,6 +19,21 @@ from autotrader.time_utils import now_ist_str, now_utc_iso, today_ist
 logger = logging.getLogger(__name__)
 
 
+def _bq_insert_with_retry(bq: BigQueryClient, trade_row: dict[str, Any], tag: str, max_attempts: int = 3) -> None:
+    """Insert a trade row to BigQuery with exponential backoff retries."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            bq.insert_trade(trade_row)
+            return
+        except Exception:
+            if attempt < max_attempts:
+                wait = 2 ** attempt
+                logger.warning("bq_trade_insert_retry tag=%s attempt=%d wait=%ds", tag, attempt, wait)
+                time.sleep(wait)
+            else:
+                logger.error("bq_trade_insert_failed_permanent tag=%s after %d attempts", tag, max_attempts)
+
+
 def make_ref_id() -> str:
     ts = format(int(time.time() * 1000), "x")[-6:].upper()
     rand = "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(3))
@@ -52,16 +67,10 @@ class OrderService:
     # ------------------------------------------------------------------ #
 
     def _append_order_log_sheets(self, row: list[Any]) -> None:
-        try:
-            self.sheets.append_orders([row])
-        except Exception:
-            logger.warning("sheets_order_log_failed — non-critical, continuing")
+        pass  # Sheets removed; orders persisted in Firestore
 
     def _append_position_sheets(self, row: list[Any]) -> None:
-        try:
-            self.sheets.append_positions([row])
-        except Exception:
-            logger.warning("sheets_position_append_failed — non-critical, continuing")
+        pass  # Sheets removed; positions persisted in Firestore
 
     def _extract_order_snapshot(self, order_id: str, ref_id: str) -> dict[str, Any] | None:
         """Find an order by order_id or ref_id from today's Upstox order list."""
@@ -195,33 +204,30 @@ class OrderService:
         if self.pubsub:
             closed_doc = {**(self.state.get_position(position_tag) or {}), "exit_price": round(exit_price, 2), "exit_reason": exit_reason}
             self.pubsub.publish_position_closed(closed_doc)
-        # Write completed trade to BigQuery (best-effort)
-        try:
-            entry_ts_raw = str(pos.get("entry_ts") or "")
-            self.bq.insert_trade({
-                "trade_date": today_ist(),
-                "position_tag": position_tag,
-                "symbol": str(pos.get("symbol") or ""),
-                "side": side,
-                "qty": qty,
-                "entry_price": entry_price,
-                "exit_price": round(exit_price, 2),
-                "sl_price": float(pos.get("sl_price") or 0),
-                "target": float(pos.get("target") or 0),
-                "pnl": pnl,
-                "pnl_pct": round(pnl / (entry_price * qty) * 100, 4) if entry_price and qty else 0.0,
-                "exit_reason": exit_reason,
-                "strategy": str(pos.get("strategy") or ""),
-                "entry_ts": entry_ts_raw,
-                "exit_ts": exit_ts,
-                "hold_minutes": 0,
-                "regime": str(pos.get("regime") or ""),
-                "risk_mode": str(pos.get("risk_mode") or ""),
-                "market_confidence": 0.0,
-                "signal_score": int(pos.get("signal_score") or 0),
-            })
-        except Exception:
-            logger.warning("bq_trade_insert_failed tag=%s — non-critical", position_tag)
+        # Write completed trade to BigQuery — retry up to 3 times to reduce data gaps
+        trade_row = {
+            "trade_date": today_ist(),
+            "position_tag": position_tag,
+            "symbol": str(pos.get("symbol") or ""),
+            "side": side,
+            "qty": qty,
+            "entry_price": entry_price,
+            "exit_price": round(exit_price, 2),
+            "sl_price": float(pos.get("sl_price") or 0),
+            "target": float(pos.get("target") or 0),
+            "pnl": pnl,
+            "pnl_pct": round(pnl / (entry_price * qty) * 100, 4) if entry_price and qty else 0.0,
+            "exit_reason": exit_reason,
+            "strategy": str(pos.get("strategy") or ""),
+            "entry_ts": str(pos.get("entry_ts") or ""),
+            "exit_ts": exit_ts,
+            "hold_minutes": 0,
+            "regime": str(pos.get("regime") or ""),
+            "risk_mode": str(pos.get("risk_mode") or ""),
+            "market_confidence": 0.0,
+            "signal_score": int(pos.get("signal_score") or 0),
+        }
+        _bq_insert_with_retry(self.bq, trade_row, position_tag)
 
     # ------------------------------------------------------------------ #
     # Entry order

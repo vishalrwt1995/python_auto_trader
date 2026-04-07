@@ -15,26 +15,11 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { InfoBadge } from "@/components/shared/Tooltip";
 
-// ── InfoTooltip ───────────────────────────────────────────────────────────────
-
+// InfoTooltip → now uses shared InfoBadge
 function InfoTooltip({ text }: { text: string }) {
-  return (
-    <span className="relative group inline-flex ml-1 align-middle">
-      <span className="w-3.5 h-3.5 rounded-full bg-bg-tertiary text-[9px] font-bold inline-flex items-center justify-center cursor-help text-text-secondary border border-bg-tertiary leading-none select-none">
-        ?
-      </span>
-      <span
-        className={cn(
-          "absolute z-50 top-full left-0 mt-1 w-56 p-2.5",
-          "bg-gray-950 border border-gray-700 rounded-lg text-[11px] text-text-secondary leading-relaxed",
-          "opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-150 shadow-xl whitespace-normal",
-        )}
-      >
-        {text}
-      </span>
-    </span>
-  );
+  return <InfoBadge text={text} />;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -134,7 +119,8 @@ function LiqBar({ row }: { row: SectorRow }) {
 // ── Sector Card ───────────────────────────────────────────────────────────────
 
 function SectorCard({ row, onClick }: { row: SectorRow; onClick: () => void }) {
-  const eligible = Math.max(row.eligible_swing, row.eligible_intraday);
+  // Union: symbols eligible for swing OR intraday (avoid double-counting symbols in both)
+  const eligible = row.eligible_swing + row.eligible_intraday - (row.both ?? 0);
 
   return (
     <button

@@ -630,7 +630,11 @@ class MarketBrainService:
 
         if prev.regime == "PANIC":
             if regime != "PANIC":
-                if volatility_stress_score > 65.0 or breadth_score < 35.0 or data_quality_score < 45.0:
+                # Only market-structure signals gate PANIC exit.
+                # data_quality_score is excluded here: in PANIC/LOCKDOWN no scanner runs,
+                # which structurally collapses data_quality via stale-writer penalties —
+                # creating a self-reinforcing lock that prevents PANIC from ever clearing.
+                if volatility_stress_score > 65.0 or breadth_score < 35.0:
                     return "PANIC"
         if prev.regime == "TREND_UP" and regime != "TREND_UP":
             if trend_score >= 60.0 and breadth_score >= 55.0 and leadership_score >= 50.0:

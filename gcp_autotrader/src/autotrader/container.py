@@ -93,7 +93,7 @@ class AppContainer:
         self._trading_service: TradingService | None = None
 
     def log_sink(self) -> LogSink:
-        return LogSink(self.sheets)
+        return LogSink()
 
     def regime_service(self) -> MarketRegimeService:
         if self._regime_service is None:
