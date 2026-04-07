@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useAuthStore } from "@/stores/authStore";
 
 const NAV = [
   { id: "/", icon: "⚡", label: "Command Center" },
@@ -22,10 +21,8 @@ const NAV = [
 
 export function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
   const voiceEnabled = useSettingsStore((s) => s.voiceEnabled);
   const toggleVoice = useSettingsStore((s) => s.toggleVoice);
-  const logout = useAuthStore((s) => s.logout);
 
   return (
     <aside
@@ -37,9 +34,6 @@ export function Sidebar() {
         <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -0.5 }}>
           <span style={{ color: "#3b82f6" }}>Smart</span>
           <span style={{ color: "#e2e8f0" }}>Trader</span>
-        </div>
-        <div style={{ fontSize: 10, color: "#475569", marginTop: 2, letterSpacing: 1, textTransform: "uppercase" }}>
-          GCP Dashboard v1
         </div>
       </div>
 
@@ -101,29 +95,6 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Logout */}
-      <div style={{ padding: "8px 16px 12px", borderTop: "1px solid #1e293b" }}>
-        <button
-          onClick={() => { logout(); router.push("/login"); }}
-          style={{
-            width: "100%",
-            padding: "8px 12px",
-            borderRadius: 8,
-            border: "none",
-            background: "transparent",
-            color: "#ef4444",
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: "pointer",
-            textAlign: "left",
-            transition: "background 0.15s",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = "#ef444418")}
-          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-        >
-          🚪 Sign Out
-        </button>
-      </div>
     </aside>
   );
 }
