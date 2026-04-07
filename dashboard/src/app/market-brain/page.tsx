@@ -21,7 +21,8 @@ export default function MarketBrainPage() {
     { label: "Trend", current: brain.trend_score },
     { label: "Breadth", current: brain.breadth_score },
     { label: "Leadership", current: brain.leadership_score },
-    { label: "Vol Stress", current: brain.volatility_stress_score },
+    // Vol Stress is inverted: higher stress = worse, so display as calmness (100 - stress)
+    { label: "Vol Calm", current: Math.max(0, 100 - brain.volatility_stress_score) },
     { label: "Liquidity", current: brain.liquidity_health_score },
     { label: "Data Quality", current: brain.data_quality_score },
   ];
@@ -185,23 +186,3 @@ function StateField({ label, value }: { label: string; value: string }) {
   );
 }
 
-function BiasSlider({ label, value }: { label: string; value: number }) {
-  const pct = Math.min(100, Math.max(0, (value ?? 0) * 100));
-  return (
-    <div>
-      <div className="flex justify-between mb-1">
-        <span className="text-text-secondary text-xs">{label}</span>
-        <span className="text-xs font-mono">{value?.toFixed(2)}</span>
-      </div>
-      <div className="w-full h-2 bg-bg-tertiary rounded-full overflow-hidden">
-        <div
-          className={cn(
-            "h-full rounded-full transition-all duration-500",
-            pct > 70 ? "bg-profit" : pct > 40 ? "bg-neutral" : "bg-loss",
-          )}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-    </div>
-  );
-}

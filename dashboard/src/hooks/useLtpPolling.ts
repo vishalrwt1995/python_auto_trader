@@ -26,9 +26,11 @@ export function useLtpPolling() {
       if (symbols.length === 0) return;
 
       try {
-        const data = await api.getLtp(symbols);
-        if (data && typeof data === "object") {
-          updateLtp(data);
+        const resp = await api.getLtp(symbols);
+        // Backend returns { prices: { SYMBOL: ltp } } — unwrap the prices map
+        const prices = (resp as unknown as { prices: Record<string, number> }).prices ?? resp;
+        if (prices && typeof prices === "object") {
+          updateLtp(prices as Record<string, number>);
         }
       } catch {
         // Silently ignore — will retry next interval

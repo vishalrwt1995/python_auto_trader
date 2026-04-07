@@ -26,9 +26,16 @@ import {
 const NEXT_JOBS = [
   { name: "Universe Refresh", cron: "06:15" },
   { name: "Score Cache", cron: "07:05" },
+  { name: "Score Cache 2", cron: "07:40" },
   { name: "Score Refresh", cron: "08:30" },
   { name: "Premarket Watchlist", cron: "09:00" },
   { name: "Scanner Start", cron: "09:20" },
+  { name: "Watchlist 09:30", cron: "09:30" },
+  { name: "Watchlist 10:00", cron: "10:00" },
+  { name: "Watchlist 10:45", cron: "10:45" },
+  { name: "Watchlist 11:00", cron: "11:00" },
+  { name: "Watchlist 13:00", cron: "13:00" },
+  { name: "Final Watchlist", cron: "14:45" },
   { name: "EOD Recon", cron: "15:10" },
 ];
 

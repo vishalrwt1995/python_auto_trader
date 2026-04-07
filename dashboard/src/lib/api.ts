@@ -94,7 +94,7 @@ export const api = {
     api.get<unknown[]>(`/dashboard/candles/${symbol}?interval=${interval}&days=${days}`),
 
   getLtp: (symbols: string[]) =>
-    api.get<Record<string, number>>(`/dashboard/ltp?symbols=${symbols.join(",")}`),
+    api.get<{ prices: Record<string, number> }>(`/dashboard/ltp?symbols=${symbols.join(",")}`),
 
   getUpstoxHealth: () => api.get<Record<string, unknown>>("/dashboard/health/upstox"),
 
