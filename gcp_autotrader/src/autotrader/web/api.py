@@ -1761,3 +1761,13 @@ def get_position_status(
         stat_upper = status.strip().upper()
         positions = [p for p in positions if str(p.get("status", "")).upper() == stat_upper]
     return {"count": len(positions), "positions": positions}
+
+
+@app.post("/jobs/bq-backfill-candles-1d")
+def run_bq_backfill_candles_1d(
+    x_job_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Backfill candles_1d BQ table from GCS score_1d cache files."""
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    return c.universe_service().backfill_candles_1d_to_bq()

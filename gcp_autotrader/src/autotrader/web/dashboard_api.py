@@ -224,6 +224,7 @@ def get_trades_list(
     from_date: str | None = Query(default=None, alias="from"),
     to_date: str | None = Query(default=None, alias="to"),
     strategy: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict[str, Any] = Depends(verify_firebase_token),
@@ -234,10 +235,13 @@ def get_trades_list(
     td = _safe_date(to_date, today)
     fd = _safe_date(from_date, (date.fromisoformat(td) - timedelta(days=30)).isoformat())
     strategy_safe = _safe_str(strategy)
+    symbol_safe = _safe_str(symbol)
 
     where = f"trade_date BETWEEN '{fd}' AND '{td}'"
     if strategy_safe:
         where += f" AND strategy = '{strategy_safe}'"
+    if symbol_safe:
+        where += f" AND UPPER(symbol) = '{symbol_safe.upper()}'"
 
     q = f"""
         SELECT *
@@ -294,6 +298,28 @@ def get_signals_today(
     except Exception as exc:
         logger.error("signals/today query failed: %s", exc)
         return {"date": today, "signals": [], "error": str(exc)}
+
+
+@router.get("/scan/latest")
+def get_scan_latest(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Latest scan audit trail from Firestore — every scanned symbol with direction,
+    score, and reason. Updated after each scan run (every 5 min during market hours)."""
+    c = get_container()
+    try:
+        doc = c.state.get_json("scan_results", "latest")
+        if not doc:
+            return {"rows": [], "scanned": 0, "qualified": 0, "regime": "", "risk_mode": "", "scan_ts": ""}
+        # Sanitize timestamps
+        for k in ("scan_ts", "updated_at"):
+            v = doc.get(k)
+            if v is not None and hasattr(v, "isoformat"):
+                doc[k] = v.isoformat()
+        return doc
+    except Exception as exc:
+        logger.error("scan/latest query failed: %s", exc)
+        return {"rows": [], "scanned": 0, "qualified": 0, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -864,8 +890,150 @@ def get_pipeline_status(
 
 
 # ---------------------------------------------------------------------------
+# Symbol detail (aggregated single-call endpoint)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/symbol/{symbol}")
+def get_symbol_detail(
+    symbol: str,
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Aggregated symbol detail: universe + watchlist + position + signals + recent trades."""
+    c = get_container()
+    sym = symbol.upper().strip()
+    today = now_ist().strftime("%Y-%m-%d")
+    from_d = (date.fromisoformat(today) - timedelta(days=365)).isoformat()
+
+    # 1. Universe row from Firestore
+    universe_row: dict[str, Any] = {}
+    try:
+        row = c.state.get_universe_row(sym)
+        if row:
+            universe_row = {k: v for k, v in row.items() if not hasattr(v, "read")}
+    except Exception:
+        logger.warning("symbol_detail universe read failed sym=%s", sym, exc_info=True)
+
+    # 2. Watchlist entry (scan latest watchlist doc)
+    watchlist_entry: dict[str, Any] | None = None
+    try:
+        wl = c.state.get_watchlist()
+        if wl:
+            rows = wl.get("rows", [])
+            for r in rows:
+                if str(r.get("symbol", "")).upper() == sym:
+                    watchlist_entry = {k: v for k, v in r.items() if not hasattr(v, "read")}
+                    break
+    except Exception:
+        logger.warning("symbol_detail watchlist read failed sym=%s", sym, exc_info=True)
+
+    # 3. Open position (filter in memory)
+    position: dict[str, Any] | None = None
+    try:
+        positions = c.state.list_open_positions()
+        for p in positions:
+            if str(p.get("symbol", "")).upper() == sym:
+                position = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in p.items()}
+                break
+    except Exception:
+        logger.warning("symbol_detail position read failed sym=%s", sym, exc_info=True)
+
+    # 4. Today's signals for this symbol from BQ
+    signals_today: list[dict] = []
+    try:
+        q = f"""
+            SELECT *
+            FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.signals`
+            WHERE run_date = '{today}' AND UPPER(symbol) = '{sym}'
+            ORDER BY scan_ts DESC
+            LIMIT 20
+        """
+        rows = c.bq.query(q)
+        for r in rows:
+            for k, v in r.items():
+                if hasattr(v, "isoformat"):
+                    r[k] = v.isoformat()
+        signals_today = rows
+    except Exception:
+        logger.warning("symbol_detail signals query failed sym=%s", sym, exc_info=True)
+
+    # 5. Recent trades for this symbol from BQ (last 12 months)
+    recent_trades: list[dict] = []
+    try:
+        q = f"""
+            SELECT *
+            FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
+            WHERE UPPER(symbol) = '{sym}' AND trade_date BETWEEN '{from_d}' AND '{today}'
+            ORDER BY trade_date DESC, entry_ts DESC
+            LIMIT 50
+        """
+        rows = c.bq.query(q)
+        for r in rows:
+            for k, v in r.items():
+                if hasattr(v, "isoformat"):
+                    r[k] = v.isoformat()
+        recent_trades = rows
+    except Exception:
+        logger.warning("symbol_detail trades query failed sym=%s", sym, exc_info=True)
+
+    return {
+        "symbol": sym,
+        "universe": universe_row,
+        "watchlist": watchlist_entry,
+        "position": position,
+        "signals_today": signals_today,
+        "recent_trades": recent_trades,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Market data
 # ---------------------------------------------------------------------------
+
+
+def _gcs_candles_1d_fallback(c: Any, symbol: str, from_d: str, today: str) -> list[dict]:
+    """Read daily candles from GCS score cache when BQ is empty.
+
+    Tries NSE/CASH, NSE/EQ, then BSE/CASH in order.
+    Raw format per candle: [iso_ts, open, high, low, close, volume]
+    """
+    sym = symbol.upper()
+    candidate_paths = [
+        f"cache/score_1d/NSE/CASH/{sym}.json",
+        f"cache/score_1d/NSE/EQ/{sym}.json",
+        f"cache/score_1d/BSE/CASH/{sym}.json",
+    ]
+    raw: list[list] = []
+    for path in candidate_paths:
+        try:
+            data = c.gcs.read_candles(path)
+            if data:
+                raw = data
+                break
+        except Exception:
+            continue
+
+    if not raw:
+        return []
+
+    rows: list[dict] = []
+    for candle in raw:
+        try:
+            ts_str = str(candle[0])
+            trade_date = ts_str[:10]  # "YYYY-MM-DD"
+            if trade_date < from_d or trade_date > today:
+                continue
+            rows.append({
+                "time": trade_date,
+                "open": float(candle[1]),
+                "high": float(candle[2]),
+                "low": float(candle[3]),
+                "close": float(candle[4]),
+                "volume": float(candle[5]) if len(candle) > 5 else 0.0,
+            })
+        except Exception:
+            continue
+    return rows
 
 
 @router.get("/candles/{symbol}")
@@ -875,7 +1043,7 @@ def get_candles(
     days: int = Query(default=90, ge=1, le=365),
     user: dict[str, Any] = Depends(verify_firebase_token),
 ) -> dict[str, Any]:
-    """Candle data from BQ for charting."""
+    """Candle data for charting. BQ primary, GCS score cache fallback for 1d."""
     c = get_container()
     table = "candles_1d" if interval in ("1d", "day", "daily") else "candles_5m"
     today = now_ist().strftime("%Y-%m-%d")
@@ -886,6 +1054,7 @@ def get_candles(
             SELECT trade_date as time, open, high, low, close, volume
             FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.{table}`
             WHERE symbol = '{symbol}' AND trade_date BETWEEN '{from_d}' AND '{today}'
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY trade_date ORDER BY trade_date) = 1
             ORDER BY trade_date
         """
     else:
@@ -902,6 +1071,13 @@ def get_candles(
             for k, v in r.items():
                 if hasattr(v, "isoformat"):
                     r[k] = v.isoformat()
+
+        # BQ empty → fall back to GCS score cache for daily candles
+        if not rows and table == "candles_1d":
+            rows = _gcs_candles_1d_fallback(c, symbol, from_d, today)
+            if rows:
+                logger.info("candles_gcs_fallback symbol=%s rows=%d", symbol, len(rows))
+
         return {"symbol": symbol, "interval": interval, "candles": rows}
     except Exception as exc:
         logger.error("candles query failed: %s", exc)
@@ -1065,6 +1241,40 @@ def get_paper_mode(
     return {"paper_trade": c.settings.runtime.paper_trade}
 
 
+@router.get("/config/settings")
+def get_settings(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Return all live strategy + runtime settings for the Settings page."""
+    c = get_container()
+    s = c.settings.strategy
+    r = c.settings.runtime
+    return {
+        "capital": s.capital,
+        "risk_per_trade": s.risk_per_trade,
+        "max_daily_loss": s.max_daily_loss,
+        "daily_profit_target": s.daily_profit_target,
+        "max_trades_day": s.max_trades_day,
+        "max_positions": s.max_positions,
+        "min_signal_score": s.min_signal_score,
+        "atr_sl_mult": s.atr_sl_mult,
+        "rr_intraday": s.rr_intraday,
+        "ema_fast": s.ema_fast,
+        "ema_med": s.ema_med,
+        "ema_slow": s.ema_slow,
+        "rsi_period": s.rsi_period,
+        "rsi_buy_min": s.rsi_buy_min,
+        "rsi_buy_max": s.rsi_buy_max,
+        "rsi_sell_min": s.rsi_sell_min,
+        "rsi_sell_max": s.rsi_sell_max,
+        "vol_mult": s.vol_mult,
+        "vix_safe_max": s.vix_safe_max,
+        "pcr_bull_min": s.pcr_bull_min,
+        "pcr_bear_max": s.pcr_bear_max,
+        "paper_trade": r.paper_trade,
+    }
+
+
 _JOB_TOKEN = os.environ.get("JOB_TRIGGER_TOKEN", "")
 
 # Maps dashboard job names → internal job endpoint path + query params
@@ -1123,3 +1333,21 @@ def post_admin_force_token_refresh(
     except Exception as exc:
         logger.error("force-token-refresh failed: %s", exc)
         return {"status": "error", "error": str(exc)}
+
+
+@router.post("/admin/backfill-candles-1d")
+def post_admin_backfill_candles_1d(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Backfill candles_1d BQ table from GCS score_1d cache. Runs in background."""
+    c = get_container()
+
+    def _run() -> None:
+        try:
+            result = c.universe_service().backfill_candles_1d_to_bq()
+            logger.info("admin_backfill_candles_1d_done result=%s", result)
+        except Exception:
+            logger.error("admin_backfill_candles_1d_failed", exc_info=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "message": "Backfill running in background — check server logs for progress"}

@@ -138,6 +138,39 @@ export interface Signal {
   scanner_run_id: string;
 }
 
+/* ── Scan audit row (from Firestore scan_results/latest) ── */
+export interface ScanRow {
+  symbol: string;
+  ltp: number;
+  changePct: number;
+  volRatio: number;
+  direction: string;    // BUY | SELL | HOLD | SKIP
+  score: number;
+  emaState: string;
+  rsi: number;
+  macdView: string;
+  supertrend: string;
+  setup: string;
+  vwap?: number;
+  sl?: number;
+  target?: number;
+  qty?: number;
+  status: string;       // qualified | filtered | skip
+  reason: string;
+}
+
+export interface ScanLatest {
+  scan_ts: string;
+  run_date: string;
+  scanner_run_id: string;
+  regime: string;
+  risk_mode: string;
+  total_watchlist: number;
+  scanned: number;
+  qualified: number;
+  rows: ScanRow[];
+}
+
 /* ── Trades (from BQ via API) ── */
 
 export interface Trade {

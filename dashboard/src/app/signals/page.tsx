@@ -1,112 +1,126 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
-import { cn, formatTime } from "@/lib/utils";
-import type { Signal } from "@/lib/types";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  ScatterChart,
-  Scatter,
-} from "recharts";
+import { cn } from "@/lib/utils";
+import type { ScanLatest, ScanRow } from "@/lib/types";
 
-const PIE_COLORS = ["#22c55e", "#ef4444", "#f59e0b", "#3b82f6", "#8b5cf6", "#6b7280"];
+const DIRECTION_STYLE: Record<string, string> = {
+  BUY:  "bg-profit/20 text-profit",
+  SELL: "bg-loss/20 text-loss",
+  HOLD: "bg-bg-tertiary text-text-secondary",
+  SKIP: "bg-bg-tertiary text-text-secondary",
+};
+
+const STATUS_STYLE: Record<string, string> = {
+  qualified: "text-profit font-semibold",
+  filtered:  "text-text-secondary",
+  skip:      "text-bg-tertiary",
+};
+
+const REASON_LABEL: Record<string, string> = {
+  entry_qualified:              "✓ Entry placed",
+  direction_hold:               "Direction: HOLD",
+  score_below_min:              "Score too low",
+  policy_long_disabled:         "Longs disabled",
+  policy_short_disabled:        "Shorts disabled",
+  policy_strategy_blocked:      "Strategy blocked",
+  policy_max_positions_reached: "Max positions",
+  live_price_below_vwap:        "Price < VWAP",
+  live_price_above_vwap:        "Price > VWAP",
+  entry_window_closed_or_blocked: "Window closed",
+  insufficient_candles:         "No candles",
+};
+
+function ScoreBar({ score, status }: { score: number; status: string }) {
+  if (status === "skip" || score === 0) {
+    return <span className="text-text-secondary font-mono text-xs">—</span>;
+  }
+  return (
+    <div className="flex items-center gap-2 justify-end">
+      <div className="w-12 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+        <div
+          className={cn(
+            "h-full rounded-full",
+            score >= 72 ? "bg-profit" : score >= 45 ? "bg-neutral" : "bg-loss",
+          )}
+          style={{ width: `${Math.min(100, score)}%` }}
+        />
+      </div>
+      <span
+        className={cn(
+          "font-mono text-xs w-6 text-right tabular-nums",
+          score >= 72 ? "text-profit" : score >= 45 ? "text-neutral" : "text-loss",
+        )}
+      >
+        {score}
+      </span>
+    </div>
+  );
+}
 
 export default function SignalsPage() {
-  const [signals, setSignals] = useState<Signal[]>([]);
+  const router = useRouter();
+  const [scan, setScan] = useState<ScanLatest | null>(null);
   const [loading, setLoading] = useState(true);
+  const [filterStatus, setFilterStatus] = useState<"all" | "qualified" | "filtered" | "skip">("all");
 
   useEffect(() => {
     api
-      .getSignalsToday()
-      .then((d: any) => setSignals(d.signals ?? []))
+      .getScanLatest()
+      .then((d) => setScan(d))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
-  const stats = useMemo(() => {
-    const total = signals.length;
-    const placed = signals.filter((s) => s.entry_placed).length;
-    const blocked = total - placed;
-    const blockedReasons: Record<string, number> = {};
-    signals.forEach((s) => {
-      if (s.blocked_reason) {
-        blockedReasons[s.blocked_reason] = (blockedReasons[s.blocked_reason] ?? 0) + 1;
-      }
+  const rows = scan?.rows ?? [];
+
+  const filtered = useMemo(() => {
+    if (filterStatus === "all") return rows;
+    return rows.filter((r) => r.status === filterStatus);
+  }, [rows, filterStatus]);
+
+  const counts = useMemo(() => ({
+    all:       rows.length,
+    qualified: rows.filter((r) => r.status === "qualified").length,
+    filtered:  rows.filter((r) => r.status === "filtered").length,
+    skip:      rows.filter((r) => r.status === "skip").length,
+  }), [rows]);
+
+  // Reason breakdown for filtered rows
+  const reasonBreakdown = useMemo(() => {
+    const map: Record<string, number> = {};
+    rows.filter((r) => r.status === "filtered").forEach((r) => {
+      const key = r.reason || "unknown";
+      map[key] = (map[key] ?? 0) + 1;
     });
-    return { total, placed, blocked, blockedReasons };
-  }, [signals]);
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [rows]);
 
-  const scoreDistribution = useMemo(() => {
-    const buckets = Array.from({ length: 10 }, (_, i) => ({
-      range: `${i * 10}-${i * 10 + 10}`,
-      count: 0,
-    }));
-    signals.forEach((s) => {
-      const idx = Math.min(9, Math.floor(s.score / 10));
-      buckets[idx].count++;
-    });
-    return buckets;
-  }, [signals]);
-
-  const blockedPieData = useMemo(() => {
-    return Object.entries(stats.blockedReasons).map(([name, value]) => ({
-      name,
-      value,
-    }));
-  }, [stats.blockedReasons]);
-
-  const scatterData = useMemo(() => {
-    return signals.map((s) => ({
-      time: new Date(s.scan_ts).getHours() + new Date(s.scan_ts).getMinutes() / 60,
-      score: s.score,
-      placed: s.entry_placed,
-      symbol: s.symbol,
-      direction: s.direction,
-    }));
-  }, [signals]);
-
-  const columns: Column<Signal>[] = useMemo(
+  const columns: Column<ScanRow>[] = useMemo(
     () => [
-      {
-        key: "time",
-        label: "Time",
-        sortable: true,
-        sortValue: (r) => r.scan_ts,
-        render: (r) => (
-          <span className="font-mono text-xs">
-            {formatTime(new Date(r.scan_ts))}
-          </span>
-        ),
-      },
       {
         key: "symbol",
         label: "Symbol",
         sortable: true,
         sortValue: (r) => r.symbol,
-        render: (r) => <span className="font-medium">{r.symbol}</span>,
+        render: (r) => (
+          <span className="font-semibold text-sm text-text-primary">{r.symbol}</span>
+        ),
       },
       {
         key: "direction",
-        label: "Direction",
+        label: "Dir",
+        sortable: true,
+        sortValue: (r) => r.direction,
         render: (r) => (
           <span
             className={cn(
-              "px-1.5 py-0.5 rounded text-xs font-medium",
-              r.direction === "BUY"
-                ? "bg-profit/20 text-profit"
-                : "bg-loss/20 text-loss",
+              "text-[10px] font-semibold px-1.5 py-0.5 rounded",
+              DIRECTION_STYLE[r.direction] ?? "bg-bg-tertiary text-text-secondary",
             )}
           >
             {r.direction}
@@ -118,71 +132,125 @@ export default function SignalsPage() {
         label: "Score",
         sortable: true,
         sortValue: (r) => r.score,
-        className: "text-right font-mono",
-        render: (r) => (
-          <span
-            className={cn(
-              r.score >= 72 ? "text-profit" : r.score >= 50 ? "text-neutral" : "text-loss",
-            )}
-          >
-            {r.score}
-          </span>
-        ),
+        className: "text-right",
+        render: (r) => <ScoreBar score={r.score} status={r.status} />,
       },
       {
         key: "ltp",
         label: "LTP",
-        className: "text-right font-mono",
-        render: (r) => <span>{r.ltp?.toFixed(2) ?? "—"}</span>,
+        sortable: true,
+        sortValue: (r) => r.ltp,
+        className: "text-right font-mono tabular-nums text-xs",
+        render: (r) =>
+          r.ltp ? (
+            <span>
+              {r.ltp.toFixed(2)}
+              {r.changePct !== 0 && (
+                <span className={cn("ml-1 text-[10px]", r.changePct > 0 ? "text-profit" : "text-loss")}>
+                  {r.changePct > 0 ? "+" : ""}{r.changePct.toFixed(1)}%
+                </span>
+              )}
+            </span>
+          ) : (
+            <span className="text-text-secondary">—</span>
+          ),
       },
       {
-        key: "sl",
-        label: "SL",
-        className: "text-right font-mono text-loss/80",
-        render: (r) => <span>{r.sl?.toFixed(2) ?? "—"}</span>,
+        key: "rsi",
+        label: "RSI",
+        sortable: true,
+        sortValue: (r) => r.rsi,
+        className: "text-right font-mono tabular-nums text-xs",
+        render: (r) =>
+          r.rsi ? (
+            <span
+              className={cn(
+                r.rsi < 35 ? "text-loss" : r.rsi > 70 ? "text-profit" : "text-text-primary",
+              )}
+            >
+              {r.rsi.toFixed(1)}
+            </span>
+          ) : (
+            <span className="text-text-secondary">—</span>
+          ),
       },
       {
-        key: "target",
-        label: "Target",
-        className: "text-right font-mono text-profit/80",
-        render: (r) => <span>{r.target?.toFixed(2) ?? "—"}</span>,
-      },
-      {
-        key: "rr",
-        label: "R:R",
-        className: "text-right font-mono",
-        render: (r) => {
-          const risk = Math.abs((r.ltp ?? 0) - (r.sl ?? 0));
-          const reward = Math.abs((r.target ?? 0) - (r.ltp ?? 0));
-          const rr = risk > 0 ? (reward / risk).toFixed(1) : "—";
-          return <span>{rr}</span>;
-        },
-      },
-      {
-        key: "placed",
-        label: "Entry",
-        render: (r) => (
-          <span className={r.entry_placed ? "text-profit" : "text-loss"}>
-            {r.entry_placed ? "Placed" : "Blocked"}
-          </span>
-        ),
-      },
-      {
-        key: "blocked",
-        label: "Blocked Reason",
+        key: "ema",
+        label: "EMA",
         render: (r) => (
           <span
-            className="text-xs text-text-secondary max-w-[150px] truncate block"
-            title={r.blocked_reason}
+            className={cn(
+              "text-[10px]",
+              r.emaState === "BULL_STACK" ? "text-profit" :
+              r.emaState === "BEAR_STACK" ? "text-loss" : "text-text-secondary",
+            )}
           >
-            {r.blocked_reason || "—"}
+            {r.emaState === "BULL_STACK" ? "BULL" : r.emaState === "BEAR_STACK" ? "BEAR" : r.emaState || "—"}
           </span>
         ),
       },
       {
-        key: "regime",
-        label: "Regime",
-        render: (r) => <span className="text-xs">{r.regime}</span>,
+        key: "supertrend",
+        label: "ST",
+        render: (r) => (
+          <span
+            className={cn(
+              "text-[10px] font-medium",
+              r.supertrend === "UP" ? "text-profit" :
+              r.supertrend === "DOWN" ? "text-loss" : "text-text-secondary",
+            )}
+          >
+            {r.supertrend === "UP" ? "▲" : r.supertrend === "DOWN" ? "▼" : "—"}
+          </span>
+        ),
+      },
+      {
+        key: "volRatio",
+        label: "Vol",
+        sortable: true,
+        sortValue: (r) => r.volRatio,
+        className: "text-right font-mono text-xs tabular-nums",
+        render: (r) =>
+          r.volRatio ? (
+            <span className={cn(r.volRatio >= 1.5 ? "text-profit" : r.volRatio >= 1.0 ? "text-text-primary" : "text-text-secondary")}>
+              {r.volRatio.toFixed(2)}x
+            </span>
+          ) : (
+            <span className="text-text-secondary">—</span>
+          ),
+      },
+      {
+        key: "setup",
+        label: "Setup",
+        render: (r) => (
+          <span className="text-[10px] text-text-secondary">{r.setup || "—"}</span>
+        ),
+      },
+      {
+        key: "status",
+        label: "Status",
+        sortable: true,
+        sortValue: (r) => r.status,
+        render: (r) => (
+          <span className={cn("text-xs", STATUS_STYLE[r.status] ?? "text-text-secondary")}>
+            {REASON_LABEL[r.reason] ?? r.reason ?? r.status}
+          </span>
+        ),
+      },
+      {
+        key: "sl_target",
+        label: "SL / Target",
+        className: "text-right font-mono text-xs tabular-nums",
+        render: (r) =>
+          r.sl && r.target ? (
+            <span>
+              <span className="text-loss">{r.sl.toFixed(2)}</span>
+              <span className="text-text-secondary mx-1">/</span>
+              <span className="text-profit">{r.target.toFixed(2)}</span>
+            </span>
+          ) : (
+            <span className="text-text-secondary">—</span>
+          ),
       },
     ],
     [],
@@ -190,143 +258,97 @@ export default function SignalsPage() {
 
   if (loading) return <LoadingSkeleton lines={10} />;
 
+  const scanTime = scan?.scan_ts
+    ? new Date(scan.scan_ts).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })
+    : null;
+
   return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Signals Log</h1>
-
-      {/* Stats Bar */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-          <p className="text-3xl font-mono font-bold">{stats.total}</p>
-          <p className="text-xs text-text-secondary mt-1">Total Signals</p>
-        </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-          <p className="text-3xl font-mono font-bold text-profit">{stats.placed}</p>
-          <p className="text-xs text-text-secondary mt-1">
-            Entries Placed ({stats.total > 0 ? Math.round((stats.placed / stats.total) * 100) : 0}%)
-          </p>
-        </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-          <p className="text-3xl font-mono font-bold text-loss">{stats.blocked}</p>
-          <p className="text-xs text-text-secondary mt-1">Blocked</p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Score Distribution */}
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-          <h3 className="text-sm font-medium mb-2">Score Distribution</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={scoreDistribution}>
-              <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-              <XAxis dataKey="range" tick={{ fill: "#9ca3af", fontSize: 9 }} />
-              <YAxis tick={{ fill: "#9ca3af", fontSize: 9 }} />
-              <Tooltip
-                contentStyle={{ backgroundColor: "#111827", border: "1px solid #1f2937", fontSize: 12 }}
-              />
-              <Bar dataKey="count" fill="#3b82f6" radius={[2, 2, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Blocked Reason Breakdown */}
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-          <h3 className="text-sm font-medium mb-2">Blocked Reasons</h3>
-          {blockedPieData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={200}>
-              <PieChart>
-                <Pie
-                  data={blockedPieData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={40}
-                  outerRadius={70}
-                  dataKey="value"
-                  nameKey="name"
-                >
-                  {blockedPieData.map((_, i) => (
-                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{ backgroundColor: "#111827", border: "1px solid #1f2937", fontSize: 11 }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-[200px] flex items-center justify-center text-xs text-text-secondary">
-              No blocked signals
-            </div>
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+          <h1 className="text-xl font-semibold">Scanner</h1>
+          {scan?.scan_ts && (
+            <p className="text-[11px] text-text-secondary mt-0.5">
+              Last scan {scanTime} IST · {scan.regime} · {scan.risk_mode}
+            </p>
           )}
-          <div className="mt-2 space-y-1">
-            {blockedPieData.map((d, i) => (
-              <div key={d.name} className="flex items-center gap-2 text-xs">
-                <div
-                  className="w-2.5 h-2.5 rounded-full shrink-0"
-                  style={{ backgroundColor: PIE_COLORS[i % PIE_COLORS.length] }}
-                />
-                <span className="text-text-secondary truncate">{d.name}</span>
-                <span className="ml-auto font-mono">{d.value}</span>
-              </div>
-            ))}
-          </div>
         </div>
-
-        {/* Signal Timeline Scatter */}
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-          <h3 className="text-sm font-medium mb-2">Signal Timeline</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <ScatterChart>
-              <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-              <XAxis
-                dataKey="time"
-                name="Hour"
-                tick={{ fill: "#9ca3af", fontSize: 9 }}
-                domain={[9, 16]}
-                tickFormatter={(v) => `${Math.floor(v)}:00`}
-              />
-              <YAxis
-                dataKey="score"
-                name="Score"
-                tick={{ fill: "#9ca3af", fontSize: 9 }}
-                domain={[0, 100]}
-              />
-              <Tooltip
-                contentStyle={{ backgroundColor: "#111827", border: "1px solid #1f2937", fontSize: 11 }}
-                formatter={(val: number, name: string) => [
-                  name === "time" ? `${Math.floor(val)}:${String(Math.round((val % 1) * 60)).padStart(2, "0")}` : val,
-                  name,
-                ]}
-              />
-              <Scatter
-                data={scatterData.filter((d) => d.placed)}
-                fill="#22c55e"
-                shape="circle"
-              />
-              <Scatter
-                data={scatterData.filter((d) => !d.placed)}
-                fill="#ef4444"
-                shape="cross"
-              />
-            </ScatterChart>
-          </ResponsiveContainer>
-          <div className="flex gap-4 mt-2 text-[10px] text-text-secondary justify-center">
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-profit" /> Placed
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-loss" /> Blocked
-            </span>
+        {scan && (
+          <div className="text-xs text-text-secondary">
+            {filtered.length} of {scan.scanned} shown · watchlist {scan.total_watchlist}
           </div>
+        )}
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-4 gap-3">
+        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
+          <p className="text-xl font-mono font-bold text-text-primary">{counts.all}</p>
+          <p className="text-[10px] text-text-secondary mt-0.5">Scanned</p>
+        </div>
+        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
+          <p className="text-xl font-mono font-bold text-profit">{counts.qualified}</p>
+          <p className="text-[10px] text-text-secondary mt-0.5">Qualified</p>
+        </div>
+        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
+          <p className="text-xl font-mono font-bold text-neutral">{counts.filtered}</p>
+          <p className="text-[10px] text-text-secondary mt-0.5">Filtered</p>
+        </div>
+        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
+          <p className="text-xl font-mono font-bold text-text-secondary">{counts.skip}</p>
+          <p className="text-[10px] text-text-secondary mt-0.5">Skipped</p>
         </div>
       </div>
 
-      {/* Signals Table */}
-      <DataTable
-        columns={columns}
-        data={signals}
-        emptyMessage="No signals generated today"
-      />
+      {/* Filter reason breakdown */}
+      {reasonBreakdown.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {reasonBreakdown.map(([reason, count]) => (
+            <span key={reason} className="text-[11px] bg-bg-tertiary rounded px-2 py-0.5 text-text-secondary">
+              {REASON_LABEL[reason] ?? reason}: <span className="text-text-primary font-mono">{count}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="flex gap-1">
+        {(["all", "qualified", "filtered", "skip"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setFilterStatus(t)}
+            className={cn(
+              "px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+              filterStatus === t
+                ? "bg-accent text-white"
+                : "bg-bg-tertiary text-text-secondary hover:text-text-primary",
+            )}
+          >
+            {t === "all"
+              ? `All (${counts.all})`
+              : t === "qualified"
+              ? `✓ Qualified (${counts.qualified})`
+              : t === "filtered"
+              ? `Filtered (${counts.filtered})`
+              : `Skipped (${counts.skip})`}
+          </button>
+        ))}
+      </div>
+
+      {/* No data */}
+      {!scan ? (
+        <div className="text-center py-12 text-sm text-text-secondary">
+          No scan data yet. Scanner runs every 5 min during market hours (9:20–15:00 IST).
+        </div>
+      ) : (
+        <DataTable
+          columns={columns}
+          data={filtered}
+          onRowClick={(r) => router.push(`/symbol/${r.symbol}`)}
+          emptyMessage={`No ${filterStatus === "all" ? "" : filterStatus} symbols`}
+        />
+      )}
     </div>
   );
 }

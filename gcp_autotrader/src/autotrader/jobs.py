@@ -216,6 +216,18 @@ def scan_once(
     _print(out)
 
 
+@app.command("bq-backfill-candles-1d")
+def bq_backfill_candles_1d() -> None:
+    """Backfill candles_1d BQ table from existing GCS score_1d cache files."""
+    c = get_container()
+    sink = LogSink()
+    sink.action("Universe", "bq_backfill_candles_1d", "START")
+    out = c.universe_service().backfill_candles_1d_to_bq()
+    sink.action("Universe", "bq_backfill_candles_1d", "DONE", "BQ candles backfill complete", out)
+    sink.flush_all()
+    _print(out)
+
+
 @app.command("reset-runtime")
 def reset_runtime() -> None:
     c = get_container()

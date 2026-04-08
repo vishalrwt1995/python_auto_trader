@@ -68,6 +68,8 @@ export const api = {
 
   getSignalsToday: () => api.get<unknown[]>("/dashboard/signals/today"),
 
+  getScanLatest: () => api.get<import("./types").ScanLatest>("/dashboard/scan/latest"),
+
   getUniverseStats: () => api.get<Record<string, unknown>>("/dashboard/universe/stats"),
 
   getUniverseList: (params?: Record<string, string>) => {
@@ -90,6 +92,9 @@ export const api = {
 
   getPipelineStatus: () => api.get<unknown[]>("/dashboard/pipeline/status"),
 
+  getSymbolDetail: (symbol: string) =>
+    api.get<Record<string, unknown>>(`/dashboard/symbol/${symbol}`),
+
   getCandles: (symbol: string, interval = "1d", days = 90) =>
     api.get<unknown[]>(`/dashboard/candles/${symbol}?interval=${interval}&days=${days}`),
 
@@ -110,6 +115,8 @@ export const api = {
     api.post<{ status: string }>("/dashboard/admin/exit-position", { position_tag: positionTag }),
 
   getPaperMode: () => api.get<{ paper_trade: boolean }>("/dashboard/config/paper-mode"),
+
+  getSettings: () => api.get<Record<string, number | boolean>>("/dashboard/config/settings"),
 
   togglePaperMode: (paperTrade: boolean) =>
     api.post<{ status: string; paper_trade: boolean }>("/dashboard/admin/toggle-paper-mode", { paper_trade: paperTrade }),

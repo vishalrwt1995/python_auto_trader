@@ -17,7 +17,7 @@ import httpx
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
 from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
-from autotrader.domain.indicators import calc_adx, calc_atr, compute_indicators
+from autotrader.domain.indicators import calc_adx, calc_atr, calc_rsi, compute_indicators
 from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
 from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot, UniverseRow
 from autotrader.services.universe_v2 import (
@@ -169,6 +169,60 @@ class UniverseService:
                 self.bq.insert_candles_1d_batch(rows)
         except Exception:
             logger.warning("bq_candles_1d_write_failed symbol=%s — non-critical", symbol, exc_info=True)
+
+    def backfill_candles_1d_to_bq(self) -> dict[str, Any]:
+        """One-time backfill: read all GCS score_1d cache files → write to BQ candles_1d.
+
+        Skips symbols that already have rows in BQ (to avoid duplicates).
+        Path format: cache/score_1d/{exchange}/{segment}/{symbol}.json
+        """
+        if not self.bq:
+            return {"error": "no_bq_client"}
+
+        paths = self.gcs.list_paths("cache/score_1d/")
+        json_paths = [p for p in paths if p.endswith(".json")]
+        logger.info("bq_backfill_candles_1d start paths=%d", len(json_paths))
+
+        written = 0
+        skipped = 0
+        errors = 0
+
+        for path in json_paths:
+            # path: cache/score_1d/NSE/CASH/DMART.json
+            parts = path.split("/")
+            if len(parts) < 4:
+                continue
+            symbol = parts[-1].replace(".json", "").upper()
+            segment = parts[-2].upper()
+            exchange = parts[-3].upper()
+
+            # Skip if BQ already has rows for this symbol
+            try:
+                check_q = (
+                    f"SELECT COUNT(*) as n FROM `{self.bq._table_ref('candles_1d')}` "
+                    f"WHERE symbol = '{symbol}'"
+                )
+                result = self.bq.query(check_q)
+                if result and result[0].get("n", 0) > 0:
+                    skipped += 1
+                    continue
+            except Exception:
+                pass  # if check fails, attempt write anyway
+
+            try:
+                candles = self.gcs.read_candles(path)
+                if not candles:
+                    continue
+                self._bq_write_candles_1d(symbol, "", exchange, segment, candles)
+                written += 1
+                logger.info("bq_backfill symbol=%s rows=%d", symbol, len(candles))
+            except Exception:
+                errors += 1
+                logger.warning("bq_backfill_failed symbol=%s", symbol, exc_info=True)
+
+        result = {"written": written, "skipped_existing": skipped, "errors": errors, "total_paths": len(json_paths)}
+        logger.info("bq_backfill_candles_1d done %s", result)
+        return result
 
     def _bq_write_candles_5m(
         self,
@@ -4439,6 +4493,11 @@ class UniverseService:
             low_252 = min(float(c[3] or 0.0) for c in daily[-252:]) if len(daily) >= 60 else low_20
             vol_last3 = statistics.mean(vols[-3:]) if len(vols) >= 3 else (vols[-1] if vols else 0.0)
             vol_prev3 = statistics.mean(vols[-6:-3]) if len(vols) >= 6 else vol_last3
+            # RSI for mean-reversion scoring in bear markets
+            rsi_series = calc_rsi(closes, 14) if len(closes) >= 15 else []
+            rsi14_last = float(rsi_series[-1]) if rsi_series else 50.0
+            # 5-day bounce: recent recovery from local low (reversal momentum)
+            ret5 = ((close / closes[-6]) - 1.0) if len(closes) >= 6 and closes[-6] > 0 else 0.0
             recent_event_flag = any(
                 abs(float(daily[i][1] or 0.0) / closes[i - 1] - 1.0) > 0.05
                 for i in range(max(1, len(daily) - 5), len(daily))
@@ -4450,6 +4509,7 @@ class UniverseService:
                     "close": close,
                     "ret20": ret_20,
                     "ret60": ret_60,
+                    "ret5": ret5,
                     "volRatio": vol_ratio,
                     "ema20": ema20,
                     "ema50": ema50,
@@ -4457,6 +4517,7 @@ class UniverseService:
                     "ema50Prev": ema50_prev,
                     "atr14": atr14 if atr14 > 0 else float(r.get("atr14") or 0.0),
                     "adx14": adx14,
+                    "rsi14": rsi14_last,
                     "high20": high_20,
                     "low20": low_20,
                     "low252": low_252,
@@ -4539,14 +4600,46 @@ class UniverseService:
             mr_component = self._clip01(1.0 - range_pos)
             # Fix 2: use live atr_pct not stored atrPct14D
             vol_sanity = 1.0 if 0.01 <= atr_pct <= 0.035 else 0.0
-            mean_rev = self._clip01((0.60 * mr_component) + (0.40 * vol_sanity)) * 100.0
+            # Enhanced mean-reversion: RSI oversold bonus + volume spike on dip +
+            # 5-day bounce (reversal momentum) + support proximity
+            rsi14 = float(r.get("rsi14") or 50.0)
+            # RSI oversold: sweet spot 25-40 scores highest, <25 still good
+            rsi_mr_bonus = (
+                1.0 if 25 <= rsi14 <= 40 else
+                0.7 if rsi14 < 25 else
+                0.3 if 40 < rsi14 <= 50 else
+                0.0
+            )
+            # Volume spike on dip: sellers exhausting → reversal signal
+            vol_ratio_val = float(r.get("volRatio") or 1.0)
+            vol_spike_on_dip = self._clip01(vol_ratio_val / 2.0) if range_pos < 0.35 else 0.0
+            # 5-day bounce: recent recovery from local low
+            ret5_val = float(r.get("ret5") or 0.0)
+            bounce_component = self._clip01(ret5_val / 0.05) if ret5_val > 0 else 0.0
+            # Support proximity: close near 52-week or 20-day low
+            low_252 = float(r.get("low252") or low20)
+            support_dist = ((close - low_252) / close) if close > 0 else 1.0
+            support_proximity = max(0.0, 1.0 - (support_dist * 8.0))
+            mean_rev = self._clip01(
+                (0.30 * mr_component)
+                + (0.20 * rsi_mr_bonus)
+                + (0.15 * vol_spike_on_dip)
+                + (0.10 * bounce_component)
+                + (0.10 * support_proximity)
+                + (0.15 * vol_sanity)
+            ) * 100.0
 
             if regime_v2["regimeDaily"] == "TREND":
                 final_score = (0.60 * breakout) + (0.30 * pullback) + (0.10 * mean_rev)
             elif regime_v2["regimeDaily"] == "RANGE":
-                final_score = (0.60 * mean_rev) + (0.25 * pullback) + (0.15 * breakout)
+                final_score = (0.40 * mean_rev) + (0.30 * pullback) + (0.30 * breakout)
+            elif regime_v2["regimeDaily"] == "RISK_OFF":
+                # Bear market: mean-reversion dominates. Breakout/pullback scores
+                # are naturally ~0 in bear markets; don't waste weight on them.
+                # Short-side scoring (below) handles the downside opportunity.
+                final_score = (0.65 * mean_rev) + (0.20 * pullback) + (0.15 * breakout)
             else:
-                final_score = (0.50 * breakout) + (0.20 * pullback) + (0.30 * mean_rev)
+                final_score = (0.45 * mean_rev) + (0.30 * breakout) + (0.25 * pullback)
 
             setup_scores = {"BREAKOUT": breakout, "PULLBACK": pullback, "MEAN_REVERSION": mean_rev}
             setup_label = max(setup_scores.items(), key=lambda kv: kv[1])[0]
@@ -4603,7 +4696,9 @@ class UniverseService:
         if market_policy is not None and self.market_brain_service is not None:
             swing_scored = self.market_brain_service.adjust_watchlist_rows(swing_scored, market_policy, section="swing")
         if regime_v2["regimeDaily"] == "RISK_OFF":
-            swing_scored = [r for r in swing_scored if str(r.get("liquidityBucket") or "").upper() == "A"]
+            # Allow bucket A and B in bear markets: good mean-reversion and
+            # VWAP reversal candidates are often in bucket B.
+            swing_scored = [r for r in swing_scored if str(r.get("liquidityBucket") or "").upper() in {"A", "B"}]
             swing_target = max(1, math.floor(int(target_size or 150) * 0.7))
         else:
             swing_target = max(1, int(target_size or 150))
@@ -4613,6 +4708,7 @@ class UniverseService:
         swing_selected = _select_rows(swing_scored, target=swing_target)
 
         intraday_phase1: list[dict[str, Any]] = []
+        intraday_is_bearish = canonical_regime in {"PANIC", "TREND_DOWN"}
         for r in intraday_candidates:
             daily = self._watchlist_daily_candles(r, expected_lcd)
             if len(daily) < 21:
@@ -4622,20 +4718,42 @@ class UniverseService:
             if close <= 0:
                 continue
             ret20 = ((close / closes[-21]) - 1.0) if closes[-21] > 0 else 0.0
-            momentum_component = self._norm_minmax_clip(ret20, -0.20, 0.20)
             rank = int(r.get("turnoverRank60D") or mode_thresholds.intraday_topn_turnover_60d)
             liquidity_component = 1.0 - self._norm_minmax_clip(float(rank), 1.0, float(max(2, mode_thresholds.intraday_topn_turnover_60d)))
             vol_sanity_component = 1.0 - self._norm_minmax_clip(float(r.get("atrPct14D") or 0.0), 0.01, 0.12)
             # Fix 6: ADX component — reward trending stocks in Phase1
             adx_p1 = float(calc_adx(daily[-40:], period=14)) if len(daily) >= 29 else 25.0
             adx_p1_component = self._norm_minmax_clip(adx_p1, 15.0, 40.0)
-            phase1_score = self._clip01((0.40 * momentum_component) + (0.25 * liquidity_component) + (0.20 * vol_sanity_component) + (0.15 * adx_p1_component)) * 100.0
+
+            if intraday_is_bearish:
+                # Bear market Phase1: use absolute momentum + reversal signals
+                # instead of pure upside momentum. Stocks with sharp recent
+                # moves (either direction) are the best intraday candidates.
+                abs_momentum = self._norm_minmax_clip(abs(ret20), 0.0, 0.20)
+                # 5-day bounce: recent reversal from local low
+                ret5 = ((close / closes[-6]) - 1.0) if len(closes) >= 6 and closes[-6] > 0 else 0.0
+                bounce = self._clip01(ret5 / 0.05) if ret5 > 0 else 0.0
+                # RSI oversold: best intraday reversal candidates
+                rsi_series = calc_rsi(closes, 14) if len(closes) >= 15 else []
+                rsi_val = float(rsi_series[-1]) if rsi_series else 50.0
+                rsi_reversal = self._clip01((50.0 - rsi_val) / 30.0) if rsi_val < 50 else 0.0
+                phase1_score = self._clip01(
+                    (0.25 * abs_momentum)
+                    + (0.20 * bounce)
+                    + (0.20 * rsi_reversal)
+                    + (0.20 * liquidity_component)
+                    + (0.15 * vol_sanity_component)
+                ) * 100.0
+            else:
+                momentum_component = self._norm_minmax_clip(ret20, -0.20, 0.20)
+                phase1_score = self._clip01((0.40 * momentum_component) + (0.25 * liquidity_component) + (0.20 * vol_sanity_component) + (0.15 * adx_p1_component)) * 100.0
+
             intraday_phase1.append(
                 {
                     **r,
                     "score": float(round(phase1_score, 2)),
                     "setupLabel": "PHASE1_MOMENTUM",
-                    "momentumComponent": momentum_component,
+                    "momentumComponent": self._norm_minmax_clip(ret20, -0.20, 0.20),
                     "liquidityComponent": liquidity_component,
                     "volSanityComponent": vol_sanity_component,
                     "adxComponent": float(round(adx_p1_component, 4)),

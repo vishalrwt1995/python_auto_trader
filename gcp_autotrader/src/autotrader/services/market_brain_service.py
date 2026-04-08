@@ -614,7 +614,10 @@ class MarketBrainService:
         prev: MarketBrainState | None,
     ) -> str:
         regime = "RANGE"
-        if volatility_stress_score >= 82.0 or breadth_score <= 18.0 or data_quality_score <= 30.0:
+        # PANIC: only for extreme conditions — not marginal weakness.
+        # breadth <= 12 (was 18): only true capitulation, not normal corrections.
+        # stress >= 82 or dq <= 30: unchanged — genuine system-level distress.
+        if volatility_stress_score >= 82.0 or breadth_score <= 12.0 or data_quality_score <= 30.0:
             regime = "PANIC"
         elif trend_score >= 70.0 and breadth_score >= 62.0 and leadership_score >= 56.0 and volatility_stress_score <= 48.0:
             regime = "TREND_UP"
@@ -622,7 +625,9 @@ class MarketBrainService:
             regime = "TREND_DOWN"
         elif volatility_stress_score >= 62.0 and leadership_score <= 46.0 and risk_appetite <= 46.0:
             regime = "CHOP"
-        elif prev is not None and prev.regime in {"PANIC", "TREND_DOWN", "CHOP"} and trend_score >= 55.0 and breadth_score >= 50.0 and leadership_score >= 50.0:
+        elif prev is not None and prev.regime in {"PANIC", "TREND_DOWN", "CHOP"} and trend_score >= 40.0 and breadth_score >= 35.0 and leadership_score >= 40.0:
+            # RECOVERY: lowered thresholds (was 55/50/50) so the system can
+            # transition out of PANIC/TREND_DOWN without needing a full bull reversal.
             regime = "RECOVERY"
 
         if prev is None:
@@ -630,11 +635,12 @@ class MarketBrainService:
 
         if prev.regime == "PANIC":
             if regime != "PANIC":
-                # Only market-structure signals gate PANIC exit.
-                # data_quality_score is excluded here: in PANIC/LOCKDOWN no scanner runs,
-                # which structurally collapses data_quality via stale-writer penalties —
-                # creating a self-reinforcing lock that prevents PANIC from ever clearing.
-                if volatility_stress_score > 65.0 or breadth_score < 35.0:
+                # PANIC exit guard — only market-structure signals gate exit.
+                # data_quality_score excluded: in PANIC/LOCKDOWN no scanner runs,
+                # which collapses data_quality via stale-writer penalties.
+                # Lowered breadth guard from 35→22: allow exit once breadth shows
+                # any recovery, not requiring a full structural reversal.
+                if volatility_stress_score > 65.0 or breadth_score < 22.0:
                     return "PANIC"
         if prev.regime == "TREND_UP" and regime != "TREND_UP":
             if trend_score >= 60.0 and breadth_score >= 55.0 and leadership_score >= 50.0:
@@ -658,9 +664,12 @@ class MarketBrainService:
         volatility_stress_score: float,
         data_quality_score: float,
     ) -> str:
-        if regime == "PANIC" or volatility_stress_score >= 85.0 or data_quality_score < 35.0:
+        # LOCKDOWN: reserved for extreme stress — not every PANIC.
+        # PANIC alone → DEFENSIVE (system still trades with caution).
+        # LOCKDOWN only when volatility is extreme OR data is broken.
+        if volatility_stress_score >= 85.0 or data_quality_score < 35.0:
             return "LOCKDOWN"
-        if regime in {"CHOP", "TREND_DOWN"} or volatility_stress_score >= 65.0 or data_quality_score < 55.0:
+        if regime == "PANIC" or regime in {"CHOP", "TREND_DOWN"} or volatility_stress_score >= 65.0 or data_quality_score < 55.0:
             return "DEFENSIVE"
         if regime in {"TREND_UP", "RECOVERY"} and risk_appetite >= 66.0 and volatility_stress_score <= 50.0 and data_quality_score >= 65.0:
             return "AGGRESSIVE"
@@ -836,7 +845,10 @@ class MarketBrainService:
         if regime in {"CHOP", "RECOVERY"}:
             swing_permission = "REDUCED"
         if regime in {"TREND_DOWN", "PANIC"}:
-            swing_permission = "DISABLED"
+            # REDUCED instead of DISABLED: mean-reversion swings are
+            # among the best setups in bear markets. Disabling them entirely
+            # removes the system's edge in exactly the conditions it should thrive.
+            swing_permission = "REDUCED"
 
         if risk_mode == "AGGRESSIVE":
             size_multiplier = 1.15
@@ -848,8 +860,20 @@ class MarketBrainService:
             size_multiplier = 0.65
             max_positions_multiplier = 0.70
         else:
-            size_multiplier = 0.30
-            max_positions_multiplier = 0.35
+            # LOCKDOWN: still reduced, but enough to take high-conviction trades.
+            size_multiplier = 0.40
+            max_positions_multiplier = 0.50
+
+        # ── Regime-level override on top of risk_mode (Item 5) ───────────────
+        # PANIC regime → cap at 0.50× regardless of risk_mode so we never over-
+        # commit capital when the market is in free-fall.  Strong TREND_UP +
+        # AGGRESSIVE is the best environment — allow a modest size boost.
+        if regime == "PANIC":
+            size_multiplier = min(size_multiplier, 0.50)
+            max_positions_multiplier = min(max_positions_multiplier, 0.50)
+        elif regime == "TREND_UP" and risk_mode == "AGGRESSIVE":
+            size_multiplier = min(1.50, round(size_multiplier * 1.30, 2))
+            max_positions_multiplier = min(1.50, round(max_positions_multiplier * 1.20, 2))
 
         allowed_strategies = [
             "BREAKOUT",
@@ -860,9 +884,18 @@ class MarketBrainService:
             "OPEN_DRIVE",
         ]
         if regime in {"CHOP", "PANIC"}:
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "VWAP_TREND"}]
-        if regime in {"TREND_DOWN", "PANIC"}:
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "PULLBACK"}]
+            # Remove momentum-chasing strategies; keep reversal/mean-reversion.
+            # PULLBACK stays: short-side pullbacks are valid in bear markets.
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE"}]
+        if regime in {"TREND_DOWN"}:
+            # Down-trend: remove BREAKOUT (upside breakouts fail), keep PULLBACK
+            # (short pullbacks are scored in setup scoring), keep VWAP strategies.
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE"}]
+        if regime == "PANIC":
+            # PANIC: minimal strategies, but VWAP_REVERSAL is the best edge.
+            # Keep PULLBACK for short-pullback setups. Add VWAP_TREND only if
+            # data quality is sufficient (quality gate checked elsewhere).
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE"}]
         if not allowed_strategies:
             allowed_strategies = ["MEAN_REVERSION", "VWAP_REVERSAL"]
 

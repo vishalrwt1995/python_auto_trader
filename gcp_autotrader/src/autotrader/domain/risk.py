@@ -14,8 +14,24 @@ def calc_brokerage(qty: int, price: float) -> float:
     return round((brk + stt + nse + gst + sebi) * 2, 2)
 
 
-def calc_position_size(entry_price: float, atr: float, direction: str, cfg: StrategySettings) -> PositionSizing:
-    sl_dist = max(atr * cfg.atr_sl_mult, entry_price * 0.005)
+def calc_position_size(
+    entry_price: float,
+    atr: float,
+    direction: str,
+    cfg: StrategySettings,
+    *,
+    atr_mult_override: float | None = None,
+) -> PositionSizing:
+    """Calculate position sizing with optional regime-aware ATR multiplier.
+
+    Args:
+        atr_mult_override: When provided, replaces cfg.atr_sl_mult. Used by
+            trading_service to scale SL width by regime — tighter in PANIC/
+            LOCKDOWN (ATR already inflated 3-4x), wider in AGGRESSIVE TREND_UP
+            (give momentum trades room to breathe).
+    """
+    sl_mult = atr_mult_override if atr_mult_override is not None else cfg.atr_sl_mult
+    sl_dist = max(atr * sl_mult, entry_price * 0.005)
     sl_price = entry_price - sl_dist if direction == "BUY" else entry_price + sl_dist
     target = entry_price + sl_dist * cfg.rr_intraday if direction == "BUY" else entry_price - sl_dist * cfg.rr_intraday
 

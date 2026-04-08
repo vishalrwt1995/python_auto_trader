@@ -108,6 +108,11 @@ class TradingService:
             return True
         if "PULLBACK" in s and "PULLBACK" in allow:
             return True
+        # Short-side setups: allowed when mean-reversion/reversal strategies are
+        # active. These setups are only scored in bearish regimes (PANIC/TREND_DOWN)
+        # where MEAN_REVERSION and VWAP_REVERSAL are always allowed.
+        if s.startswith("SHORT_") and ("MEAN_REVERSION" in allow or "VWAP_REVERSAL" in allow):
+            return True
         return False
 
     def _slice_watchlist_for_scan(self, watchlist: list[Any]) -> tuple[list[Any], dict[str, int | bool]]:
@@ -296,6 +301,8 @@ class TradingService:
             scan_rows: list[list[Any]] = []
             signal_rows: list[list[Any]] = []
             bq_signals: list[dict[str, Any]] = []
+            # Rich per-symbol scan results saved to Firestore for dashboard visibility
+            scan_result_rows: list[dict[str, Any]] = []
             import uuid as _uuid
             scanner_run_id = _uuid.uuid4().hex[:12]
             qualified = 0
@@ -348,6 +355,21 @@ class TradingService:
                         "NA",
                         "NA",
                     ])
+                    scan_result_rows.append({
+                        "symbol": w.symbol,
+                        "ltp": 0.0,
+                        "changePct": 0.0,
+                        "volRatio": 0.0,
+                        "direction": "SKIP",
+                        "score": 0,
+                        "emaState": "MIXED",
+                        "rsi": 0.0,
+                        "macdView": "NA",
+                        "supertrend": "NA",
+                        "setup": w.strategy or "",
+                        "status": "skip",
+                        "reason": "insufficient_candles",
+                    })
                     continue
                 direction = determine_direction(ind, regime)
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy)
@@ -355,7 +377,45 @@ class TradingService:
                 # Use live LTP (real-time) for entry price; candle close as fallback if API unavailable
                 _live = live_ltp_map.get(instrument_key, 0.0)
                 ltp = _live if _live > 0 else ind.close
-                pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy)
+
+                # ── Volatility-scaled ATR multiplier (Item 4) ────────────────
+                # In PANIC/LOCKDOWN the ATR is already 3-4x its normal value.
+                # Applying the base 1.5× multiplier would produce gigantic SLs
+                # that (a) allow huge drawdowns and (b) force qty → 1 always.
+                # We shrink the multiplier so the *effective* SL distance stays
+                # sensible for mean-reversion entries.  In strong TREND_UP we
+                # give momentum trades more room so they aren't stopped on noise.
+                _brain_regime = brain_state.regime if brain_state else "RANGE"
+                _brain_risk   = brain_state.risk_mode if brain_state else "NORMAL"
+                if _brain_risk == "LOCKDOWN" or _brain_regime == "PANIC":
+                    _atr_mult = round(self.settings.strategy.atr_sl_mult * 0.75, 3)
+                elif _brain_risk == "DEFENSIVE" or _brain_regime in ("TREND_DOWN", "CHOP"):
+                    _atr_mult = round(self.settings.strategy.atr_sl_mult * 0.87, 3)
+                elif _brain_risk == "AGGRESSIVE" and _brain_regime == "TREND_UP":
+                    _atr_mult = round(self.settings.strategy.atr_sl_mult * 1.20, 3)
+                else:
+                    _atr_mult = self.settings.strategy.atr_sl_mult
+
+                pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult)
+
+                # ── Dynamic min_signal_score (Item 3) ────────────────────────
+                # adjust_signal() already penalises adjusted_score by 0.60–0.82×
+                # in DEFENSIVE/LOCKDOWN + an extra 0.88× in PANIC/CHOP regime.
+                # Keeping a static threshold of 72 means even a raw-90 signal
+                # gets filtered in PANIC (90 × 0.72 = 64.8 < 72).  We lower the
+                # threshold proportionally so the *top decile* of raw signals
+                # can still qualify regardless of regime.
+                _SCORE_THRESHOLDS = {
+                    "AGGRESSIVE": 75,   # bar raised: only the best in bull runs
+                    "NORMAL":     72,   # unchanged
+                    "DEFENSIVE":  58,   # ≈ raw 72 after ×0.82×0.88 adjustment
+                    "LOCKDOWN":   45,   # ≈ raw 85 after ×0.60×0.88 adjustment
+                }
+                dynamic_min_score = _SCORE_THRESHOLDS.get(
+                    brain_state.risk_mode if brain_state else "NORMAL",
+                    self.settings.strategy.min_signal_score,
+                )
+
                 setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
                 liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
                 dq_mult = max(0.6, min(1.1, brain_state.data_quality_score / 100.0))
@@ -390,6 +450,30 @@ class TradingService:
                     macd_view,
                     "UP" if ind.supertrend.dir == 1 else "DOWN",
                 ])
+                # Rich scan result for Firestore (reason filled in after qualification check)
+                _scan_row_rich: dict[str, Any] = {
+                    "symbol": w.symbol,
+                    "ltp": round(ltp, 2),
+                    "changePct": round(change_pct, 2),
+                    "volRatio": round(ind.volume.ratio, 2),
+                    "direction": direction,
+                    "score": int(adjusted_score),
+                    "emaState": ema_state,
+                    "rsi": round(ind.rsi.curr, 1),
+                    "macdView": macd_view,
+                    "supertrend": "UP" if ind.supertrend.dir == 1 else "DOWN",
+                    "setup": w.strategy or "",
+                    "vwap": round(ind.vwap, 2) if ind.vwap else 0.0,
+                    "sl": 0.0,
+                    "target": 0.0,
+                    "qty": 0,
+                    "status": "scanned",
+                    "reason": "",
+                    # Item 2: expose threshold used so dashboard can show gap-to-qualify
+                    # and we can tune thresholds from paper-trade data later.
+                    "minScore": int(dynamic_min_score),
+                    "atrMult": round(_atr_mult, 3),
+                }
 
                 policy_block_reason = ""
                 if direction == "BUY" and market_policy is not None and not bool(market_policy.long_enabled):
@@ -408,7 +492,7 @@ class TradingService:
                     policy_block_reason = "live_price_above_vwap"
 
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
-                if direction != "HOLD" and adjusted_score >= self.settings.strategy.min_signal_score and is_entry_window_open_ist() and not policy_block_reason:
+                if direction != "HOLD" and adjusted_score >= dynamic_min_score and is_entry_window_open_ist() and not policy_block_reason:
                     qualified += 1
                     reason = (
                         f"Score={adjusted_score} RSI={ind.rsi.curr:.1f} VolR={ind.volume.ratio:.2f} "
@@ -439,6 +523,13 @@ class TradingService:
                         "blocked_reason": "",
                         "scanner_run_id": scanner_run_id,
                     })
+                    _scan_row_rich.update({
+                        "sl": round(pos.sl_price, 2),
+                        "target": round(pos.target, 2),
+                        "qty": pos.qty,
+                        "status": "qualified",
+                        "reason": "entry_qualified",
+                    })
                     self.order_service.place_entry_order(
                         symbol=w.symbol,
                         exchange=w.exchange,
@@ -457,13 +548,15 @@ class TradingService:
                 else:
                     if direction == "HOLD":
                         why = "direction_hold"
-                    elif adjusted_score < self.settings.strategy.min_signal_score:
+                    elif adjusted_score < dynamic_min_score:
                         why = "score_below_min"
                     elif policy_block_reason:
                         why = policy_block_reason
                     else:
                         why = "entry_window_closed_or_blocked"
-                    self.log_sink.decision("SIGNAL", w.symbol, direction, why, {"score": adjusted_score, "min": self.settings.strategy.min_signal_score})
+                    self.log_sink.decision("SIGNAL", w.symbol, direction, why, {"score": adjusted_score, "min": dynamic_min_score})
+                    _scan_row_rich.update({"status": "filtered", "reason": why})
+                scan_result_rows.append(_scan_row_rich)
 
                 time.sleep(0.08)
 
@@ -471,6 +564,28 @@ class TradingService:
             self.state.set_runtime_prop("runtime:scanner_last_run_ts", run_ts)
             if signal_rows:
                 self.state.set_runtime_prop("runtime:signals_last_write_ts", run_ts)
+            # Persist scan audit trail to Firestore for dashboard real-time visibility.
+            # This replaces the old Google Sheets scan log — every symbol's direction,
+            # score, and reason is now visible on the Signals page.
+            try:
+                self.state.set_json(
+                    "scan_results",
+                    "latest",
+                    {
+                        "scan_ts": run_ts,
+                        "run_date": run_ts[:10],
+                        "scanner_run_id": scanner_run_id,
+                        "regime": brain_state.regime if brain_state else "",
+                        "risk_mode": brain_state.risk_mode if brain_state else "",
+                        "total_watchlist": scan_meta.get("total", 0),
+                        "scanned": len(scan_result_rows),
+                        "qualified": qualified,
+                        "rows": scan_result_rows,
+                    },
+                    merge=False,
+                )
+            except Exception:
+                logger.warning("scan_results_firestore_save_failed — non-critical", exc_info=True)
             # Publish signals to Pub/Sub + BigQuery (best-effort)
             if bq_signals:
                 try:

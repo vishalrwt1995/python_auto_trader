@@ -39,36 +39,48 @@ class MarketPolicyService:
             correlation_threshold = 0.85
         elif risk_mode == "DEFENSIVE":
             watchlist_target_multiplier = 0.75
-            watchlist_min_score_boost = 8
-            liquidity_bucket_floor = "A"
+            watchlist_min_score_boost = 4
+            liquidity_bucket_floor = "B"
             open_drive_enabled = False
             dynamic_sector_cap_share = 0.15
             correlation_threshold = 0.80
         else:
-            watchlist_target_multiplier = 0.40
-            watchlist_min_score_boost = 18
+            # LOCKDOWN: still builds a watchlist — risk managed through
+            # smaller positions (size_multiplier), not empty watchlists.
+            # Score boost kept minimal so mean-reversion candidates still qualify.
+            watchlist_target_multiplier = 0.60
+            watchlist_min_score_boost = 4
             intraday_phase2_enabled = False
             breakout_enabled = False
             open_drive_enabled = False
-            liquidity_bucket_floor = "A"
+            liquidity_bucket_floor = "B"
             dynamic_sector_cap_share = 0.12
             correlation_threshold = 0.75
 
         if regime in {"CHOP", "PANIC"}:
             breakout_enabled = False
             open_drive_enabled = False
-            watchlist_min_score_boost = max(watchlist_min_score_boost, 10)
+            # No additional score boost — the allowed_strategies filter
+            # (MEAN_REVERSION, VWAP_REVERSAL only) already restricts quality.
         if regime in {"TREND_DOWN", "PANIC"}:
-            long_enabled = False
+            # Long stays ENABLED: mean-reversion IS buying oversold bounces.
+            # Disabling longs in PANIC killed the system's best bear-market edge.
+            # Risk is managed through position sizing (0.40x), not trade prevention.
+            pass
         if regime in {"TREND_UP", "RECOVERY"}:
             short_enabled = False if state.long_bias >= 0.65 else short_enabled
         if regime == "PANIC":
             short_enabled = True
         if regime in {"TREND_DOWN", "PANIC"}:
-            intraday_phase2_enabled = intraday_phase2_enabled and (state.data_quality_score >= 55.0)
+            # Phase 2 VWAP signals are valuable in bear markets for reversal
+            # trades. Only disable if data quality is truly poor.
+            intraday_phase2_enabled = intraday_phase2_enabled and (state.data_quality_score >= 45.0)
         if regime == "PANIC":
-            dynamic_sector_cap_share = min(dynamic_sector_cap_share, 0.12)
-            correlation_threshold = min(correlation_threshold, 0.75)
+            # In PANIC, allow slightly wider sector exposure so mean-reversion
+            # candidates across multiple sectors can qualify. Tighter correlation
+            # threshold prevents over-concentration in correlated positions.
+            dynamic_sector_cap_share = min(dynamic_sector_cap_share, 0.15)
+            correlation_threshold = min(correlation_threshold, 0.72)
 
         reasons = [
             f"regime={state.regime}",

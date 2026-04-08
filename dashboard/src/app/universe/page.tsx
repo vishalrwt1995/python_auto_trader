@@ -11,8 +11,13 @@ import {
   Cell,
   ResponsiveContainer,
   Tooltip,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
 } from "recharts";
 import { InfoBadge, Tooltip as AppTooltip } from "@/components/shared/Tooltip";
+import { useRouter } from "next/navigation";
 
 const PIE_COLORS = [
   "#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#8b5cf6",
@@ -101,6 +106,7 @@ type ViewTab = "eligible" | "all" | "excluded";
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function UniversePage() {
+  const router = useRouter();
   const [stats, setStats] = useState<UniverseStats | null>(null);
   const [symbols, setSymbols] = useState<UniverseSymbol[]>([]);
   const [loading, setLoading] = useState(true);
@@ -222,7 +228,12 @@ export default function UniversePage() {
         sortable: true,
         sortValue: (r) => r.symbol,
         render: (r) => (
-          <span className={cn("font-medium", r.enabled === false ? "opacity-40 line-through" : "")}>
+          <span
+            className={cn(
+              "font-medium",
+              r.enabled === false ? "opacity-40 line-through" : "",
+            )}
+          >
             {r.symbol}
           </span>
         ),
@@ -778,6 +789,7 @@ export default function UniversePage() {
         <DataTable
           columns={columns}
           data={filtered}
+          onRowClick={(r) => router.push(`/symbol/${r.symbol}`)}
           emptyMessage="No symbols match filters"
         />
       </div>
