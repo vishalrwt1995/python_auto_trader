@@ -146,10 +146,6 @@ def _market_brain_response_payload(c, market_state: Any, market_policy: Any) -> 
     }
 
 
-def _write_market_brain_best_effort(c, market_state: Any, market_policy: Any) -> None:
-    pass  # Sheets removed; market brain persisted in Firestore via state.save_market_brain()
-
-
 def _acquire_named_locks(state, names: list[str], *, ttl_seconds: int) -> tuple[list[Any], str | None]:
     leases: list[Any] = []
     for name in names:
@@ -210,27 +206,47 @@ def healthz() -> dict[str, Any]:
     }
 
 
-@app.post("/jobs/bootstrap-sheets")
-def run_bootstrap_sheets(
+_ALL_KNOWN_LOCKS = [
+    "score_cache_update_close",
+    "score_cache_backfill_full",
+    "score_refresh",
+    "score_cache_prefetch",
+    "watchlist_refresh",
+    "premarket_precompute",
+    "raw_universe_refresh",
+    "universe_build",
+    "run_scan_once",
+    "intraday_cache_backfill_full_5m",
+    "intraday_cache_backfill_appended_5m",
+    "intraday_cache_update_close_5m",
+    "sector_mapping_refresh",
+]
+
+
+@app.post("/admin/clear-locks")
+def admin_clear_locks(
     x_job_token: str | None = Header(default=None),
-    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
-    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+    names: list[str] | None = Query(default=None),
 ) -> dict[str, Any]:
+    """Force-delete named Firestore locks (admin/ops use only).
+
+    Pass ?names=lock1&names=lock2 to clear specific locks,
+    or omit to clear all known locks.
+    """
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
-    sink = LogSink()
-    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
-    started_perf = time.perf_counter()
-    try:
-        sink.action("System", "bootstrap_sheets", "START", "", sched_ctx)
-        out = {"ok": True}
-        sink.action("System", "bootstrap_sheets", "DONE", "core sheets ensured", {**sched_ctx, **_duration_ctx(started_perf), **out})
-        sink.flush_all()
-        return out
-    except Exception as e:
-        sink.action("System", "bootstrap_sheets", "ERROR", f"{type(e).__name__}: {e}", {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
-        sink.flush_all()
-        raise
+    targets = names if names else _ALL_KNOWN_LOCKS
+    cleared: list[str] = []
+    skipped: list[str] = []
+    for lock_name in targets:
+        snap = c.state.get_json("locks", lock_name)
+        if snap is None:
+            skipped.append(lock_name)
+        else:
+            c.state.delete("locks", lock_name)
+            cleared.append(lock_name)
+    logger.warning("admin_clear_locks cleared=%s skipped=%s", cleared, skipped)
+    return {"cleared": cleared, "skipped": skipped}
 
 
 @app.post("/jobs/universe-sync")
@@ -430,7 +446,6 @@ def run_premarket_precompute(
         )
         market_state = c.market_brain_service().build_premarket_market_brain(now_ist().isoformat())
         market_policy = c.market_brain_service().derive_market_policy(market_state)
-        _write_market_brain_best_effort(c, market_state, market_policy)
         v2_out = c.universe_service().recompute_universe_v2_from_cache()
         wl_out = c.universe_service().build_watchlist(
             market_state,
@@ -532,7 +547,6 @@ def run_watchlist_refresh(
             else c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
         )
         market_policy = c.market_brain_service().derive_market_policy(market_state)
-        _write_market_brain_best_effort(c, market_state, market_policy)
         wl_out = c.universe_service().build_watchlist(
             market_state,
             target_size=target_size,
@@ -629,7 +643,6 @@ def run_score_refresh(
         )
         market_state = c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
         market_policy = c.market_brain_service().derive_market_policy(market_state)
-        _write_market_brain_best_effort(c, market_state, market_policy)
         v2_out = c.universe_service().recompute_universe_v2_from_cache()
         regime_payload = c.market_brain_service().watchlist_regime_payload(market_state)
         sink.action(
@@ -960,7 +973,6 @@ def run_universe_refresh_append_backfill(
         if run_score_refresh:
             market_state = c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
             market_policy = c.market_brain_service().derive_market_policy(market_state)
-            _write_market_brain_best_effort(c, market_state, market_policy)
             regime_dict = c.market_brain_service().watchlist_regime_payload(market_state)
             market_state_dict = market_state.__dict__
             market_policy_dict = market_policy.__dict__
@@ -1603,7 +1615,6 @@ def run_eod_close_update_score(
         if score_triggered:
             market_state = c.market_brain_service().build_post_open_market_brain(now_ist().isoformat())
             market_policy = c.market_brain_service().derive_market_policy(market_state)
-            _write_market_brain_best_effort(c, market_state, market_policy)
             regime_dict = c.market_brain_service().watchlist_regime_payload(market_state)
             market_state_dict = market_state.__dict__
             market_policy_dict = market_policy.__dict__

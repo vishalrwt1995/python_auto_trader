@@ -6,7 +6,6 @@ import pytest
 
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.upstox_client import UpstoxApiError
-from autotrader.adapters.sheets_repository import SHEET_LAYOUTS, SheetNames
 from autotrader.services.universe_service import UniverseService
 from autotrader.services.universe_v2 import (
     ModeThresholds,
@@ -73,9 +72,6 @@ def _controls(mode: str = "BALANCED") -> UniverseControls:
 
 
 def _make_calendar_service(*, holiday_rows=None, by_date_rows=None, fail_all=False, gcs_json=None):
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         def __init__(self):
             self._obj = dict(gcs_json or {})
@@ -94,7 +90,7 @@ def _make_calendar_service(*, holiday_rows=None, by_date_rows=None, fail_all=Fal
                 return list((by_date_rows or {}).get(str(date), []))
             return list(holiday_rows or [])
 
-    return UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    return UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
 
 
 def test_expected_lcd_normal_weekday_holiday_aware():
@@ -290,9 +286,6 @@ def test_eligibility_hard_failures_are_deterministic():
 
 
 def test_raw_snapshot_fallback_does_not_write_latest_on_empty_decode():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         def __init__(self):
             self.writes: list[tuple[str, bytes | str]] = []
@@ -327,44 +320,27 @@ def test_raw_snapshot_fallback_does_not_write_latest_on_empty_decode():
         def decode_instruments_gz_json(blob: bytes) -> list[dict[str, object]]:
             return []
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     with pytest.raises(RuntimeError):
         svc.refresh_raw_universe_from_upstox()
     assert svc.gcs.writes == []
 
 
+def _make_universe_row(symbol: str, exchange: str, segment: str, enabled: str, notes: str, instrument_key: str, canonical_id: str) -> list[Any]:
+    """Build a sheet-style row using _UNIVERSE_COL positions (0-indexed: col-1)."""
+    row: list[Any] = [""] * 38
+    row[1] = symbol       # Symbol col 2 → index 1
+    row[2] = exchange     # Exchange col 3 → index 2
+    row[3] = segment      # Segment col 4 → index 3
+    row[8] = enabled      # Enabled col 9 → index 8
+    row[10] = notes       # Notes col 11 → index 10
+    row[15] = instrument_key  # Instrument Key col 16 → index 15
+    row[18] = canonical_id    # Canonical ID col 19 → index 18
+    return row
+
+
 def test_stale_candle_handling_marks_row_stale():
-    headers = SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
-    combined_headers = headers + [
-        "Canonical ID",
-        "Primary Exchange",
-        "Secondary Exchange",
-        "Secondary Instrument Key",
-    ]
-    col = {h: i for i, h in enumerate(combined_headers)}
-
-    class FakeSheets:
-        def __init__(self):
-            self.index_rows: list[list[object]] = []
-            row = [""] * len(combined_headers)
-            row[col["Symbol"]] = "ABC"
-            row[col["Exchange"]] = "NSE"
-            row[col["Segment"]] = "CASH"
-            row[col["Enabled"]] = "Y"
-            row[col["Notes"]] = "isin=INE000A01001"
-            row[col["Instrument Key"]] = "NSE_EQ|ABC"
-            row[col["Canonical ID"]] = "INE000A01001"
-            self.universe_rows = [row]
-
-        def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
-            all_headers = combined_headers + [h for h in required_headers if h not in combined_headers]
-            return {h: i for i, h in enumerate(all_headers, start=1)}
-
-        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
-            return [list(r) for r in self.universe_rows]
-
-        def replace_score_cache_1d_index(self, rows: list[list[object]], *, chunk_size: int = 500) -> None:
-            self.index_rows = rows
+    universe_row = _make_universe_row("ABC", "NSE", "CASH", "Y", "isin=INE000A01001", "NSE_EQ|ABC", "INE000A01001")
 
     class FakeGcs:
         def __init__(self):
@@ -399,47 +375,16 @@ def test_stale_candle_handling_marks_row_stale():
     class FakeUpstox:
         pass
 
-    sheets = FakeSheets()
-    svc = UniverseService(sheets, FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
+    svc._load_universe_rows_from_firestore = lambda: [list(universe_row)]  # type: ignore[method-assign]
     out = svc._update_universe_v2_cache_and_stats(api_cap=0, run_full_backfill=False)
     q = out["qualityByCanonical"]["INE000A01001"]
     assert q["data_quality_flag"] == "STALE"
     assert out["summary"]["stale"] == 1
-    assert sheets.index_rows and sheets.index_rows[0][7] == "STALE_READY"
 
 
 def test_universe_v2_cache_recompute_can_skip_history_index_write():
-    headers = SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
-    combined_headers = headers + [
-        "Canonical ID",
-        "Primary Exchange",
-        "Secondary Exchange",
-        "Secondary Instrument Key",
-    ]
-    col = {h: i for i, h in enumerate(combined_headers)}
-
-    class FakeSheets:
-        def __init__(self):
-            self.index_rows: list[list[object]] = []
-            row = [""] * len(combined_headers)
-            row[col["Symbol"]] = "ABC"
-            row[col["Exchange"]] = "NSE"
-            row[col["Segment"]] = "CASH"
-            row[col["Enabled"]] = "Y"
-            row[col["Notes"]] = "isin=INE000A01001"
-            row[col["Instrument Key"]] = "NSE_EQ|ABC"
-            row[col["Canonical ID"]] = "INE000A01001"
-            self.universe_rows = [row]
-
-        def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
-            all_headers = combined_headers + [h for h in required_headers if h not in combined_headers]
-            return {h: i for i, h in enumerate(all_headers, start=1)}
-
-        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
-            return [list(r) for r in self.universe_rows]
-
-        def replace_score_cache_1d_index(self, rows: list[list[object]], *, chunk_size: int = 500) -> None:
-            self.index_rows = rows
+    universe_row = _make_universe_row("ABC", "NSE", "CASH", "Y", "isin=INE000A01001", "NSE_EQ|ABC", "INE000A01001")
 
     class FakeGcs:
         def __init__(self):
@@ -474,24 +419,20 @@ def test_universe_v2_cache_recompute_can_skip_history_index_write():
     class FakeUpstox:
         pass
 
-    sheets = FakeSheets()
-    svc = UniverseService(sheets, FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
+    svc._load_universe_rows_from_firestore = lambda: [list(universe_row)]  # type: ignore[method-assign]
     out = svc._update_universe_v2_cache_and_stats(api_cap=0, run_full_backfill=False, write_history_index=False)
     assert out["summary"]["stale"] == 1
-    assert sheets.index_rows == []
 
 
 def test_prefetch_stale_retry_terminalizes_api_cap_blocked_source():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     candles = [["2026-02-27T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
     prev_row = {
         "status": "STALE_READY",
@@ -503,16 +444,13 @@ def test_prefetch_stale_retry_terminalizes_api_cap_blocked_source():
 
 
 def test_prefetch_stale_retry_allows_retry_after_terminal_skip_status():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     candles = [["2026-02-27T00:00:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
     prev_row = {
         "status": "STALE_SKIPPED",
@@ -524,16 +462,13 @@ def test_prefetch_stale_retry_allows_retry_after_terminal_skip_status():
 
 
 def test_prefetch_missing_retry_terminalizes_api_cap_blocked_source():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     candles: list[list[object]] = []
     prev_row = {
         "status": "MISSING",
@@ -545,16 +480,13 @@ def test_prefetch_missing_retry_terminalizes_api_cap_blocked_source():
 
 
 def test_intraday_prefetch_stale_retry_terminalizes_empty_fetch_source():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     candles = [["2026-02-27T15:25:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
     prev_row = {
         "status": "STALE_READY",
@@ -566,16 +498,13 @@ def test_intraday_prefetch_stale_retry_terminalizes_empty_fetch_source():
 
 
 def test_intraday_prefetch_stale_retry_allows_retry_after_terminal_skip_status():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     candles = [["2026-02-27T15:25:00+05:30", 100.0, 101.0, 99.0, 100.0, 10000.0]]
     prev_row = {
         "status": "STALE_SKIPPED",
@@ -587,16 +516,13 @@ def test_intraday_prefetch_stale_retry_allows_retry_after_terminal_skip_status()
 
 
 def test_intraday_prefetch_missing_retry_terminalizes_empty_source():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     candles: list[list[object]] = []
     prev_row = {
         "status": "MISSING",
@@ -608,9 +534,6 @@ def test_intraday_prefetch_missing_retry_terminalizes_empty_source():
 
 
 def test_intraday_windowed_fetch_uses_30_day_chunks():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
@@ -631,7 +554,7 @@ def test_intraday_windowed_fetch_uses_30_day_chunks():
             return []
 
     upstox = FakeUpstox()
-    svc = UniverseService(FakeSheets(), FakeGcs(), upstox, StrategySettings())
+    svc = UniverseService(FakeGcs(), upstox, StrategySettings())
     _, calls = svc._fetch_intraday_5m_windowed_between(
         "NSE_EQ|TEST",
         from_date=date(2026, 1, 1),
@@ -642,43 +565,10 @@ def test_intraday_windowed_fetch_uses_30_day_chunks():
 
 
 def test_universe_v2_fetch_scope_limits_api_to_target_symbols():
-    headers = SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
-    combined_headers = headers + [
-        "Canonical ID",
-        "Primary Exchange",
-        "Secondary Exchange",
-        "Secondary Instrument Key",
+    universe_rows = [
+        _make_universe_row("AAA", "NSE", "CASH", "Y", "isin=INE000A01001", "NSE_EQ|AAA", "INE000A01001"),
+        _make_universe_row("BBB", "NSE", "CASH", "Y", "isin=INE000B01002", "NSE_EQ|BBB", "INE000B01002"),
     ]
-    col = {h: i for i, h in enumerate(combined_headers)}
-
-    class FakeSheets:
-        def __init__(self):
-            self.index_rows: list[list[object]] = []
-            rows: list[list[str]] = []
-            for sym, isin, ik in [
-                ("AAA", "INE000A01001", "NSE_EQ|AAA"),
-                ("BBB", "INE000B01002", "NSE_EQ|BBB"),
-            ]:
-                row = [""] * len(combined_headers)
-                row[col["Symbol"]] = sym
-                row[col["Exchange"]] = "NSE"
-                row[col["Segment"]] = "CASH"
-                row[col["Enabled"]] = "Y"
-                row[col["Notes"]] = f"isin={isin}"
-                row[col["Instrument Key"]] = ik
-                row[col["Canonical ID"]] = isin
-                rows.append(row)
-            self.universe_rows = rows
-
-        def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], *, header_row: int = 3) -> dict[str, int]:
-            all_headers = combined_headers + [h for h in required_headers if h not in combined_headers]
-            return {h: i for i, h in enumerate(all_headers, start=1)}
-
-        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
-            return [list(r) for r in self.universe_rows]
-
-        def replace_score_cache_1d_index(self, rows: list[list[object]], *, chunk_size: int = 500) -> None:
-            self.index_rows = rows
 
     class FakeGcs:
         def __init__(self):
@@ -716,8 +606,8 @@ def test_universe_v2_fetch_scope_limits_api_to_target_symbols():
     class FakeUpstox:
         pass
 
-    sheets = FakeSheets()
-    svc = UniverseService(sheets, FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
+    svc._load_universe_rows_from_firestore = lambda: [list(r) for r in universe_rows]  # type: ignore[method-assign]
     calls: list[tuple[str, str]] = []
 
     svc._fetch_daily_candles_incremental = lambda key, cached, lookback_days: calls.append(("inc", key)) or []  # type: ignore[method-assign]
@@ -777,16 +667,13 @@ def test_disabled_row_is_hard_disqualified():
 
 
 def test_symbol_exchange_conflict_resolution_prefers_existing_instrument_key():
-    class FakeSheets:
-        pass
-
     class FakeGcs:
         pass
 
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
     svc._probe_instrument_key_liveness = lambda key: (2, "live")  # type: ignore[method-assign]
     masters = [
         CanonicalListing(
@@ -820,36 +707,23 @@ def test_symbol_exchange_conflict_resolution_prefers_existing_instrument_key():
 
 
 def test_sync_sector_mapping_to_universe_updates_targeted_symbols_only():
-    class FakeSheets:
+    class FakeState:
         def __init__(self):
-            self.rows = [
-                ["1", "AAA", "NSE", "CASH", "BOTH", "AUTO", "UNKNOWN", "1.0", "Y", "0", "", "", "", ""],
-                ["2", "BBB", "NSE", "CASH", "BOTH", "AUTO", "UNKNOWN", "1.0", "Y", "0", "", "", "", ""],
+            self.universe_docs = [
+                {"symbol": "AAA", "exchange": "NSE", "sector": "UNKNOWN", "sector_source": "", "sector_updated_at": ""},
+                {"symbol": "BBB", "exchange": "NSE", "sector": "UNKNOWN", "sector_source": "", "sector_updated_at": ""},
             ]
-            self.writes: list[tuple[str, list[list[object]]]] = []
+            self.updates: dict[str, dict] = {}
 
-        @staticmethod
-        def read_sheet_headers(sheet_name: str, header_row: int = 3) -> list[str]:
-            del sheet_name, header_row
-            return SHEET_LAYOUTS[SheetNames.UNIVERSE].headers
+        def list_universe(self, limit: int = 3000) -> list[dict]:
+            return list(self.universe_docs)
 
-        def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
-            del sheet_name, start_row
-            return [list(r) for r in self.rows]
+        def update_universe_row(self, symbol: str, fields: dict) -> None:
+            self.updates[symbol] = dict(fields)
 
-        @staticmethod
-        def col_to_a1(col: int) -> str:
-            letters = ""
-            c = int(col)
-            while c > 0:
-                c, rem = divmod(c - 1, 26)
-                letters = chr(65 + rem) + letters
-            return letters
-
-        def update_values(self, rng: str, values: list[list[object]]) -> None:
-            self.writes.append((rng, values))
-
-    svc = UniverseService(FakeSheets(), object(), object(), StrategySettings())
+    state = FakeState()
+    svc = UniverseService(object(), object(), StrategySettings())
+    svc.state = state  # type: ignore[assignment]
     mapping = {
         ("AAA", "NSE"): {
             "sector": "IT",
@@ -860,34 +734,29 @@ def test_sync_sector_mapping_to_universe_updates_targeted_symbols_only():
     out = svc._sync_sector_mapping_to_universe(mapping, only_symbols={"AAA"})
     assert out["targeted"] == 1
     assert out["updated"] == 1
-    assert len(svc.sheets.writes) == 3
-
-    sector_col = svc.sheets.writes[0][1]
-    source_col = svc.sheets.writes[1][1]
-    updated_col = svc.sheets.writes[2][1]
-    assert sector_col[0][0] == "IT"
-    assert source_col[0][0] == "nse_quote_equity"
-    assert updated_col[0][0] == "2026-03-05 09:00:00"
-    assert sector_col[1][0] == "UNKNOWN"
+    assert "AAA" in state.updates
+    assert state.updates["AAA"]["sector"] == "IT"
+    assert state.updates["AAA"]["sector_source"] == "nse_quote_equity"
+    assert state.updates["AAA"]["sector_updated_at"] == "2026-03-05 09:00:00"
+    assert "BBB" not in state.updates
 
 
 def test_sector_mapping_coverage_metrics_match_final_merged_mapping():
-    class FakeSheets:
+    class FakeState:
         @staticmethod
-        def ensure_sheet_headers_append(sheet_name: str, required_headers: list[str], header_row: int = 3) -> dict[str, int]:
-            del sheet_name, header_row
-            return {h: i + 1 for i, h in enumerate(required_headers)}
-
-        @staticmethod
-        def read_sheet_rows(sheet_name: str, start_row: int = 4) -> list[list[str]]:
-            del sheet_name, start_row
+        def list_sector_mapping(limit: int = 3000) -> list[dict]:
             return [
-                [" aaa ", " nse ", "FINANCIALS", "BANKING", "BANKS", "PRIVATE BANKS", "sheet_seed", "2026-03-05 09:00:00"],
+                {
+                    "symbol": "AAA",
+                    "exchange": "NSE",
+                    "macroSector": "FINANCIALS",
+                    "sector": "BANKING",
+                    "industry": "BANKS",
+                    "basicIndustry": "PRIVATE BANKS",
+                    "source": "firestore_seed",
+                    "updatedAt": "2026-03-05 09:00:00",
+                }
             ]
-
-        @staticmethod
-        def replace_sector_mapping(rows: list[list[object]]) -> None:
-            del rows
 
     class FakeGcs:
         @staticmethod
@@ -913,7 +782,8 @@ def test_sector_mapping_coverage_metrics_match_final_merged_mapping():
     class FakeUpstox:
         pass
 
-    svc = UniverseService(FakeSheets(), FakeGcs(), FakeUpstox(), StrategySettings())
+    svc = UniverseService(FakeGcs(), FakeUpstox(), StrategySettings())
+    svc.state = FakeState()  # type: ignore[assignment]
     universe_rows = [
         {"symbol": "AAA", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "UNKNOWN"},
         {"symbol": "BBB", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": False, "eligibleIntraday": True, "sector": "UNKNOWN"},
@@ -932,14 +802,14 @@ def test_sector_mapping_coverage_metrics_match_final_merged_mapping():
     assert metrics["mapped_count"] + metrics["unmapped_count"] == metrics["eligible_universe_count"]
     assert metrics["coverage_pct"] == pytest.approx(75.0, abs=0.1)
     assert coverage_pct == pytest.approx(metrics["coverage_pct"], abs=0.1)
-    assert metrics["source_breakdown_counts"]["sheet"] == 1
+    assert metrics["source_breakdown_counts"]["firestore"] == 1
     assert metrics["source_breakdown_counts"]["gcs"] == 1
     assert metrics["source_breakdown_counts"]["universe_fallback"] == 1
     assert metrics["source_breakdown_counts"]["unknown"] == 0
 
 
 def test_sector_mapping_coverage_metrics_falls_back_to_enabled_scope_when_eligible_is_empty():
-    svc = UniverseService(object(), object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     universe_rows = [
         {"symbol": "AAA", "exchange": "NSE", "enabled": True, "fresh": False, "eligibleSwing": False, "eligibleIntraday": False},
         {"symbol": "BBB", "exchange": "NSE", "enabled": True, "fresh": False, "eligibleSwing": False, "eligibleIntraday": False},

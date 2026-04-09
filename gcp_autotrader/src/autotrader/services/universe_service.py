@@ -15,7 +15,6 @@ from urllib.parse import quote
 import httpx
 
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
-from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
 from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
 from autotrader.domain.indicators import calc_adx, calc_atr, calc_rsi, compute_indicators
 from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
@@ -111,14 +110,49 @@ class UniverseService:
         "UNKNOWN",
     )
 
+    # Fixed column map — replaces dynamic Sheets header detection
+    _UNIVERSE_COL: dict[str, int] = {
+        "Symbol": 2, "Exchange": 3, "Segment": 4, "Allowed Product": 5,
+        "Strategy": 6, "Sector": 7, "Beta": 8, "Enabled": 9, "Priority": 10,
+        "Notes": 11, "Raw CSV (JSON)": 12, "Sector Source": 13,
+        "Sector Updated At": 14, "Data Provider": 15, "Instrument Key": 16,
+        "Source Segment": 17, "Security Type": 18,
+        "Canonical ID": 19, "Primary Exchange": 20, "Secondary Exchange": 21,
+        "Secondary Instrument Key": 22, "Bars 1D": 23, "Last 1D Date": 24,
+        "Price Last": 25, "Turnover Med 60D": 26, "ATR 14": 27, "ATR Pct 14D": 28,
+        "Gap Risk 60D": 29, "Turnover Rank 60D": 30, "Liquidity Bucket": 31,
+        "Data Quality Flag": 32, "Stale Days": 33, "Eligible Swing": 34,
+        "Eligible Intraday": 35, "Disable Reason": 36, "Universe Mode": 37,
+        "Universe V2 Updated At": 38,
+    }
+
+    _UNIVERSE_HEADER_TO_FIELD: dict[str, str] = {
+        "Symbol": "symbol", "Exchange": "exchange", "Segment": "segment",
+        "Allowed Product": "allowed_product", "Strategy": "strategy_pref",
+        "Sector": "sector", "Beta": "beta", "Enabled": "enabled",
+        "Priority": "priority", "Notes": "notes", "Raw CSV (JSON)": "raw_json",
+        "Sector Source": "sector_source", "Sector Updated At": "sector_updated_at",
+        "Data Provider": "provider", "Instrument Key": "instrument_key",
+        "Source Segment": "source_segment", "Security Type": "security_type",
+        "Canonical ID": "canonical_id", "Primary Exchange": "primary_exchange",
+        "Secondary Exchange": "secondary_exchange",
+        "Secondary Instrument Key": "secondary_instrument_key",
+        "Bars 1D": "bars_1d", "Last 1D Date": "last_1d_date",
+        "Price Last": "price_last", "Turnover Med 60D": "turnover_med_60d",
+        "ATR 14": "atr_14", "ATR Pct 14D": "atr_pct_14d",
+        "Gap Risk 60D": "gap_risk_60d", "Turnover Rank 60D": "turnover_rank_60d",
+        "Liquidity Bucket": "liquidity_bucket", "Data Quality Flag": "data_quality_flag",
+        "Stale Days": "stale_days", "Eligible Swing": "eligible_swing",
+        "Eligible Intraday": "eligible_intraday", "Disable Reason": "disable_reason",
+        "Universe Mode": "universe_mode", "Universe V2 Updated At": "universe_v2_updated_at",
+    }
+
     def __init__(
         self,
-        sheets: GoogleSheetsRepository,
         gcs: GoogleCloudStorageStore,
         upstox: UpstoxClient,
         cfg: StrategySettings,
     ):
-        self.sheets = sheets
         self.gcs = gcs
         self.upstox = upstox
         self.cfg = cfg
@@ -134,6 +168,156 @@ class UniverseService:
 
     def set_market_brain_service(self, svc: Any | None) -> None:
         self.market_brain_service = svc
+
+    def _universe_doc_to_row(self, doc: dict[str, Any]) -> list[Any]:
+        """Convert Firestore universe doc → sheet-style row (0-indexed internally, col map is 1-indexed)."""
+        max_col = 38
+        row: list[Any] = [""] * max_col
+        row[0] = doc.get("row_num", 0)
+        row[1] = doc.get("symbol", "")
+        row[2] = doc.get("exchange", "")
+        row[3] = doc.get("segment", "CASH")
+        row[4] = doc.get("allowed_product", "BOTH")
+        row[5] = doc.get("strategy_pref", "AUTO")
+        row[6] = doc.get("sector", "")
+        row[7] = doc.get("beta", 1.0)
+        row[8] = doc.get("enabled", "Y")
+        row[9] = doc.get("priority", 0)
+        row[10] = doc.get("notes", "")
+        row[11] = doc.get("raw_json", "")
+        row[12] = doc.get("sector_source", "")
+        row[13] = doc.get("sector_updated_at", "")
+        row[14] = doc.get("provider", "")
+        row[15] = doc.get("instrument_key", "")
+        row[16] = doc.get("source_segment", "")
+        row[17] = doc.get("security_type", "")
+        row[18] = doc.get("canonical_id", "")
+        row[19] = doc.get("primary_exchange", "")
+        row[20] = doc.get("secondary_exchange", "")
+        row[21] = doc.get("secondary_instrument_key", "")
+        row[22] = doc.get("bars_1d", "")
+        row[23] = doc.get("last_1d_date", "")
+        row[24] = doc.get("price_last", "")
+        row[25] = doc.get("turnover_med_60d", "")
+        row[26] = doc.get("atr_14", "")
+        row[27] = doc.get("atr_pct_14d", "")
+        row[28] = doc.get("gap_risk_60d", "")
+        row[29] = doc.get("turnover_rank_60d", "")
+        row[30] = doc.get("liquidity_bucket", "")
+        row[31] = doc.get("data_quality_flag", "")
+        row[32] = doc.get("stale_days", "")
+        row[33] = doc.get("eligible_swing", "")
+        row[34] = doc.get("eligible_intraday", "")
+        row[35] = doc.get("disable_reason", "")
+        row[36] = doc.get("universe_mode", "")
+        row[37] = doc.get("universe_v2_updated_at", "")
+        return row
+
+    def _universe_row_to_doc(self, row: list[Any]) -> dict[str, Any]:
+        """Convert sheet-style row → Firestore doc fields."""
+        def _v(idx: int) -> Any:
+            return row[idx] if len(row) > idx else ""
+        return {
+            "row_num": _v(0),
+            "symbol": str(_v(1)).strip().upper(),
+            "exchange": str(_v(2)).strip().upper(),
+            "segment": str(_v(3)).strip().upper() or "CASH",
+            "allowed_product": str(_v(4)).strip().upper() or "BOTH",
+            "strategy_pref": str(_v(5)).strip().upper() or "AUTO",
+            "sector": str(_v(6)).strip(),
+            "beta": _v(7),
+            "enabled": str(_v(8)).strip().upper() or "Y",
+            "priority": _v(9),
+            "notes": str(_v(10)),
+            "raw_json": str(_v(11)),
+            "sector_source": str(_v(12)),
+            "sector_updated_at": str(_v(13)),
+            "provider": str(_v(14)),
+            "instrument_key": str(_v(15)),
+            "source_segment": str(_v(16)),
+            "security_type": str(_v(17)),
+            "canonical_id": str(_v(18)).strip().upper(),
+            "primary_exchange": str(_v(19)).strip().upper(),
+            "secondary_exchange": str(_v(20)).strip().upper(),
+            "secondary_instrument_key": str(_v(21)),
+            "bars_1d": _v(22),
+            "last_1d_date": str(_v(23)),
+            "price_last": _v(24),
+            "turnover_med_60d": _v(25),
+            "atr_14": _v(26),
+            "atr_pct_14d": _v(27),
+            "gap_risk_60d": _v(28),
+            "turnover_rank_60d": _v(29),
+            "liquidity_bucket": str(_v(30)),
+            "data_quality_flag": str(_v(31)),
+            "stale_days": _v(32),
+            "eligible_swing": str(_v(33)),
+            "eligible_intraday": str(_v(34)),
+            "disable_reason": str(_v(35)),
+            "universe_mode": str(_v(36)),
+            "universe_v2_updated_at": str(_v(37)),
+        }
+
+    def _load_universe_rows_from_firestore(self) -> list[list[Any]]:
+        """Load all universe rows from Firestore as sheet-style rows."""
+        if self.state is None:
+            return []
+        try:
+            docs = self.state.list_universe(limit=3000)
+        except Exception:
+            logger.warning("firestore_universe_load_failed", exc_info=True)
+            return []
+        rows = []
+        for doc in docs:
+            sym = str(doc.get("symbol", "")).strip().upper()
+            if not sym:
+                continue
+            rows.append(self._universe_doc_to_row(doc))
+        rows.sort(key=lambda r: str(r[1]) if len(r) > 1 else "")
+        return rows
+
+    def _save_all_universe_rows_to_firestore(self, all_rows: list[list[Any]]) -> None:
+        """Bulk-save all universe rows to Firestore."""
+        if self.state is None:
+            return
+        for row in all_rows:
+            sym = str(row[1]).strip().upper() if len(row) > 1 else ""
+            if not sym:
+                continue
+            doc = self._universe_row_to_doc(row)
+            try:
+                self.state.save_universe_row(sym, doc)
+            except Exception as _e:
+                logger.debug("firestore_universe_save_skipped symbol=%s error=%s", sym, _e)
+
+    def _firestore_universe_as_universe_rows(self) -> list[UniverseRow]:
+        """Load Firestore universe and return as UniverseRow domain objects."""
+        docs = self.state.list_universe(limit=3000) if self.state else []
+        out: list[UniverseRow] = []
+        for idx, doc in enumerate(docs, start=4):
+            sym = str(doc.get("symbol", "")).strip().upper()
+            if not sym:
+                continue
+            if str(doc.get("enabled", "Y")).strip().upper() != "Y":
+                continue
+            out.append(UniverseRow(
+                row_number=idx,
+                symbol=sym,
+                exchange=str(doc.get("exchange", "NSE")).strip().upper() or "NSE",
+                segment=str(doc.get("segment", "CASH")).strip().upper() or "CASH",
+                allowed_product=str(doc.get("allowed_product", "BOTH")).strip().upper() or "BOTH",
+                strategy_pref=str(doc.get("strategy_pref", "AUTO")).strip().upper() or "AUTO",
+                sector=str(doc.get("sector", "UNKNOWN")).strip() or "UNKNOWN",
+                beta=float(doc.get("beta") or 1.0),
+                enabled=str(doc.get("enabled", "Y")).strip().upper() or "Y",
+                priority=float(doc.get("priority") or 0.0),
+                notes=str(doc.get("notes", "")),
+                provider=str(doc.get("provider", "")).strip().upper(),
+                instrument_key=str(doc.get("instrument_key", "")).strip(),
+                source_segment=str(doc.get("source_segment", "")).strip().upper(),
+                security_type=str(doc.get("security_type", "")).strip().upper(),
+            ))
+        return out
 
     def _bq_write_candles_1d(
         self,
@@ -487,8 +671,19 @@ class UniverseService:
         return self._parse_iso_date(self._expected_lcd_context(now).get("expectedLCD", "")) or self._prev_weekday((now or now_ist()).astimezone(IST).date() - timedelta(days=1))
 
     def _build_universe_v2_controls(self) -> UniverseControls:
-        self.sheets.ensure_config_defaults(self.UNIVERSE_V2_CONFIG_DEFAULTS)
-        cfg_map = self.sheets.read_config_label_map()
+        if self.state is not None:
+            for key, val in self.UNIVERSE_V2_CONFIG_DEFAULTS.items():
+                try:
+                    if not self.state.get_config(key):
+                        self.state.set_config(key, val)
+                except Exception:
+                    pass
+        cfg_map: dict[str, str] = {}
+        if self.state is not None:
+            try:
+                cfg_map = self.state.list_config()
+            except Exception:
+                pass
         merged = dict(self.UNIVERSE_V2_CONFIG_DEFAULTS)
         merged.update({k: str(v) for k, v in cfg_map.items()})
         mode = str(merged.get("UNIVERSE_MODE", "BALANCED")).strip().upper()
@@ -697,56 +892,13 @@ class UniverseService:
         return deduped, conflicts
 
     def _read_score_cache_index_snapshot(self) -> dict[tuple[str, str, str], dict[str, str]]:
-        out: dict[tuple[str, str, str], dict[str, str]] = {}
-        try:
-            rows = self.sheets.read_sheet_rows(SheetNames.SCORE_CACHE_1D, 4)
-        except Exception:
-            logger.debug("Unable to read score-cache index snapshot", exc_info=True)
-            return out
-        for row in rows:
-            if len(row) < 8:
-                continue
-            symbol = row[0].strip().upper() if len(row) > 0 else ""
-            exchange = row[1].strip().upper() if len(row) > 1 else "NSE"
-            segment = row[2].strip().upper() if len(row) > 2 else "CASH"
-            if not symbol:
-                continue
-            notes = self._parse_pipe_kv(row[12] if len(row) > 12 else "")
-            out[(symbol, exchange, segment)] = {
-                "status": (row[7].strip().upper() if len(row) > 7 else ""),
-                "last_candle_time": (row[5].strip() if len(row) > 5 else ""),
-                "src": notes.get("src", ""),
-                "expectedlcd": notes.get("expectedlcd", ""),
-                "current": notes.get("current", ""),
-                "terminal": notes.get("terminal", ""),
-            }
-        return out
+        # Score cache 1D index is no longer stored in Sheets.
+        # Symbol-level freshness data lives in Firestore via update_universe_row().
+        return {}
 
     def _read_score_cache_5m_index_snapshot(self) -> dict[tuple[str, str, str], dict[str, str]]:
-        out: dict[tuple[str, str, str], dict[str, str]] = {}
-        try:
-            rows = self.sheets.read_sheet_rows(SheetNames.SCORE_CACHE_5M, 4)
-        except Exception:
-            logger.debug("Unable to read score-cache 5m index snapshot", exc_info=True)
-            return out
-        for row in rows:
-            if len(row) < 8:
-                continue
-            symbol = row[0].strip().upper() if len(row) > 0 else ""
-            exchange = row[1].strip().upper() if len(row) > 1 else "NSE"
-            segment = row[2].strip().upper() if len(row) > 2 else "CASH"
-            if not symbol:
-                continue
-            notes = self._parse_pipe_kv(row[12] if len(row) > 12 else "")
-            out[(symbol, exchange, segment)] = {
-                "status": (row[7].strip().upper() if len(row) > 7 else ""),
-                "last_candle_time": (row[5].strip() if len(row) > 5 else ""),
-                "src": notes.get("src", ""),
-                "expectedlcd": notes.get("expectedlcd", ""),
-                "current": notes.get("current", ""),
-                "terminal": notes.get("terminal", ""),
-            }
-        return out
+        # Score cache 5M index is no longer stored in Sheets.
+        return {}
 
     def _last_candle_text(self, candles: list[list[object]]) -> str:
         ts = self._last_candle_ts(candles)
@@ -1110,7 +1262,7 @@ class UniverseService:
 
     def build_trading_universe_from_upstox_raw(self, limit: int = 0, *, replace: bool = False) -> dict[str, Any]:
         raw_rows, meta = self._load_latest_upstox_raw_universe()
-        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
+        header_map = self._UNIVERSE_COL
         base_cols = 18
         col_canonical = int(header_map.get("Canonical ID", 19))
         col_primary_exchange = int(header_map.get("Primary Exchange", 20))
@@ -1129,7 +1281,7 @@ class UniverseService:
         col_security_type = int(header_map.get("Security Type", 18))
         min_cols = max(base_cols, max(header_map.values()) if header_map else base_cols)
 
-        existing_rows = [] if replace else self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        existing_rows = [] if replace else self._load_universe_rows_from_firestore()
         for row in existing_rows:
             if len(row) < min_cols:
                 row.extend([""] * (min_cols - len(row)))
@@ -1324,17 +1476,13 @@ class UniverseService:
                 r[0] = seq
                 seq += 1
                 rows_for_replace.append(r)
-            self.sheets.replace_universe_rows(rows_for_replace)
+            self._save_all_universe_rows_to_firestore(rows_for_replace)
             total_rows = len(rows_for_replace)
             appended = len(rows_for_replace)
             updated_existing = 0
         else:
-            if existing_rows:
-                last_col = self.sheets.col_to_a1(min_cols)
-                write_rows = [row[:min_cols] for row in existing_rows]
-                self.sheets.update_values(f"'{SheetNames.UNIVERSE}'!A4:{last_col}{3 + len(write_rows)}", write_rows)
-            if appended_rows:
-                self.sheets.append_universe_rows([row[:min_cols] for row in appended_rows])
+            all_rows = existing_rows + appended_rows
+            self._save_all_universe_rows_to_firestore(all_rows)
             total_rows = existing_symbols_count + len(appended_rows)
             appended = len(appended_rows)
 
@@ -1503,8 +1651,8 @@ class UniverseService:
         refresh_last_day_only: bool = False,
         retry_stale_terminal_today: bool = False,
     ) -> dict[str, Any]:
-        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
-        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        header_map = self._UNIVERSE_COL
+        rows = self._load_universe_rows_from_firestore()
         col_symbol = int(header_map.get("Symbol", 2))
         col_exchange = int(header_map.get("Exchange", 3))
         col_segment = int(header_map.get("Segment", 4))
@@ -1521,11 +1669,7 @@ class UniverseService:
         filter_enabled = bool(only_symbols is not None)
 
         existing_index_rows: list[list[str]] = []
-        if filter_enabled:
-            try:
-                existing_index_rows = self.sheets.read_sheet_rows(SheetNames.SCORE_CACHE_5M, 4)
-            except Exception:
-                existing_index_rows = []
+        # No longer reading from Sheets; index data lives in Firestore via update_universe_row
 
         scanned = 0
         fetches = 0
@@ -1846,8 +1990,8 @@ class UniverseService:
         fetch_only_symbols: list[str] | None = None,
         write_history_index: bool = True,
     ) -> dict[str, Any]:
-        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
-        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        header_map = self._UNIVERSE_COL
+        rows = self._load_universe_rows_from_firestore()
         base_cols = 18
         min_cols = max(base_cols, max(header_map.values()) if header_map else base_cols)
         for r in rows:
@@ -2089,8 +2233,8 @@ class UniverseService:
         stats_by_canonical: dict[str, TradabilityStats],
         quality_by_canonical: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
-        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        header_map = self._UNIVERSE_COL
+        rows = self._load_universe_rows_from_firestore()
         col_symbol = int(header_map.get("Symbol", 2))
         col_exchange = int(header_map.get("Exchange", 3))
         col_enabled = int(header_map.get("Enabled", 9))
@@ -2186,16 +2330,18 @@ class UniverseService:
             }
             for h in UNIVERSE_V2_HEADERS:
                 header_to_colvals[h].append([values[h]])
-
-        if rows:
-            end_row = 3 + len(rows)
-            for h in UNIVERSE_V2_HEADERS:
-                col = int(header_map[h])
-                col_a1 = self.sheets.col_to_a1(col)
-                self.sheets.update_values(
-                    f"'{SheetNames.UNIVERSE}'!{col_a1}4:{col_a1}{end_row}",
-                    header_to_colvals[h],
-                )
+            # Save V2 computed columns to Firestore per symbol
+            if self.state is not None:
+                try:
+                    fs_updates = {
+                        self._UNIVERSE_HEADER_TO_FIELD[h]: values[h]
+                        for h in UNIVERSE_V2_HEADERS
+                        if h in self._UNIVERSE_HEADER_TO_FIELD
+                    }
+                    if fs_updates:
+                        self.state.update_universe_row(symbol, fs_updates)
+                except Exception as _e:
+                    logger.debug("firestore_v2_cols_save_skipped symbol=%s error=%s", symbol, _e)
 
         top_disable = sorted(disable_reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
         return {
@@ -2284,8 +2430,8 @@ class UniverseService:
         }
 
     def audit_universe_v2_integrity(self) -> dict[str, Any]:
-        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
-        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        header_map = self._UNIVERSE_COL
+        rows = self._load_universe_rows_from_firestore()
         col_symbol = int(header_map.get("Symbol", 2))
         col_exchange = int(header_map.get("Exchange", 3))
         col_segment = int(header_map.get("Segment", 4))
@@ -2310,7 +2456,7 @@ class UniverseService:
 
         canon_ctr = Counter(x["canonical"] for x in universe_rows if x["canonical"])
         sym_exch_ctr = Counter((x["symbol"], x["exchange"]) for x in universe_rows)
-        hist_rows = self.sheets.read_sheet_rows(SheetNames.SCORE_CACHE_1D, 4)
+        hist_rows: list[list[str]] = []  # 1D cache metadata now lives in Firestore (update_universe_row)
         hist_key_ctr = Counter()
         hist_path_ctr = Counter()
         history_first_date_known = 0
@@ -2605,7 +2751,7 @@ class UniverseService:
         retry_stale_terminal_today: bool = False,
         priority_symbols: list[str] | None = None,
     ) -> dict[str, int | float | bool]:
-        rows = self.sheets.read_universe_rows()
+        rows = self._firestore_universe_as_universe_rows()
         if priority_symbols:
             pset = {str(s).strip().upper() for s in priority_symbols if str(s).strip()}
             if pset:
@@ -3384,7 +3530,7 @@ class UniverseService:
     @staticmethod
     def _sector_source_bucket(source_origin: str) -> str:
         v = str(source_origin or "").strip().lower()
-        if v in {"sheet", "gcs", "universe_fallback"}:
+        if v in {"sheet", "firestore", "gcs", "universe_fallback"}:
             return v
         return "unknown"
 
@@ -3405,7 +3551,7 @@ class UniverseService:
         def _rows_coverage(rows: list[dict[str, Any]]) -> tuple[int, int, int, dict[str, int], float]:
             total_count = int(len(rows))
             mapped_count_local = 0
-            breakdown_local = {"sheet": 0, "gcs": 0, "universe_fallback": 0, "unknown": 0}
+            breakdown_local = {"sheet": 0, "firestore": 0, "gcs": 0, "universe_fallback": 0, "unknown": 0}
             for row in rows:
                 key = self._sector_map_key(str(row.get("symbol") or ""), str(row.get("exchange") or "NSE"))
                 mapped = mapping.get(key) or {}
@@ -3448,7 +3594,8 @@ class UniverseService:
             "unmapped_count": int(unmapped_count),
             "coverage_pct": float(round(coverage_pct, 2)),
             "source_breakdown_counts": {
-                "sheet": int(breakdown["sheet"]),
+                "sheet": int(breakdown.get("sheet", 0)),
+                "firestore": int(breakdown.get("firestore", 0)),
                 "gcs": int(breakdown["gcs"]),
                 "universe_fallback": int(breakdown["universe_fallback"]),
                 "unknown": int(breakdown["unknown"]),
@@ -3467,33 +3614,28 @@ class UniverseService:
     ) -> tuple[dict[tuple[str, str], dict[str, str]], float] | tuple[dict[tuple[str, str], dict[str, str]], float, dict[tuple[str, str], str], dict[str, Any]]:
         mapping: dict[tuple[str, str], dict[str, str]] = {}
         source_origin: dict[tuple[str, str], str] = {}
-        sheet_rows: list[list[str]] = []
 
-        try:
-            self.sheets.ensure_sheet_headers_append(
-                SheetNames.SECTOR_MAPPING,
-                self.WATCHLIST_SECTOR_MAPPING_HEADERS,
-                header_row=3,
-            )
-            sheet_rows = self.sheets.read_sheet_rows(SheetNames.SECTOR_MAPPING, 4)
-        except Exception:
-            sheet_rows = []
-
-        for row in sheet_rows:
-            symbol = row[0] if len(row) > 0 else ""
-            exchange = row[1] if len(row) > 1 else "NSE"
-            key = self._sector_map_key(symbol, exchange)
-            if not key[0]:
-                continue
-            mapping[key] = {
-                "macroSector": row[2].strip().upper() if len(row) > 2 else "UNKNOWN",
-                "sector": row[3].strip().upper() if len(row) > 3 else "UNKNOWN",
-                "industry": row[4].strip().upper() if len(row) > 4 else "UNKNOWN",
-                "basicIndustry": row[5].strip().upper() if len(row) > 5 else "UNKNOWN",
-                "source": row[6].strip() if len(row) > 6 else "unknown",
-                "updatedAt": row[7].strip() if len(row) > 7 else "",
-            }
-            source_origin[key] = "sheet"
+        # Read sector mapping from Firestore instead of Sheets
+        if self.state is not None:
+            try:
+                fs_sector_rows = self.state.list_sector_mapping(limit=3000)
+                for doc in fs_sector_rows:
+                    symbol = str(doc.get("symbol", "") or doc.get("_id", "")).strip().upper()
+                    exchange = str(doc.get("exchange", "NSE")).strip().upper() or "NSE"
+                    key = self._sector_map_key(symbol, exchange)
+                    if not key[0]:
+                        continue
+                    mapping[key] = {
+                        "macroSector": str(doc.get("macroSector") or doc.get("macro_sector") or "UNKNOWN").strip().upper(),
+                        "sector": str(doc.get("sector") or "UNKNOWN").strip().upper(),
+                        "industry": str(doc.get("industry") or "UNKNOWN").strip().upper(),
+                        "basicIndustry": str(doc.get("basicIndustry") or doc.get("basic_industry") or "UNKNOWN").strip().upper(),
+                        "source": str(doc.get("source") or "unknown").strip(),
+                        "updatedAt": str(doc.get("updatedAt") or doc.get("updated_at") or "").strip(),
+                    }
+                    source_origin[key] = "firestore"
+            except Exception:
+                logger.warning("firestore_sector_mapping_load_failed", exc_info=True)
 
         try:
             payload = self.gcs.read_json("reference/sector_mapping/nse_symbol_classification.json", default=[])
@@ -3543,25 +3685,6 @@ class UniverseService:
             if (not self._sector_is_mapped(str(existing.get("sector") or ""))) and self._sector_is_mapped(fallback_entry["sector"]):
                 mapping[key] = fallback_entry
                 source_origin[key] = "universe_fallback"
-
-        if not sheet_rows and mapping:
-            try:
-                rows_to_write = [
-                    [
-                        sym,
-                        ex,
-                        v.get("macroSector", "UNKNOWN"),
-                        v.get("sector", "UNKNOWN"),
-                        v.get("industry", "UNKNOWN"),
-                        v.get("basicIndustry", "UNKNOWN"),
-                        v.get("source", "unknown"),
-                        v.get("updatedAt", ""),
-                    ]
-                    for (sym, ex), v in sorted(mapping.items())
-                    if sym
-                ]
-            except Exception:
-                logger.debug("sector_mapping build failed", exc_info=True)
 
         metrics = self._sector_mapping_coverage_metrics(universe_rows, mapping, source_origin)
         coverage_pct = float(metrics.get("coverage_pct", 0.0) or 0.0)
@@ -3639,74 +3762,43 @@ class UniverseService:
         *,
         only_symbols: set[str] | None = None,
     ) -> dict[str, int]:
-        headers = self.sheets.read_sheet_headers(SheetNames.UNIVERSE, header_row=3)
-        h2i: dict[str, int] = {}
-        for i, h in enumerate(headers, start=1):
-            key = str(h).strip()
-            if key and key not in h2i:
-                h2i[key] = i
-
-        col_symbol = int(h2i.get("Symbol", 2))
-        col_exchange = int(h2i.get("Exchange", 3))
-        col_sector = int(h2i.get("Sector", 7))
-        col_sector_source = int(h2i.get("Sector Source", 13))
-        col_sector_updated = int(h2i.get("Sector Updated At", 14))
-
-        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
-        if not rows:
+        if self.state is None:
             return {"targeted": 0, "updated": 0}
-
-        end_row = 3 + len(rows)
-        sector_vals: list[list[Any]] = []
-        source_vals: list[list[Any]] = []
-        updated_vals: list[list[Any]] = []
         targeted = 0
         updated = 0
-
-        for row in rows:
-            symbol = row[col_symbol - 1].strip().upper() if len(row) >= col_symbol else ""
-            exchange = row[col_exchange - 1].strip().upper() if len(row) >= col_exchange else "NSE"
-            old_sector = row[col_sector - 1].strip().upper() if len(row) >= col_sector else "UNKNOWN"
-            old_source = row[col_sector_source - 1].strip() if len(row) >= col_sector_source else ""
-            old_updated = row[col_sector_updated - 1].strip() if len(row) >= col_sector_updated else ""
-
-            new_sector = old_sector or "UNKNOWN"
-            new_source = old_source
-            new_updated = old_updated
-            if symbol and (not only_symbols or symbol in only_symbols):
-                targeted += 1
-                mapped = mapping.get((symbol, exchange)) or {}
-                m_sector = str(mapped.get("sector") or "").strip().upper()
-                m_source = str(mapped.get("source") or "").strip()
-                m_updated = str(mapped.get("updatedAt") or "").strip()
-                if m_sector:
-                    new_sector = m_sector
-                if m_source:
-                    new_source = m_source
-                if m_updated:
-                    new_updated = m_updated
-
+        try:
+            docs = self.state.list_universe(limit=3000)
+        except Exception:
+            logger.warning("firestore_universe_load_failed_for_sector_sync", exc_info=True)
+            return {"targeted": 0, "updated": 0}
+        for doc in docs:
+            symbol = str(doc.get("symbol", "")).strip().upper()
+            exchange = str(doc.get("exchange", "NSE")).strip().upper() or "NSE"
+            if not symbol:
+                continue
+            if only_symbols and symbol not in only_symbols:
+                continue
+            targeted += 1
+            mapped = mapping.get((symbol, exchange)) or {}
+            m_sector = str(mapped.get("sector") or "").strip().upper()
+            m_source = str(mapped.get("source") or "").strip()
+            m_updated = str(mapped.get("updatedAt") or "").strip()
+            old_sector = str(doc.get("sector") or "").strip().upper()
+            old_source = str(doc.get("sector_source") or "").strip()
+            old_updated = str(doc.get("sector_updated_at") or "").strip()
+            new_sector = m_sector or old_sector or "UNKNOWN"
+            new_source = m_source or old_source
+            new_updated = m_updated or old_updated
             if (new_sector != (old_sector or "UNKNOWN")) or (new_source != old_source) or (new_updated != old_updated):
                 updated += 1
-
-            sector_vals.append([new_sector or "UNKNOWN"])
-            source_vals.append([new_source])
-            updated_vals.append([new_updated])
-
-        if updated > 0:
-            self.sheets.update_values(
-                f"'{SheetNames.UNIVERSE}'!{self.sheets.col_to_a1(col_sector)}4:{self.sheets.col_to_a1(col_sector)}{end_row}",
-                sector_vals,
-            )
-            self.sheets.update_values(
-                f"'{SheetNames.UNIVERSE}'!{self.sheets.col_to_a1(col_sector_source)}4:{self.sheets.col_to_a1(col_sector_source)}{end_row}",
-                source_vals,
-            )
-            self.sheets.update_values(
-                f"'{SheetNames.UNIVERSE}'!{self.sheets.col_to_a1(col_sector_updated)}4:{self.sheets.col_to_a1(col_sector_updated)}{end_row}",
-                updated_vals,
-            )
-
+                try:
+                    self.state.update_universe_row(symbol, {
+                        "sector": new_sector,
+                        "sector_source": new_source,
+                        "sector_updated_at": new_updated,
+                    })
+                except Exception as _e:
+                    logger.debug("firestore_sector_sync_skipped symbol=%s error=%s", symbol, _e)
         return {"targeted": int(targeted), "updated": int(updated)}
 
     def refresh_sector_mapping(
@@ -4062,8 +4154,8 @@ class UniverseService:
         }
 
     def _watchlist_v2_candidates(self, expected_lcd: str) -> list[dict[str, Any]]:
-        header_map = self.sheets.ensure_sheet_headers_append(SheetNames.UNIVERSE, UNIVERSE_V2_HEADERS, header_row=3)
-        rows = self.sheets.read_sheet_rows(SheetNames.UNIVERSE, 4)
+        header_map = self._UNIVERSE_COL
+        rows = self._load_universe_rows_from_firestore()
         col = {k: int(v) for k, v in header_map.items()}
         sector_col = col.get("Sector")
         sector_source_col = col.get("Sector Source")

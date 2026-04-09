@@ -11,7 +11,6 @@ from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
-from autotrader.adapters.sheets_repository import GoogleSheetsRepository
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.risk import calc_position_size
 from autotrader.domain.scoring import determine_direction, score_signal
@@ -32,7 +31,6 @@ DEFAULT_WATCHLIST_SCAN_CORE = 10
 @dataclass
 class TradingService:
     settings: AppSettings
-    sheets: GoogleSheetsRepository
     state: FirestoreStateStore
     gcs: GoogleCloudStorageStore
     upstox: UpstoxClient
@@ -264,15 +262,20 @@ class TradingService:
                     "dataQualityScore": brain_state.data_quality_score,
                 },
             )
-            if brain_state.risk_mode == "LOCKDOWN" and not force:
+            # LOCKDOWN no longer hard-blocks the scanner. Dynamic min_signal_score
+            # (threshold=45 in LOCKDOWN) + size_multiplier=0.40 already enforce
+            # capital-preservation. A hard skip means zero signals ever fire in a
+            # crash — exactly the opposite of what we want (mean-reversion bounces
+            # are most profitable at capitulation lows).
+            # We keep the log so dashboards can surface the regime warning.
+            if brain_state.risk_mode == "LOCKDOWN":
                 self.log_sink.action(
                     "TradingService",
                     "run_scan_once",
-                    "SKIP",
-                    "market brain lockdown",
+                    "WARN",
+                    "market brain lockdown — scanning with reduced size + threshold",
                     {"regime": brain_state.regime, "riskMode": brain_state.risk_mode},
                 )
-                return {"skipped": "market_brain_lockdown", "regime": brain_state.regime, "riskMode": brain_state.risk_mode}
 
             max_signals_allowed = self.market_brain_service.policy_service.max_positions_limit(
                 self.settings.strategy.max_positions,

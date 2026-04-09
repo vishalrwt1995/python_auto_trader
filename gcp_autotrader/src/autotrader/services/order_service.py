@@ -11,7 +11,6 @@ from typing import Any
 from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.pubsub_client import PubSubClient
-from autotrader.adapters.sheets_repository import GoogleSheetsRepository
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.settings import AppSettings
 from autotrader.time_utils import now_ist_str, now_utc_iso, today_ist
@@ -56,7 +55,6 @@ def _is_final_non_fill(status: str) -> bool:
 @dataclass
 class OrderService:
     settings: AppSettings
-    sheets: GoogleSheetsRepository
     state: FirestoreStateStore
     upstox: UpstoxClient
     bq: BigQueryClient

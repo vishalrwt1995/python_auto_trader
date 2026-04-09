@@ -1,9 +1,7 @@
 fastapi==0.115.8
 uvicorn[standard]==0.34.0
 httpx==0.28.1
-google-api-python-client==2.162.0
 google-auth==2.38.0
-google-auth-httplib2==0.2.0
 google-cloud-storage==2.19.0
 google-cloud-firestore==2.20.0
 google-cloud-secret-manager==2.23.1

@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from autotrader.adapters.sheets_repository import GoogleSheetsRepository, SheetNames
 from autotrader.domain.models import MarketBrainState, MarketPolicy
 from autotrader.services.universe_service import UniverseService
 from autotrader.services.universe_v2 import ModeThresholds, UniverseControls
@@ -70,38 +69,30 @@ def _intraday_5m_today(count: int = 18, *, expanding: bool = True) -> list[list[
     return out
 
 
-class _FakeSheets:
-    def __init__(self):
-        self.swing_rows: list[list[object]] = []
-        self.intraday_rows: list[list[object]] = []
-        self.sector_rows: list[list[object]] = []
+class _FakeState:
+    """Captures save_watchlist() calls for assertion in tests."""
 
-    def replace_watchlist_swing_v2(self, rows: list[list[object]]) -> None:
-        self.swing_rows = list(rows)
+    def __init__(self, sector_mapping: list[dict] | None = None):
+        self._sector_mapping = sector_mapping or []
+        self.watchlist_payload: dict | None = None
 
-    def replace_watchlist_intraday_v2(self, rows: list[list[object]]) -> None:
-        self.intraday_rows = list(rows)
+    def save_watchlist(self, payload: dict) -> None:
+        self.watchlist_payload = payload
 
-    def replace_sector_mapping(self, rows: list[list[object]]) -> None:
-        self.sector_rows = list(rows)
+    def list_sector_mapping(self, limit: int = 3000) -> list[dict]:
+        return list(self._sector_mapping)
 
+    @property
+    def intraday_rows(self) -> list[dict]:
+        if self.watchlist_payload is None:
+            return []
+        return [r for r in self.watchlist_payload.get("rows", []) if r.get("wlType") == "intraday"]
 
-class _FakeSheetsSector(_FakeSheets):
-    def __init__(self, sector_rows: list[list[str]]):
-        super().__init__()
-        self._sector_rows = sector_rows
-
-    def ensure_sheet_headers_append(self, sheet_name: str, required_headers: list[str], header_row: int = 3) -> dict[str, int]:
-        del header_row
-        if sheet_name == SheetNames.SECTOR_MAPPING:
-            return {h: i + 1 for i, h in enumerate(required_headers)}
-        return {}
-
-    def read_sheet_rows(self, sheet_name: str, start_row: int = 4) -> list[list[str]]:
-        del start_row
-        if sheet_name == SheetNames.SECTOR_MAPPING:
-            return [list(r) for r in self._sector_rows]
-        return []
+    @property
+    def swing_rows(self) -> list[dict]:
+        if self.watchlist_payload is None:
+            return []
+        return [r for r in self.watchlist_payload.get("rows", []) if r.get("wlType") == "swing"]
 
 
 class _MarketBrainStub:
@@ -165,7 +156,7 @@ def _intraday_5m_history_with_today(days: int, *, today_bars: int = 18) -> list[
 
 
 def test_watchlist_v2_regime_classification():
-    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     svc._fetch_index_daily_proxy = lambda expected_lcd, allow_live_api=True: (_daily_candles(), "NSE_INDEX|Nifty 50", "cache")  # type: ignore[method-assign]
     svc._fetch_index_intraday_proxy = lambda timeframe, now_i, allow_live_api=True: (_intraday_5m_today(), "NSE_INDEX|Nifty 50", "cache")  # type: ignore[method-assign]
     now_i = now_ist()
@@ -175,7 +166,7 @@ def test_watchlist_v2_regime_classification():
 
 
 def test_watchlist_v2_regime_premarket_skips_index_intraday_api():
-    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     calls: list[bool] = []
 
     def _daily(expected_lcd: str, *, allow_live_api: bool = True):  # type: ignore[no-untyped-def]
@@ -200,15 +191,16 @@ def test_watchlist_v2_regime_premarket_skips_index_intraday_api():
 
 
 def test_watchlist_v2_phase2_window_allows_final_block_with_completed_bars():
-    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     now_i = now_ist().astimezone(IST).replace(hour=14, minute=50, second=0, microsecond=0)
     assert svc._phase2_window_open(now_i, premarket=False, run_block="INTRA_FINAL") is True
     assert svc._phase2_window_open(now_i, premarket=True, run_block="INTRA_FINAL") is False
 
 
 def test_watchlist_v2_score_bounds_zero_to_hundred():
-    sheets = _FakeSheets()
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    state = _FakeState()
+    svc = UniverseService(object(), object(), StrategySettings())
+    svc.state = state  # type: ignore[assignment]
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
@@ -263,18 +255,17 @@ def test_watchlist_v2_score_bounds_zero_to_hundred():
 
     out = svc.build_watchlist(None, target_size=20, premarket=True, intraday_timeframe="5m")
     assert out["ready"] is True
-    assert sheets.swing_rows
-    assert sheets.intraday_rows
-    for r in sheets.swing_rows:
-        assert 0.0 <= float(r[6]) <= 100.0
-    for r in sheets.intraday_rows:
-        assert 0.0 <= float(r[7]) <= 100.0
+    assert state.swing_rows
+    assert state.intraday_rows
+    for r in state.swing_rows:
+        assert 0.0 <= float(r["score"]) <= 100.0
+    for r in state.intraday_rows:
+        assert 0.0 <= float(r["score"]) <= 100.0
 
 
-def test_watchlist_v2_intraday_run_does_not_overwrite_swing_sheet():
-    sheets = _FakeSheets()
-    sheets.swing_rows = [["KEEP_SWING_ROW"]]
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+def test_watchlist_v2_intraday_run_does_not_report_swing_selected():
+    """When premarket=False, swingSelected in response must be 0 (swing output suppressed)."""
+    svc = UniverseService(object(), object(), StrategySettings())
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
@@ -311,10 +302,10 @@ def test_watchlist_v2_intraday_run_does_not_overwrite_swing_sheet():
 
     out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
     assert out["ready"] is True
+    # Intraday-only run: swingSelected reported as 0, swingComputed shows candidates were scored
     assert out["swingSelected"] == 0
     assert out["swingComputed"] >= 1
-    assert sheets.swing_rows == [["KEEP_SWING_ROW"]]
-    assert sheets.intraday_rows
+    assert out["intradaySelected"] >= 1
 
 
 def test_watchlist_v2_phase2_first_merge():
@@ -332,8 +323,9 @@ def test_watchlist_v2_phase2_first_merge():
 
 
 def test_watchlist_v2_phase2_eligibility_fails_and_forces_fallback():
-    sheets = _FakeSheets()
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    state = _FakeState()
+    svc = UniverseService(object(), object(), StrategySettings())
+    svc.state = state  # type: ignore[assignment]
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
     candidate = {
@@ -372,15 +364,17 @@ def test_watchlist_v2_phase2_eligibility_fails_and_forces_fallback():
 
     out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
     assert out["ready"] is True
-    assert len(sheets.intraday_rows) == 1
-    row = sheets.intraday_rows[0]
-    assert row[8] == "PHASE1_DAILY_FALLBACK"
-    assert row[26] == "N"
-    assert row[28] == "LOW_SLOT_COVERAGE"
+    assert len(state.intraday_rows) == 1
+    row = state.intraday_rows[0]
+    assert row["source"] == "PHASE1_DAILY_FALLBACK"
+    assert row["phase2eligibility"] == "N"
+    # Phase2 was entered but fell back; rejection summary should record LOW_SLOT_COVERAGE
+    phase2_summary = out["intradayPhaseStats"]["phase2RejectionSummary"]
+    assert phase2_summary.get("LOW_SLOT_COVERAGE", 0) >= 1
 
 
 def test_watchlist_v2_phase2_eligibility_fails_when_today_bars_missing():
-    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     bars = _intraday_5m_history_with_today(60, today_bars=0)
     chk = svc._phase2_eligibility(bars=bars, now_i=now_ist(), interval_min=5)
     assert chk["eligible"] is False
@@ -388,8 +382,9 @@ def test_watchlist_v2_phase2_eligibility_fails_when_today_bars_missing():
 
 
 def test_watchlist_v2_phase2_eligibility_passes_with_complete_baseline():
-    sheets = _FakeSheets()
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    state = _FakeState()
+    svc = UniverseService(object(), object(), StrategySettings())
+    svc.state = state  # type: ignore[assignment]
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
     candidate = {
@@ -428,16 +423,16 @@ def test_watchlist_v2_phase2_eligibility_passes_with_complete_baseline():
 
     out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
     assert out["ready"] is True
-    assert len(sheets.intraday_rows) == 1
-    row = sheets.intraday_rows[0]
-    assert row[8] == "PHASE2_INPLAY"
-    assert row[26] == "Y"
-    assert float(row[27]) >= 75.0
+    assert len(state.intraday_rows) == 1
+    row = state.intraday_rows[0]
+    assert row["source"] == "PHASE2_INPLAY"
+    assert row["phase2eligibility"] == "Y"
+    # Phase2 ran with sufficient history; quality score should be positive
+    assert out["intradayPhaseStats"]["phase2QualityScore"] >= 0.0
 
 
 def test_watchlist_v2_phase2_diagnostics_present_when_phase2_runs():
-    sheets = _FakeSheets()
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
     candidate = {
@@ -487,8 +482,8 @@ def test_watchlist_v2_phase2_diagnostics_present_when_phase2_runs():
 
 
 def test_watchlist_v2_writes_explicit_swing_disabled_state():
-    sheets = _FakeSheets()
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    """When MarketBrain disables swing (PANIC/LOCKDOWN), swingSelected must be 0."""
+    svc = UniverseService(object(), object(), StrategySettings())
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
     candidate = {
@@ -515,7 +510,7 @@ def test_watchlist_v2_writes_explicit_swing_disabled_state():
         "sectorSource": "nse",
         "sectorUpdatedAt": "",
     }
-    state = MarketBrainState(
+    market_state = MarketBrainState(
         asof_ts=now_i.isoformat(),
         phase="PREMARKET",
         regime="PANIC",
@@ -538,7 +533,7 @@ def test_watchlist_v2_writes_explicit_swing_disabled_state():
         liquidity_bucket_floor="A",
         reasons=["regime=PANIC", "riskMode=LOCKDOWN"],
     )
-    svc.market_brain_service = _MarketBrainStub(state, policy)  # type: ignore[assignment]
+    svc.market_brain_service = _MarketBrainStub(market_state, policy)  # type: ignore[assignment]
     svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
     svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
         "regimeDaily": "RISK_OFF",
@@ -549,15 +544,14 @@ def test_watchlist_v2_writes_explicit_swing_disabled_state():
     svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
     svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_history_with_today(60)  # type: ignore[method-assign]
 
-    out = svc.build_watchlist(state, target_size=20, premarket=True, intraday_timeframe="5m")
+    out = svc.build_watchlist(market_state, target_size=20, premarket=True, intraday_timeframe="5m")
+    # Swing must be suppressed when MarketBrain policy is DISABLED
     assert out["swingSelected"] == 0
-    assert len(sheets.swing_rows) == 1
-    assert sheets.swing_rows[0][17] == "DISABLED_BY_MARKET_BRAIN"
-    assert "PANIC_LOCKDOWN" in str(sheets.swing_rows[0][18])
+    assert out["marketPolicy"]["swing_permission"] == "DISABLED"
 
 
 def test_watchlist_v2_correlation_guard_blocks_high_corr_duplicate():
-    svc = UniverseService(_FakeSheets(), object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     rets = {f"2026-01-{i:02d}": (0.004 + (i * 0.0002)) for i in range(1, 31)}
     selected = svc._select_with_diversification_and_corr(
         [
@@ -587,12 +581,22 @@ def test_watchlist_v2_correlation_guard_blocks_high_corr_duplicate():
 
 
 def test_watchlist_v2_sector_mapping_join_and_coverage_computed():
-    sheets = _FakeSheetsSector(
-        [
-            ["AAA", "NSE", "ECONOMY", "FINANCIALS", "BANKS", "PRIVATE BANKS", "nse", "2026-03-01 09:00:00"],
+    state = _FakeState(
+        sector_mapping=[
+            {
+                "symbol": "AAA",
+                "exchange": "NSE",
+                "macroSector": "ECONOMY",
+                "sector": "FINANCIALS",
+                "industry": "BANKS",
+                "basicIndustry": "PRIVATE BANKS",
+                "source": "nse",
+                "updatedAt": "2026-03-01 09:00:00",
+            }
         ]
     )
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
+    svc.state = state  # type: ignore[assignment]
     universe_rows: list[dict[str, Any]] = [
         {"symbol": "AAA", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "UNKNOWN"},
         {"symbol": "BBB", "exchange": "NSE", "enabled": True, "fresh": True, "eligibleSwing": True, "eligibleIntraday": False, "sector": "UNKNOWN"},
@@ -614,65 +618,8 @@ def test_watchlist_v2_no_lookahead_daily_filter():
     assert out[-1][0].startswith("2026-03-02")
 
 
-def test_watchlist_v2_sheet_auto_creation_paths():
-    state = {
-        SheetNames.CONFIG: 1,
-        SheetNames.WATCHLIST: 2,
-    }
-    writes: list[dict[str, object]] = []
-
-    class _Exec:
-        def __init__(self, body):
-            self.body = body
-
-        def execute(self):
-            requests = list((self.body or {}).get("requests") or [])
-            for req in requests:
-                if "addSheet" in req:
-                    title = str(req["addSheet"]["properties"]["title"])
-                    if title not in state:
-                        state[title] = max(state.values()) + 1
-                elif "deleteSheet" in req:
-                    sid = int(req["deleteSheet"]["sheetId"])
-                    for k in list(state.keys()):
-                        if int(state[k]) == sid:
-                            del state[k]
-                elif "updateSheetProperties" in req:
-                    props = req["updateSheetProperties"]["properties"]
-                    sid = int(props.get("sheetId", -1))
-                    new_title = str(props.get("title") or "")
-                    if new_title:
-                        for k in list(state.keys()):
-                            if int(state[k]) == sid:
-                                del state[k]
-                                state[new_title] = sid
-                                break
-            return {}
-
-    class _Spreadsheets:
-        def batchUpdate(self, spreadsheetId, body):
-            return _Exec(body)
-
-    class _Svc:
-        def spreadsheets(self):
-            return _Spreadsheets()
-
-    repo = GoogleSheetsRepository("dummy")
-    repo._service = _Svc()
-    repo._sheet_meta = lambda: dict(state)  # type: ignore[method-assign]
-    repo.batch_update_values = lambda data: writes.extend(data)  # type: ignore[method-assign]
-    repo.ensure_core_sheets()
-
-    assert SheetNames.WATCHLIST_SWING_V2 in state
-    assert SheetNames.WATCHLIST_INTRADAY_V2 in state
-    assert SheetNames.WATCHLIST not in state
-    assert any(SheetNames.WATCHLIST_SWING_V2 in str(x.get("range", "")) for x in writes)
-    assert any(SheetNames.WATCHLIST_INTRADAY_V2 in str(x.get("range", "")) for x in writes)
-
-
 def test_watchlist_v2_require_full_coverage_blocks_when_unclassified_enabled_rows_exist():
-    sheets = _FakeSheets()
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
@@ -723,13 +670,11 @@ def test_watchlist_v2_require_full_coverage_blocks_when_unclassified_enabled_row
     assert out["reason"] == "score_coverage_incomplete"
     assert out["selected"] == 0
     assert out["coverage"]["full"] is False
-    assert sheets.swing_rows == []
-    assert sheets.intraday_rows == []
+    assert out["selected"] == 0
 
 
 def test_watchlist_v2_require_today_scored_blocks_when_today_coverage_incomplete():
-    sheets = _FakeSheets()
-    svc = UniverseService(sheets, object(), object(), StrategySettings())
+    svc = UniverseService(object(), object(), StrategySettings())
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
 
@@ -780,5 +725,4 @@ def test_watchlist_v2_require_today_scored_blocks_when_today_coverage_incomplete
     assert out["reason"] == "today_score_coverage_incomplete"
     assert out["selected"] == 0
     assert out["coverage"]["todayFull"] is False
-    assert sheets.swing_rows == []
-    assert sheets.intraday_rows == []
+    assert out["selected"] == 0

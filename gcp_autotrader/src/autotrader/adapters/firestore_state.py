@@ -241,3 +241,13 @@ class FirestoreStateStore:
     def set_config(self, key: str, value: str) -> None:
         self.set_json("config", key, {"key": key, "value": value})
 
+    def list_config(self) -> dict[str, str]:
+        """Return all config key-value pairs."""
+        out: dict[str, str] = {}
+        for d in self._db().collection("config").stream():
+            row = d.to_dict() or {}
+            val = row.get("value")
+            if val is not None:
+                out[d.id] = str(val)
+        return out
+

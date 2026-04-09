@@ -85,8 +85,8 @@ class UpstoxSettings:
 class GcpSettings:
     project_id: str
     region: str
-    spreadsheet_id: str
     bucket_name: str
+    spreadsheet_id: str = ""
     firestore_database: str = "(default)"
     bq_dataset: str = "autotrader"
     pubsub_topic_positions: str = "position-events"
@@ -140,8 +140,8 @@ class AppSettings:
             gcp=GcpSettings(
                 project_id=_env("GCP_PROJECT_ID"),
                 region=_env("GCP_REGION", "asia-south1"),
-                spreadsheet_id=_env("GOOGLE_SHEETS_SPREADSHEET_ID"),
                 bucket_name=_env("GCS_BUCKET"),
+                spreadsheet_id=os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", ""),
                 firestore_database=_env("FIRESTORE_DATABASE", "(default)"),
                 bq_dataset=_env("BQ_DATASET", "autotrader"),
                 pubsub_topic_positions=_env("PUBSUB_TOPIC_POSITIONS", "position-events"),
