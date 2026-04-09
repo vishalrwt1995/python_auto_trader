@@ -169,48 +169,58 @@ class UniverseService:
     def set_market_brain_service(self, svc: Any | None) -> None:
         self.market_brain_service = svc
 
+    @staticmethod
+    def _fs_str(val: Any, default: str = "") -> str:
+        """Coerce a Firestore value to string (handles bool, None, numbers)."""
+        if val is None:
+            return default
+        if isinstance(val, bool):
+            return "Y" if val else "N"
+        return str(val)
+
     def _universe_doc_to_row(self, doc: dict[str, Any]) -> list[Any]:
         """Convert Firestore universe doc → sheet-style row (0-indexed internally, col map is 1-indexed)."""
+        fs = self._fs_str
         max_col = 38
         row: list[Any] = [""] * max_col
         row[0] = doc.get("row_num", 0)
-        row[1] = doc.get("symbol", "")
-        row[2] = doc.get("exchange", "")
-        row[3] = doc.get("segment", "CASH")
-        row[4] = doc.get("allowed_product", "BOTH")
-        row[5] = doc.get("strategy_pref", "AUTO")
-        row[6] = doc.get("sector", "")
-        row[7] = doc.get("beta", 1.0)
-        row[8] = doc.get("enabled", "Y")
-        row[9] = doc.get("priority", 0)
-        row[10] = doc.get("notes", "")
-        row[11] = doc.get("raw_json", "")
-        row[12] = doc.get("sector_source", "")
-        row[13] = doc.get("sector_updated_at", "")
-        row[14] = doc.get("provider", "")
-        row[15] = doc.get("instrument_key", "")
-        row[16] = doc.get("source_segment", "")
-        row[17] = doc.get("security_type", "")
-        row[18] = doc.get("canonical_id", "")
-        row[19] = doc.get("primary_exchange", "")
-        row[20] = doc.get("secondary_exchange", "")
-        row[21] = doc.get("secondary_instrument_key", "")
+        row[1] = fs(doc.get("symbol"), "")
+        row[2] = fs(doc.get("exchange"), "")
+        row[3] = fs(doc.get("segment"), "CASH")
+        row[4] = fs(doc.get("allowed_product"), "BOTH")
+        row[5] = fs(doc.get("strategy_pref"), "AUTO")
+        row[6] = fs(doc.get("sector"), "")
+        row[7] = doc.get("beta", 1.0)       # numeric — kept as-is
+        row[8] = fs(doc.get("enabled"), "Y")
+        row[9] = doc.get("priority", 0)     # numeric — kept as-is
+        row[10] = fs(doc.get("notes"), "")
+        row[11] = fs(doc.get("raw_json"), "")
+        row[12] = fs(doc.get("sector_source"), "")
+        row[13] = fs(doc.get("sector_updated_at"), "")
+        row[14] = fs(doc.get("provider"), "")
+        row[15] = fs(doc.get("instrument_key"), "")
+        row[16] = fs(doc.get("source_segment"), "")
+        row[17] = fs(doc.get("security_type"), "")
+        row[18] = fs(doc.get("canonical_id"), "")
+        row[19] = fs(doc.get("primary_exchange"), "")
+        row[20] = fs(doc.get("secondary_exchange"), "")
+        row[21] = fs(doc.get("secondary_instrument_key"), "")
         row[22] = doc.get("bars_1d", "")
-        row[23] = doc.get("last_1d_date", "")
+        row[23] = fs(doc.get("last_1d_date"), "")
         row[24] = doc.get("price_last", "")
         row[25] = doc.get("turnover_med_60d", "")
         row[26] = doc.get("atr_14", "")
         row[27] = doc.get("atr_pct_14d", "")
         row[28] = doc.get("gap_risk_60d", "")
         row[29] = doc.get("turnover_rank_60d", "")
-        row[30] = doc.get("liquidity_bucket", "")
-        row[31] = doc.get("data_quality_flag", "")
+        row[30] = fs(doc.get("liquidity_bucket"), "")
+        row[31] = fs(doc.get("data_quality_flag"), "")
         row[32] = doc.get("stale_days", "")
-        row[33] = doc.get("eligible_swing", "")
-        row[34] = doc.get("eligible_intraday", "")
-        row[35] = doc.get("disable_reason", "")
-        row[36] = doc.get("universe_mode", "")
-        row[37] = doc.get("universe_v2_updated_at", "")
+        row[33] = fs(doc.get("eligible_swing"), "")
+        row[34] = fs(doc.get("eligible_intraday"), "")
+        row[35] = fs(doc.get("disable_reason"), "")
+        row[36] = fs(doc.get("universe_mode"), "")
+        row[37] = fs(doc.get("universe_v2_updated_at"), "")
         return row
 
     def _universe_row_to_doc(self, row: list[Any]) -> dict[str, Any]:
@@ -298,18 +308,19 @@ class UniverseService:
             sym = str(doc.get("symbol", "")).strip().upper()
             if not sym:
                 continue
-            if str(doc.get("enabled", "Y")).strip().upper() != "Y":
+            enabled_val = self._fs_str(doc.get("enabled"), "Y")
+            if enabled_val.strip().upper() != "Y":
                 continue
             out.append(UniverseRow(
                 row_number=idx,
                 symbol=sym,
-                exchange=str(doc.get("exchange", "NSE")).strip().upper() or "NSE",
-                segment=str(doc.get("segment", "CASH")).strip().upper() or "CASH",
-                allowed_product=str(doc.get("allowed_product", "BOTH")).strip().upper() or "BOTH",
-                strategy_pref=str(doc.get("strategy_pref", "AUTO")).strip().upper() or "AUTO",
-                sector=str(doc.get("sector", "UNKNOWN")).strip() or "UNKNOWN",
+                exchange=self._fs_str(doc.get("exchange"), "NSE").strip().upper() or "NSE",
+                segment=self._fs_str(doc.get("segment"), "CASH").strip().upper() or "CASH",
+                allowed_product=self._fs_str(doc.get("allowed_product"), "BOTH").strip().upper() or "BOTH",
+                strategy_pref=self._fs_str(doc.get("strategy_pref"), "AUTO").strip().upper() or "AUTO",
+                sector=self._fs_str(doc.get("sector"), "UNKNOWN").strip() or "UNKNOWN",
                 beta=float(doc.get("beta") or 1.0),
-                enabled=str(doc.get("enabled", "Y")).strip().upper() or "Y",
+                enabled=enabled_val.strip().upper() or "Y",
                 priority=float(doc.get("priority") or 0.0),
                 notes=str(doc.get("notes", "")),
                 provider=str(doc.get("provider", "")).strip().upper(),
