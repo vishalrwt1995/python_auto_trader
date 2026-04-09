@@ -43,6 +43,7 @@ class TradingService:
     def _read_watchlist_with_fallback(self) -> list[Any]:
         """Return watchlist rows — Firestore primary, Sheets fallback."""
         from autotrader.domain.models import WatchlistRow
+        rows: list[Any] = []
         try:
             doc = self.state.get_watchlist()
             if doc and isinstance(doc.get("rows"), list) and doc["rows"]:
@@ -489,9 +490,9 @@ class TradingService:
                     policy_block_reason = "policy_max_positions_reached"
                 # Live VWAP guard: if price drifted to wrong side of VWAP since candle close, reject entry.
                 # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
-                elif direction == "BUY" and _live > 0 and ltp < ind.vwap:
+                elif direction == "BUY" and _live > 0 and ltp < ind.vwap and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
                     policy_block_reason = "live_price_below_vwap"
-                elif direction == "SELL" and _live > 0 and ltp > ind.vwap:
+                elif direction == "SELL" and _live > 0 and ltp > ind.vwap and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
                     policy_block_reason = "live_price_above_vwap"
 
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.

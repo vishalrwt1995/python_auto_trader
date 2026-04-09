@@ -317,8 +317,13 @@ class MarketBrainService:
         watchlist_ts = parse_any_ts(self.state.get_runtime_prop("runtime:watchlist_last_run_ts", ""))
         scanner_ts = parse_any_ts(self.state.get_runtime_prop("runtime:scanner_last_run_ts", ""))
         signals_ts = parse_any_ts(self.state.get_runtime_prop("runtime:signals_last_write_ts", ""))
-        phase2_eligible_count = int(self.state.get_runtime_prop("runtime:watchlist_last_phase2_eligible_count", "0") or "0")
-        phase2_used_count = int(self.state.get_runtime_prop("runtime:watchlist_last_phase2_used_count", "0") or "0")
+        def _safe_int(val: str, default: int = 0) -> int:
+            try:
+                return int(float(val))
+            except (ValueError, TypeError):
+                return default
+        phase2_eligible_count = _safe_int(self.state.get_runtime_prop("runtime:watchlist_last_phase2_eligible_count", "0") or "0")
+        phase2_used_count = _safe_int(self.state.get_runtime_prop("runtime:watchlist_last_phase2_used_count", "0") or "0")
         phase2_branch_entered = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_branch_entered", "")).strip().upper() in {"Y", "YES", "TRUE", "1"}
         phase2_window_open = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_window_open", "")).strip().upper() in {"Y", "YES", "TRUE", "1"}
         phase2_policy_enabled = str(self.state.get_runtime_prop("runtime:watchlist_last_phase2_policy_enabled", "")).strip().upper() in {"Y", "YES", "TRUE", "1"}

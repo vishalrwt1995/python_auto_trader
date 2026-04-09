@@ -146,7 +146,7 @@ class MarketPolicyService:
                     continue
             if not policy.intraday_phase2_enabled and source == "PHASE2_INPLAY":
                 continue
-            if not policy.breakout_enabled and ("BREAKOUT" in setup or setup == "VWAP_TREND"):
+            if not policy.breakout_enabled and "BREAKOUT" in setup:
                 continue
             if not policy.open_drive_enabled and "OPEN" in setup:
                 continue
