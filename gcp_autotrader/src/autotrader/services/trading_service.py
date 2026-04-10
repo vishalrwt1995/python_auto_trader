@@ -183,24 +183,26 @@ class TradingService:
         to_str = end.strftime("%Y-%m-%d %H:%M:%S")
 
         # Upstox intraday candle fallback for symbols not in GCS cache.
+        # Only attempt if we have a valid instrument key — raw symbol strings (e.g. "WIPRO")
+        # are not accepted by the Upstox v3 API and will return HTTP 400.
         api: list[list[Any]] = []
-        try:
-            instrument_key = symbol  # Will be resolved to full key by caller if needed
-            api = self.upstox.get_historical_candles_v3_intraday_range(
-                instrument_key,
-                from_date=start.strftime("%Y-%m-%d"),
-                to_date=end.strftime("%Y-%m-%d"),
-                unit="minutes",
-                interval=int(timeframe.replace("m", "").replace("min", "")) if timeframe else 15,
-            )
-        except Exception:
-            logger.warning(
-                "scanner_upstox_candle_fallback_failed symbol=%s exchange=%s segment=%s",
-                symbol,
-                exchange,
-                segment,
-                exc_info=True,
-            )
+        if instrument_key:
+            try:
+                api = self.upstox.get_historical_candles_v3_intraday_range(
+                    instrument_key,
+                    from_date=start.strftime("%Y-%m-%d"),
+                    to_date=end.strftime("%Y-%m-%d"),
+                    unit="minutes",
+                    interval=int(timeframe.replace("m", "").replace("min", "")) if timeframe else 15,
+                )
+            except Exception:
+                logger.warning(
+                    "scanner_upstox_candle_fallback_failed symbol=%s exchange=%s segment=%s",
+                    symbol,
+                    exchange,
+                    segment,
+                    exc_info=True,
+                )
         if api:
             merged = self.gcs.merge_candles(path, api)
             return merged[-max(need, 120):]
