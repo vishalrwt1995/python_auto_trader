@@ -307,6 +307,7 @@ class TradingService:
             scan_rows: list[list[Any]] = []
             signal_rows: list[list[Any]] = []
             bq_signals: list[dict[str, Any]] = []
+            bq_decisions: list[dict[str, Any]] = []   # ALL symbols — qualified + rejected
             # Rich per-symbol scan results saved to Firestore for dashboard visibility
             scan_result_rows: list[dict[str, Any]] = []
             import uuid as _uuid
@@ -361,6 +362,7 @@ class TradingService:
                         "NA",
                         "NA",
                     ])
+                    _skip_ts = now_ist_str()
                     scan_result_rows.append({
                         "symbol": w.symbol,
                         "ltp": 0.0,
@@ -375,6 +377,36 @@ class TradingService:
                         "setup": w.strategy or "",
                         "status": "skip",
                         "reason": "insufficient_candles",
+                    })
+                    bq_decisions.append({
+                        "scan_ts": _skip_ts,
+                        "run_date": _skip_ts[:10],
+                        "scanner_run_id": scanner_run_id,
+                        "symbol": w.symbol,
+                        "setup": w.strategy or "",
+                        "direction": "SKIP",
+                        "raw_score": 0,
+                        "adjusted_score": 0,
+                        "min_score": 0,
+                        "qualified": False,
+                        "blocked_reason": "insufficient_candles",
+                        "ltp": 0.0,
+                        "change_pct": 0.0,
+                        "vol_ratio": 0.0,
+                        "rsi": 0.0,
+                        "macd_view": "NA",
+                        "ema_state": "MIXED",
+                        "supertrend": "NA",
+                        "vwap": 0.0,
+                        "atr": 0.0,
+                        "atr_mult": 0.0,
+                        "score_regime": 0,
+                        "score_options": 0,
+                        "score_technical": 0,
+                        "score_volume": 0,
+                        "score_penalty": 0,
+                        "regime": brain_state.regime if brain_state else "",
+                        "risk_mode": brain_state.risk_mode if brain_state else "",
                     })
                     continue
                 direction = determine_direction(ind, regime)
@@ -562,6 +594,41 @@ class TradingService:
                         why = "entry_window_closed_or_blocked"
                     self.log_sink.decision("SIGNAL", w.symbol, direction, why, {"score": adjusted_score, "min": dynamic_min_score})
                     _scan_row_rich.update({"status": "filtered", "reason": why})
+
+                # ── Decision log (every symbol, qualified + rejected) ────────
+                _dec_ts = now_ist_str()
+                _is_qualified = _scan_row_rich.get("status") == "qualified"
+                bq_decisions.append({
+                    "scan_ts": _dec_ts,
+                    "run_date": _dec_ts[:10],
+                    "scanner_run_id": scanner_run_id,
+                    "symbol": w.symbol,
+                    "setup": w.strategy or "",
+                    "direction": direction,
+                    "raw_score": int(meta.score),
+                    "adjusted_score": int(adjusted_score),
+                    "min_score": int(dynamic_min_score),
+                    "qualified": _is_qualified,
+                    "blocked_reason": "" if _is_qualified else _scan_row_rich.get("reason", ""),
+                    "ltp": round(ltp, 2),
+                    "change_pct": round(change_pct, 2),
+                    "vol_ratio": round(ind.volume.ratio, 2),
+                    "rsi": round(ind.rsi.curr, 1),
+                    "macd_view": macd_view,
+                    "ema_state": ema_state,
+                    "supertrend": "UP" if ind.supertrend.dir == 1 else "DOWN",
+                    "vwap": round(ind.vwap, 2) if ind.vwap else 0.0,
+                    "atr": round(ind.atr, 4),
+                    "atr_mult": round(_atr_mult, 3),
+                    "score_regime": int(meta.breakdown.regime),
+                    "score_options": int(meta.breakdown.options),
+                    "score_technical": int(meta.breakdown.technical),
+                    "score_volume": int(meta.breakdown.volume),
+                    "score_penalty": int(meta.breakdown.penalty),
+                    "regime": brain_state.regime if brain_state else regime.regime,
+                    "risk_mode": brain_state.risk_mode if brain_state else "",
+                })
+
                 scan_result_rows.append(_scan_row_rich)
 
                 time.sleep(0.08)
@@ -593,16 +660,72 @@ class TradingService:
             except Exception:
                 logger.warning("scan_results_firestore_save_failed — non-critical", exc_info=True)
             # Publish signals to Pub/Sub + BigQuery (best-effort)
-            if bq_signals:
-                try:
-                    from autotrader.adapters.bigquery_client import BigQueryClient as _BQC
-                    bq: _BQC | None = getattr(self.order_service, "bq", None)  # type: ignore[assignment]
-                    if bq:
+            try:
+                from autotrader.adapters.bigquery_client import BigQueryClient as _BQC
+                bq: _BQC | None = getattr(self.order_service, "bq", None)  # type: ignore[assignment]
+                if bq:
+                    if bq_signals:
                         bq.insert_signals_batch(bq_signals)
-                except Exception:
-                    logger.warning("bq_signals_insert_failed — non-critical", exc_info=True)
-                if self.pubsub:
-                    self.pubsub.publish_trade_signals_batch(bq_signals)
+                    if bq_decisions:
+                        bq.insert_scan_decisions_batch(bq_decisions)
+            except Exception:
+                logger.warning("bq_signals_or_decisions_insert_failed — non-critical", exc_info=True)
+            if bq_signals and self.pubsub:
+                self.pubsub.publish_trade_signals_batch(bq_signals)
+
+            # ── Firestore daily decision summary (running totals per day) ──
+            try:
+                _today = run_ts[:10]
+                _existing = self.state.get_json("decisions", _today) or {}
+                _rejection_counts: dict[str, int] = dict(_existing.get("rejection_breakdown", {}))
+                _top_scores: list[dict[str, Any]] = list(_existing.get("top_scores", []))
+                for _d in bq_decisions:
+                    if not _d["qualified"]:
+                        _reason = _d["blocked_reason"] or "unknown"
+                        _rejection_counts[_reason] = _rejection_counts.get(_reason, 0) + 1
+                    # Track top-10 highest scores that didn't qualify (tuning targets)
+                    if not _d["qualified"] and _d["direction"] != "HOLD":
+                        _top_scores.append({
+                            "symbol": _d["symbol"],
+                            "score": _d["adjusted_score"],
+                            "raw": _d["raw_score"],
+                            "direction": _d["direction"],
+                            "reason": _d["blocked_reason"],
+                            "rsi": _d["rsi"],
+                            "vol_ratio": _d["vol_ratio"],
+                            "setup": _d["setup"],
+                            "scan_ts": _d["scan_ts"],
+                        })
+                # Keep only top-10 by score across all cycles today
+                _top_scores = sorted(_top_scores, key=lambda x: x["score"], reverse=True)[:10]
+                _scans_today = list(_existing.get("scans", []))
+                _scans_today.append({
+                    "scan_ts": run_ts,
+                    "scanner_run_id": scanner_run_id,
+                    "scanned": len(bq_decisions),
+                    "qualified": qualified,
+                    "regime": brain_state.regime if brain_state else "",
+                    "risk_mode": brain_state.risk_mode if brain_state else "",
+                })
+                _all_scores = [_d["adjusted_score"] for _d in bq_decisions if _d["direction"] != "HOLD"]
+                _avg_score = round(sum(_all_scores) / len(_all_scores), 1) if _all_scores else 0.0
+                self.state.set_json(
+                    "decisions",
+                    _today,
+                    {
+                        "date": _today,
+                        "last_updated": run_ts,
+                        "total_scanned": _existing.get("total_scanned", 0) + len(bq_decisions),
+                        "total_qualified": _existing.get("total_qualified", 0) + qualified,
+                        "avg_score": _avg_score,
+                        "rejection_breakdown": _rejection_counts,
+                        "top_scores": _top_scores,
+                        "scans": _scans_today[-50:],  # cap at last 50 scan summaries
+                    },
+                    merge=False,
+                )
+            except Exception:
+                logger.warning("decisions_daily_summary_save_failed — non-critical", exc_info=True)
             self.log_sink.action(
                 "TradingService",
                 "run_scan_once",

@@ -103,6 +103,15 @@ class BigQueryClient:
         """Batch-insert audit-log entries."""
         self._insert("audit_log", entries)
 
+    def insert_scan_decisions_batch(self, decisions: list[dict[str, Any]]) -> None:
+        """Batch-insert per-symbol scan decisions (both qualified and rejected).
+
+        Each row captures the full indicator snapshot, score breakdown, and
+        rejection reason for every symbol evaluated in a scan cycle.  This
+        gives a complete audit trail for tuning thresholds and weights.
+        """
+        self._insert("scan_decisions", decisions)
+
     # ------------------------------------------------------------------ #
     # Query helpers (for dashboard / reconcile reads)
     # ------------------------------------------------------------------ #
