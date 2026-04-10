@@ -177,10 +177,24 @@ def calc_supertrend(candles: list[Candle], atr_p: int = 10, mult: float = 3.0) -
 
 
 def calc_vwap(candles: list[Candle]) -> list[float]:
+    """Compute VWAP, resetting cumulative sums at each new trading day.
+
+    The timestamp in each candle (index 0) is expected to be an ISO-8601
+    string.  The first 10 characters give the YYYY-MM-DD date, which is
+    used to detect day boundaries.  Without this reset the VWAP drifts
+    across multiple days and gives incorrect intraday signals.
+    """
     cvp = 0.0
     cv = 0.0
     out: list[float] = []
+    prev_date = ""
     for c in candles:
+        # Detect day boundary and reset cumulative sums
+        ts_date = str(c[0])[:10]
+        if ts_date != prev_date:
+            cvp = 0.0
+            cv = 0.0
+            prev_date = ts_date
         tp = (c[2] + c[3] + c[4]) / 3
         cvp += tp * c[5]
         cv += c[5]

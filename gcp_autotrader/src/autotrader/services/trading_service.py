@@ -285,6 +285,29 @@ class TradingService:
                 brain_state,
             )
 
+            # ── Daily PnL circuit breakers ────────────────────────────────
+            # Enforce max_daily_loss and daily_profit_target before scanning.
+            # Both settings exist in StrategySettings but were previously never
+            # checked.  We evaluate once per scan cycle (not per symbol) to keep
+            # the hot path fast.
+            _today_pnl = 0.0
+            _pnl_block_reason = ""
+            try:
+                _today_pnl = self.state.get_today_realized_pnl(now_ist_str()[:10])
+            except Exception:
+                logger.warning("daily_pnl_check_failed — proceeding without limit", exc_info=True)
+            cfg = self.settings.strategy
+            if _today_pnl <= -abs(cfg.max_daily_loss):
+                _pnl_block_reason = "daily_loss_limit_hit"
+            elif _today_pnl >= cfg.daily_profit_target:
+                _pnl_block_reason = "daily_profit_target_hit"
+            if _pnl_block_reason:
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP", _pnl_block_reason,
+                    {"todayPnl": _today_pnl, "maxLoss": cfg.max_daily_loss, "profitTarget": cfg.daily_profit_target},
+                )
+                return {"skipped": _pnl_block_reason, "today_pnl": _today_pnl}
+
             # Read watchlist: Firestore is primary, Sheets is fallback
             watchlist = self._read_watchlist_with_fallback()
             subset, scan_meta = self._slice_watchlist_for_scan(watchlist)

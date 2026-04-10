@@ -164,6 +164,26 @@ class FirestoreStateStore:
             rows.append(row)
         return rows
 
+    def get_today_realized_pnl(self, today: str) -> float:
+        """Sum PnL of all positions closed today (exit_ts starts with today's date).
+
+        Returns a signed float — negative means net loss, positive means net profit.
+        Called before each scan cycle to enforce max_daily_loss / daily_profit_target.
+        """
+        total = 0.0
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                exit_ts = str(row.get("exit_ts", "") or "")
+                if not exit_ts.startswith(today):
+                    continue
+                total += float(row.get("pnl", 0) or 0)
+        except Exception:
+            pass
+        return round(total, 2)
+
     # ------------------------------------------------------------------ #
     # Orders log
     # ------------------------------------------------------------------ #
