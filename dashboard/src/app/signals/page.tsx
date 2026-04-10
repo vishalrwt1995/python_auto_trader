@@ -84,10 +84,12 @@ export default function SignalsPage() {
   }, [rows, filterStatus]);
 
   const counts = useMemo(() => ({
-    all:       rows.length,
-    qualified: rows.filter((r) => r.status === "qualified").length,
-    filtered:  rows.filter((r) => r.status === "filtered").length,
-    skip:      rows.filter((r) => r.status === "skip").length,
+    all:               rows.length,
+    qualified:         rows.filter((r) => r.status === "qualified").length,
+    qualified_swing:   rows.filter((r) => r.status === "qualified" && r.wl_type === "swing").length,
+    qualified_intraday:rows.filter((r) => r.status === "qualified" && r.wl_type !== "swing").length,
+    filtered:          rows.filter((r) => r.status === "filtered").length,
+    skip:              rows.filter((r) => r.status === "skip").length,
   }), [rows]);
 
   // Reason breakdown for filtered rows
@@ -108,7 +110,21 @@ export default function SignalsPage() {
         sortable: true,
         sortValue: (r) => r.symbol,
         render: (r) => (
-          <span className="font-semibold text-sm text-text-primary">{r.symbol}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="font-semibold text-sm text-text-primary">{r.symbol}</span>
+            {r.wl_type && (
+              <span
+                className={cn(
+                  "text-[9px] font-semibold px-1 py-0.5 rounded",
+                  r.wl_type === "swing"
+                    ? "bg-indigo-500/15 text-indigo-400"
+                    : "bg-cyan-500/15 text-cyan-400",
+                )}
+              >
+                {r.wl_type === "swing" ? "SW" : "ID"}
+              </span>
+            )}
+          </div>
         ),
       },
       {
@@ -205,6 +221,24 @@ export default function SignalsPage() {
         ),
       },
       {
+        key: "dailyTrend",
+        label: "D-Trend",
+        render: (r) => {
+          if (!r.daily_trend) return <span className="text-text-secondary text-xs">—</span>;
+          return (
+            <span
+              className={cn(
+                "text-[10px] font-medium",
+                r.daily_trend === "UP" ? "text-profit" :
+                r.daily_trend === "DOWN" ? "text-loss" : "text-text-secondary",
+              )}
+            >
+              {r.daily_trend === "UP" ? "▲ UP" : r.daily_trend === "DOWN" ? "▼ DN" : r.daily_trend}
+            </span>
+          );
+        },
+      },
+      {
         key: "volRatio",
         label: "Vol",
         sortable: true,
@@ -282,7 +316,7 @@ export default function SignalsPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
           <p className="text-xl font-mono font-bold text-text-primary">{counts.all}</p>
           <p className="text-[10px] text-text-secondary mt-0.5">Scanned</p>
@@ -292,12 +326,16 @@ export default function SignalsPage() {
           <p className="text-[10px] text-text-secondary mt-0.5">Qualified</p>
         </div>
         <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
-          <p className="text-xl font-mono font-bold text-neutral">{counts.filtered}</p>
-          <p className="text-[10px] text-text-secondary mt-0.5">Filtered</p>
+          <p className="text-xl font-mono font-bold text-cyan-400">{counts.qualified_intraday}</p>
+          <p className="text-[10px] text-text-secondary mt-0.5">Intraday</p>
         </div>
         <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
-          <p className="text-xl font-mono font-bold text-text-secondary">{counts.skip}</p>
-          <p className="text-[10px] text-text-secondary mt-0.5">Skipped</p>
+          <p className="text-xl font-mono font-bold text-indigo-400">{counts.qualified_swing}</p>
+          <p className="text-[10px] text-text-secondary mt-0.5">Swing</p>
+        </div>
+        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
+          <p className="text-xl font-mono font-bold text-neutral">{counts.filtered}</p>
+          <p className="text-[10px] text-text-secondary mt-0.5">Filtered</p>
         </div>
       </div>
 

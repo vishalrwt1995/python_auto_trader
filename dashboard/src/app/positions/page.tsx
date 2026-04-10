@@ -59,7 +59,7 @@ export default function PositionsPage() {
   }, []);
 
   const openPositions = useMemo(
-    () => positions.filter((p) => p.status === "OPEN"),
+    () => positions.filter((p) => p.status === "OPEN" || p.status === "PENDING_AMO_EXIT"),
     [positions],
   );
 
@@ -70,7 +70,26 @@ export default function PositionsPage() {
         label: "Symbol",
         sortable: true,
         sortValue: (r) => r.symbol,
-        render: (r) => <span className="font-medium">{r.symbol}</span>,
+        render: (r) => (
+          <div className="flex items-center gap-1.5">
+            <span className="font-medium">{r.symbol}</span>
+            <span
+              className={cn(
+                "text-[9px] font-semibold px-1 py-0.5 rounded",
+                r.wl_type === "swing"
+                  ? "bg-indigo-500/15 text-indigo-400"
+                  : "bg-cyan-500/15 text-cyan-400",
+              )}
+            >
+              {r.wl_type === "swing" ? "CNC" : "MIS"}
+            </span>
+            {r.status === "PENDING_AMO_EXIT" && (
+              <span className="text-[9px] font-semibold px-1 py-0.5 rounded bg-neutral/20 text-neutral">
+                AMO
+              </span>
+            )}
+          </div>
+        ),
       },
       {
         key: "side",

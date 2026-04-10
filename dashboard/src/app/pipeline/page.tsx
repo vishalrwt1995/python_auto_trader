@@ -18,6 +18,7 @@ const PIPELINE_JOBS = [
   { name: "candle_finalize",     label: "Candle Finalize",  cron: "07:40 IST", desc: "Terminalize stragglers, no new API fetches",         schedulerJobHint: "cache-update-close-0740" },
   { name: "score_refresh",       label: "Score Refresh",    cron: "08:30 IST", desc: "Compute scores + universe eligibility (cache-only)", schedulerJobHint: "score-0830" },
   { name: "premarket_watchlist", label: "Watchlist Pre",    cron: "09:00 IST", desc: "Pre-market watchlist build",                         schedulerJobHint: "premarket-0900" },
+  { name: "swing_recon",         label: "Swing Recon",      cron: "09:00 IST", desc: "Re-evaluate open swing positions, place AMO exits",  schedulerJobHint: "swing-recon" },
   { name: "scanner",             label: "Scanner 5m",       cron: "09:20 IST", desc: "Live signal scan loop (every 5 min)",                schedulerJobHint: "scan-market-5m" },
   { name: "watchlist_5m",        label: "Watchlist 5m",     cron: "09:30 IST", desc: "Intraday watchlist refresh",                         schedulerJobHint: "watchlist-v2-5m-0930" },
   { name: "eod_recon",           label: "EOD Recon",        cron: "15:10 IST", desc: "Force-close open positions (3 passes)",              schedulerJobHint: "eod-recon" },

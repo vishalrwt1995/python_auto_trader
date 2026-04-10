@@ -91,7 +91,10 @@ export interface Position {
   regime?: string;
   risk_mode?: string;
   signal_score?: number;
-  status: "OPEN" | "CLOSED";
+  status: "OPEN" | "CLOSED" | "PENDING_AMO_EXIT";
+  wl_type?: "swing" | "intraday" | string;
+  product?: string;
+  gtt_sl_id?: string;
   exit_price?: number;
   exit_reason?: string;
   entry_ts?: string;
@@ -157,6 +160,10 @@ export interface ScanRow {
   qty?: number;
   status: string;       // qualified | filtered | skip
   reason: string;
+  wl_type?: "swing" | "intraday" | string;
+  daily_trend?: string; // UP | DOWN | NEUTRAL
+  affinity_mult?: number;
+  score_alignment?: number;
 }
 
 export interface ScanLatest {
