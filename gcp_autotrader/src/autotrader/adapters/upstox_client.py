@@ -793,5 +793,60 @@ class UpstoxClient:
                     return [o for o in val if isinstance(o, dict)]
         return []
 
+    # ------------------------------------------------------------------ #
+    # GTT (Good Till Triggered) orders — CNC/delivery SL protection
+    # ------------------------------------------------------------------ #
+
+    def place_gtt_order(
+        self,
+        *,
+        instrument_token: str,
+        transaction_type: str,
+        quantity: int,
+        trigger_price: float,
+        product: str = "D",
+        order_type: str = "LIMIT",
+        tag: str = "at_gtt_sl",
+    ) -> dict[str, Any]:
+        """Place a GTT SL order for a CNC/delivery position.
+
+        For a BUY position SL: transaction_type="SELL", trigger fires BELOW_OR_EQUAL.
+        For a SELL position SL: transaction_type="BUY", trigger fires ABOVE_OR_EQUAL.
+        Limit price has 1% buffer from trigger to maximise fill probability.
+        """
+        exit_side = transaction_type.upper()
+        if exit_side == "SELL":
+            trigger_type = "BELOW_OR_EQUAL"
+            limit_price = round(trigger_price * 0.99, 2)
+        else:
+            trigger_type = "ABOVE_OR_EQUAL"
+            limit_price = round(trigger_price * 1.01, 2)
+
+        body: dict[str, Any] = {
+            "type": "SINGLE",
+            "quantity": quantity,
+            "product": product,
+            "instrument_token": instrument_token,
+            "transaction_type": exit_side,
+            "trigger_type": trigger_type,
+            "trigger_values": [round(trigger_price, 2)],
+            "order_type": order_type,
+            "price": limit_price,
+            "tag": tag,
+        }
+        data = self._request("POST", "order/gtt", json_body=body, auth=True, version="v2")
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def delete_gtt_order(self, gtt_id: str) -> dict[str, Any]:
+        """Cancel an existing GTT order by its id."""
+        data = self._request(
+            "DELETE",
+            f"order/gtt/{gtt_id}",
+            auth=True,
+            version="v2",
+            content_type=None,
+        )
+        return data if isinstance(data, dict) else {"raw": data}
+
     def close(self) -> None:
         self.http.close()

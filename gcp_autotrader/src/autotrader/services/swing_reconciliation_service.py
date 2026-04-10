@@ -21,6 +21,7 @@ from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.indicators import calc_atr, calc_supertrend, normalize_candles
+from autotrader.services.order_service import OrderService
 from autotrader.settings import AppSettings
 from autotrader.time_utils import now_ist, now_ist_str, today_ist
 
@@ -68,11 +69,13 @@ class SwingReconciliationService:
         state: FirestoreStateStore,
         gcs: GoogleCloudStorageStore,
         upstox: UpstoxClient,
+        order_service: OrderService,
     ) -> None:
         self.settings = settings
         self.state = state
         self.gcs = gcs
         self.upstox = upstox
+        self.order_service = order_service
 
     def _fetch_daily_candles(self, symbol: str, exchange: str, instrument_key: str) -> list:
         """Fetch last 120 daily candles for swing re-evaluation."""
@@ -185,17 +188,34 @@ class SwingReconciliationService:
                         exit_reason = "DAILY_SUPERTREND_FLIP"
 
                 if exit_reason:
-                    # Close position: use last daily close as proxy exit price
-                    exit_price = last_close
-                    multiplier = 1 if side == "BUY" else -1
-                    pnl = round((exit_price - entry_price) * int(pos.get("qty") or 1) * multiplier, 2)
-                    self.state.update_position(tag, {
-                        "status": "CLOSED",
-                        "exit_price": round(exit_price, 2),
-                        "exit_reason": exit_reason,
-                        "exit_ts": now_ist_str(),
-                        "pnl": pnl,
-                    })
+                    # Place an AMO (After Market Order) to exit at market open.
+                    # order_service.place_exit_order handles: GTT cancellation, AMO placement,
+                    # and sets position status to PENDING_AMO_EXIT until the AMO fills.
+                    try:
+                        exit_result = self.order_service.place_exit_order(
+                            position_tag=tag,
+                            instrument_key=instrument_key,
+                            exit_reason=exit_reason,
+                            is_amo=True,
+                        )
+                        amo_queued = exit_result.get("amo", False)
+                    except Exception:
+                        logger.exception("swing_recon_exit_order_failed tag=%s", tag)
+                        amo_queued = False
+
+                    if not amo_queued:
+                        # Fallback: mark closed directly with daily close as proxy price
+                        exit_price = last_close
+                        multiplier = 1 if side == "BUY" else -1
+                        pnl = round((exit_price - entry_price) * int(pos.get("qty") or 1) * multiplier, 2)
+                        self.state.update_position(tag, {
+                            "status": "CLOSED",
+                            "exit_price": round(exit_price, 2),
+                            "exit_reason": exit_reason,
+                            "exit_ts": now_ist_str(),
+                            "pnl": pnl,
+                        })
+
                     if exit_reason == "SL_BREACH_DAILY":
                         result.closed_sl_breach += 1
                     elif exit_reason.startswith("TARGET_HIT"):
@@ -204,8 +224,14 @@ class SwingReconciliationService:
                         result.closed_trend_break += 1
                     else:
                         result.closed_max_hold += 1
-                    result.details.append({"tag": tag, "symbol": symbol, "action": "closed", "reason": exit_reason, "pnl": pnl})
-                    logger.info("swing_recon_closed tag=%s symbol=%s reason=%s pnl=%.2f", tag, symbol, exit_reason, pnl)
+                    result.details.append({
+                        "tag": tag, "symbol": symbol, "action": "closed",
+                        "reason": exit_reason, "amo_queued": amo_queued,
+                    })
+                    logger.info(
+                        "swing_recon_exit tag=%s symbol=%s reason=%s amo=%s",
+                        tag, symbol, exit_reason, amo_queued,
+                    )
                     time.sleep(0.05)
                     continue
 
@@ -247,6 +273,15 @@ class SwingReconciliationService:
                         "atr": round(atr, 4),
                         "recon_ts": now_ist_str(),
                     })
+                    # Cancel old GTT SL and place a new one at the updated price
+                    try:
+                        self.order_service.refresh_swing_gtt_sl(
+                            position_tag=tag,
+                            instrument_key=instrument_key,
+                            new_sl_price=round(sl_price, 2),
+                        )
+                    except Exception:
+                        logger.warning("swing_recon_gtt_refresh_failed tag=%s", tag, exc_info=True)
                     result.updated_sl += 1
                     result.details.append({"tag": tag, "symbol": symbol, "action": "sl_updated", "new_sl": round(sl_price, 2)})
                     logger.info("swing_recon_sl_updated tag=%s symbol=%s new_sl=%.2f", tag, symbol, sl_price)

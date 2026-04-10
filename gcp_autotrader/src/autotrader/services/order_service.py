@@ -232,6 +232,86 @@ class OrderService:
         _bq_insert_with_retry(self.bq, trade_row, position_tag)
 
     # ------------------------------------------------------------------ #
+    # GTT SL management — CNC/delivery positions only
+    # ------------------------------------------------------------------ #
+
+    def _place_gtt_sl(
+        self,
+        *,
+        position_tag: str,
+        instrument_key: str,
+        side: str,
+        qty: int,
+        sl_price: float,
+    ) -> str | None:
+        """Place a GTT SL order after a swing/CNC entry fills. Returns gtt_id or None."""
+        if self.settings.runtime.paper_trade or not instrument_key:
+            return None
+        exit_side = "SELL" if side.upper() == "BUY" else "BUY"
+        try:
+            resp = self.upstox.place_gtt_order(
+                instrument_token=instrument_key,
+                transaction_type=exit_side,
+                quantity=qty,
+                trigger_price=sl_price,
+                tag=f"sl_{position_tag[-8:]}",
+            )
+            # Response shape: {"id": "..."} or nested under "data"
+            gtt_id = str(
+                resp.get("id") or (resp.get("data") or {}).get("id") or ""
+            ).strip()
+            if gtt_id:
+                self.state.update_position(position_tag, {"gtt_sl_id": gtt_id})
+                logger.info("gtt_sl_placed tag=%s gtt_id=%s sl=%.2f", position_tag, gtt_id, sl_price)
+            return gtt_id or None
+        except Exception:
+            logger.exception("gtt_sl_place_failed tag=%s sl=%.2f", position_tag, sl_price)
+            return None
+
+    def _cancel_gtt_sl(self, position_tag: str) -> None:
+        """Cancel the GTT SL order stored on a position (if any). Idempotent."""
+        if self.settings.runtime.paper_trade:
+            return
+        pos = self.state.get_position(position_tag)
+        if not pos:
+            return
+        gtt_id = str(pos.get("gtt_sl_id") or "").strip()
+        if not gtt_id:
+            return
+        try:
+            self.upstox.delete_gtt_order(gtt_id)
+            self.state.update_position(position_tag, {"gtt_sl_id": ""})
+            logger.info("gtt_sl_cancelled tag=%s gtt_id=%s", position_tag, gtt_id)
+        except Exception:
+            logger.warning("gtt_sl_cancel_failed tag=%s gtt_id=%s", position_tag, gtt_id, exc_info=True)
+
+    def refresh_swing_gtt_sl(
+        self,
+        *,
+        position_tag: str,
+        instrument_key: str,
+        new_sl_price: float,
+    ) -> str | None:
+        """Cancel existing GTT SL and place a new one at the updated SL price.
+
+        Called by SwingReconciliationService when trailing SL ratchets up.
+        Returns new gtt_id or None if paper trade / error.
+        """
+        if self.settings.runtime.paper_trade:
+            return None
+        self._cancel_gtt_sl(position_tag)
+        pos = self.state.get_position(position_tag)
+        if not pos:
+            return None
+        return self._place_gtt_sl(
+            position_tag=position_tag,
+            instrument_key=instrument_key,
+            side=str(pos.get("side") or "BUY"),
+            qty=int(pos.get("qty") or 0),
+            sl_price=new_sl_price,
+        )
+
+    # ------------------------------------------------------------------ #
     # Entry order
     # ------------------------------------------------------------------ #
 
@@ -360,6 +440,15 @@ class OrderService:
                 round(fill_price, 2), 0.0, round(atr, 4),
                 "OPEN", pos_tag, "",
             ])
+            # Place GTT SL for CNC/delivery positions — broker-level SL protection
+            if is_swing:
+                self._place_gtt_sl(
+                    position_tag=pos_tag,
+                    instrument_key=token,
+                    side=side,
+                    qty=qty,
+                    sl_price=sl_price,
+                )
             self.state.mark_fired_today(symbol, side)
             # Save order record to Firestore
             self.state.save_order(ref_id, {
@@ -416,6 +505,7 @@ class OrderService:
         position_tag: str,
         instrument_key: str,
         exit_reason: str = "MANUAL",
+        is_amo: bool = False,
     ) -> dict[str, Any]:
         pos = self.state.get_position(position_tag)
         if not pos:
@@ -449,6 +539,9 @@ class OrderService:
         # Use delivery product for swing/CNC positions, intraday for MIS
         _pos_wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
         _exit_product = "D" if _pos_wl_type == "swing" else "I"
+        # Cancel GTT SL before placing market exit to avoid double-fill
+        if _pos_wl_type == "swing":
+            self._cancel_gtt_sl(position_tag)
         try:
             resp = self.upstox.place_order({
                 "quantity": qty,
@@ -461,13 +554,25 @@ class OrderService:
                 "transaction_type": exit_side,
                 "disclosed_quantity": 0,
                 "trigger_price": 0,
-                "is_amo": False,
+                "is_amo": is_amo,
             })
         except Exception as exc:
             logger.exception("exit_order_failed tag=%s", position_tag)
             return {"error": str(exc), "tag": position_tag}
 
         order_id = str(resp.get("order_id") or resp.get("data", {}).get("order_id") or ref_id)
+
+        if is_amo:
+            # AMO queued — will execute at market open; mark position PENDING_AMO_EXIT so
+            # the EOD reconcile loop or premarket flow won't double-exit it.
+            self.state.update_position(position_tag, {
+                "exit_reason": exit_reason,
+                "amo_exit_order_id": order_id,
+                "status": "PENDING_AMO_EXIT",
+            })
+            logger.info("amo_exit_queued tag=%s order_id=%s reason=%s", position_tag, order_id, exit_reason)
+            return {"order_id": order_id, "exit_reason": exit_reason, "amo": True}
+
         probe = self._await_fill(order_id, ref_id, qty, timeout_ms=10_000)
         fill_price = 0.0
         if probe.get("filled"):
@@ -582,6 +687,11 @@ class OrderService:
             if _pos_wl_type == "swing":
                 remaining += 1
                 logger.info("eod_skip_swing tag=%s symbol=%s", tag, pos.get("symbol", ""))
+                continue
+            # Skip positions with a queued AMO exit — will settle at market open
+            if str(pos.get("status") or "") == "PENDING_AMO_EXIT":
+                remaining += 1
+                logger.info("eod_skip_amo_exit tag=%s symbol=%s", tag, pos.get("symbol", ""))
                 continue
             order_id = str(pos.get("order_id") or "")
             symbol = str(pos.get("symbol") or "")

@@ -148,6 +148,7 @@ class AppContainer:
                 state=self.state,
                 gcs=self.gcs,
                 upstox=self.upstox,
+                order_service=self.order_service(),
             )
         return self._swing_reconciliation_service
 
