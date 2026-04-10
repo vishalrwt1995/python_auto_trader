@@ -114,6 +114,27 @@ class TradingService:
             return True
         return False
 
+    def _build_portfolio_sector_map(self) -> dict[str, list[str]]:
+        """Return {sector: [symbol, ...]} for currently OPEN positions.
+
+        Used to block over-concentration: if 2+ positions are already in the
+        same sector we refuse a 3rd.  Sector is read from the universe row;
+        falls back to "UNKNOWN" so the check is never silently bypassed.
+        """
+        sector_map: dict[str, list[str]] = {}
+        for pos in self.state.list_open_positions():
+            sym = str(pos.get("symbol", "")).strip().upper()
+            if not sym:
+                continue
+            # Lookup sector from universe
+            try:
+                urow = self.state.get_universe_row(sym)
+                sector = str((urow or {}).get("macrosector") or (urow or {}).get("sector") or "UNKNOWN").upper()
+            except Exception:
+                sector = "UNKNOWN"
+            sector_map.setdefault(sector, []).append(sym)
+        return sector_map
+
     def _slice_watchlist_for_scan(self, watchlist: list[Any]) -> tuple[list[Any], dict[str, int | bool]]:
         total = len(watchlist)
         if total == 0:
@@ -314,6 +335,10 @@ class TradingService:
             if not subset:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")
                 return {"skipped": "watchlist_empty"}
+
+            # Portfolio risk: pre-build sector map of open positions for concentration check
+            _portfolio_sectors = self._build_portfolio_sector_map()
+            _MAX_SAME_SECTOR = 2   # hard cap: max positions from one sector
 
             symbol_set = {str(w.symbol).strip().upper() for w in subset if str(w.symbol).strip()}
             key_by_symbol: dict[str, str] = {}
@@ -557,6 +582,11 @@ class TradingService:
                     _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind)
                     if not _strategy_ok:
                         policy_block_reason = _strategy_fail
+                    # Portfolio sector concentration: don't pile into the same sector
+                    elif w.sector and w.sector.upper() != "UNKNOWN":
+                        _sym_sector = w.sector.upper()
+                        if len(_portfolio_sectors.get(_sym_sector, [])) >= _MAX_SAME_SECTOR:
+                            policy_block_reason = "portfolio_sector_concentrated"
 
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
                 if direction != "HOLD" and adjusted_score >= dynamic_min_score and is_entry_window_open_ist() and not policy_block_reason:
@@ -597,6 +627,9 @@ class TradingService:
                         "status": "qualified",
                         "reason": "entry_qualified",
                     })
+                    # Update in-memory sector map so later symbols in this cycle see the new position
+                    if w.sector and w.sector.upper() != "UNKNOWN":
+                        _portfolio_sectors.setdefault(w.sector.upper(), []).append(w.symbol)
                     self.order_service.place_entry_order(
                         symbol=w.symbol,
                         exchange=w.exchange,

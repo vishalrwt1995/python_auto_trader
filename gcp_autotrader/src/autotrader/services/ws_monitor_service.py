@@ -110,12 +110,30 @@ class WsMonitorService:
                 ikey = str(pos.get("instrument_key") or pos.get("symbol") or "")
                 if not tag or not ikey:
                     continue
+                entry_price = float(pos.get("entry_price") or 0)
+                atr = float(pos.get("atr") or 0)
+                # Parse entry timestamp to epoch for time-based exit
+                entry_ts_str = str(pos.get("entry_ts") or "")
+                try:
+                    from autotrader.time_utils import parse_any_ts
+                    _dt = parse_any_ts(entry_ts_str)
+                    entry_epoch = _dt.timestamp() if _dt else time.time()
+                except Exception:
+                    entry_epoch = time.time()
+                # Preserve best_price tracking across refreshes
+                old = self._positions.get(ikey, {})
                 new_map[ikey] = {
                     "position_tag": tag,
                     "sl_price": float(pos.get("sl_price") or 0),
                     "target": float(pos.get("target") or 0),
                     "side": str(pos.get("side") or "BUY").upper(),
                     "instrument_key": ikey,
+                    "entry_price": entry_price,
+                    "atr": atr,
+                    "entry_epoch": entry_epoch,
+                    # Carry forward best_price from previous tick tracking
+                    "best_price": old.get("best_price", entry_price),
+                    "sl_moved": old.get("sl_moved", False),
                 }
             self._positions = new_map
             self._last_refresh = time.time()
@@ -134,6 +152,10 @@ class WsMonitorService:
     # Tick handler
     # ------------------------------------------------------------------ #
 
+    # Time-based exit: close position if it hasn't moved meaningfully after N minutes.
+    # "Meaningful" = gained at least 0.3× ATR from entry.  Prevents dead capital.
+    _FLAT_TIMEOUT_SEC = 120 * 60  # 2 hours
+
     async def _on_quote(self, instrument_key: str, ltp: float, ts: float) -> None:
         pos = self._positions.get(instrument_key)
         if not pos:
@@ -145,7 +167,46 @@ class WsMonitorService:
         sl = pos["sl_price"]
         target = pos["target"]
         side = pos["side"]
+        entry_price = pos.get("entry_price", 0.0)
+        atr = pos.get("atr", 0.0)
+        best = pos.get("best_price", entry_price)
 
+        # ── Track best price seen since entry ────────────────────────
+        if side == "BUY" and ltp > best:
+            pos["best_price"] = ltp
+            best = ltp
+        elif side == "SELL" and ltp < best:
+            pos["best_price"] = ltp
+            best = ltp
+
+        # ── Breakeven SL: once price reaches 1× ATR profit, move SL to entry ──
+        if not pos.get("sl_moved") and entry_price > 0 and atr > 0:
+            if side == "BUY" and best >= entry_price + atr:
+                pos["sl_price"] = entry_price + (atr * 0.1)  # tiny buffer above entry
+                pos["sl_moved"] = True
+                sl = pos["sl_price"]
+                logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f", tag, sl, best)
+            elif side == "SELL" and best <= entry_price - atr:
+                pos["sl_price"] = entry_price - (atr * 0.1)
+                pos["sl_moved"] = True
+                sl = pos["sl_price"]
+                logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f", tag, sl, best)
+
+        # ── Trailing stop: once past breakeven, trail SL at 1.5× ATR from best ──
+        if pos.get("sl_moved") and atr > 0:
+            trail_dist = atr * 1.5
+            if side == "BUY":
+                new_sl = round(best - trail_dist, 2)
+                if new_sl > sl:
+                    pos["sl_price"] = new_sl
+                    sl = new_sl
+            elif side == "SELL":
+                new_sl = round(best + trail_dist, 2)
+                if new_sl < sl:
+                    pos["sl_price"] = new_sl
+                    sl = new_sl
+
+        # ── Standard SL / Target check ────────────────────────────────
         exit_reason: str | None = None
         if side == "BUY":
             if sl > 0 and ltp <= sl:
@@ -158,11 +219,20 @@ class WsMonitorService:
             elif target > 0 and ltp <= target:
                 exit_reason = "TARGET_HIT"
 
+        # ── Time-based exit: close if flat after 2 hours ──────────────
+        if not exit_reason and entry_price > 0 and atr > 0:
+            elapsed = time.time() - pos.get("entry_epoch", time.time())
+            if elapsed >= self._FLAT_TIMEOUT_SEC:
+                # "Flat" = hasn't moved 0.3× ATR from entry in either direction
+                move = abs(ltp - entry_price)
+                if move < atr * 0.3:
+                    exit_reason = "FLAT_TIMEOUT"
+
         if exit_reason:
             self._exiting.add(tag)
             logger.info(
-                "exit_triggered tag=%s reason=%s ltp=%.2f sl=%.2f target=%.2f",
-                tag, exit_reason, ltp, sl, target,
+                "exit_triggered tag=%s reason=%s ltp=%.2f sl=%.2f target=%.2f best=%.2f",
+                tag, exit_reason, ltp, sl, target, best,
             )
             asyncio.create_task(self._do_exit(tag, instrument_key, exit_reason))
 
