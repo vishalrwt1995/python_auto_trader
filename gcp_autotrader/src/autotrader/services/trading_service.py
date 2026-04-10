@@ -12,7 +12,7 @@ from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.indicators import compute_indicators
-from autotrader.domain.risk import calc_position_size
+from autotrader.domain.risk import calc_position_size, calc_swing_position_size
 from autotrader.domain.scoring import check_strategy_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
 from autotrader.services.order_service import OrderService
@@ -55,16 +55,20 @@ class TradingService:
                     enabled_raw = str(r.get("enabled", "Y") or "Y").strip().upper()
                     if enabled_raw not in {"Y", "YES", "TRUE", "1", "ENABLED"}:
                         continue
+                    wl_type_raw = str(r.get("wlType", r.get("wl_type", "intraday")) or "intraday").strip().lower()
+                    wl_type = "swing" if wl_type_raw == "swing" else "intraday"
+                    product = "CNC" if wl_type == "swing" else "MIS"
                     rows.append(WatchlistRow(
                         symbol=sym,
                         exchange=str(r.get("exchange", "NSE") or "NSE").upper(),
                         segment="CASH",
-                        product="MIS",
+                        product=product,
                         strategy=str(r.get("setup", r.get("strategy", "AUTO")) or "AUTO"),
                         sector=str(r.get("macrosector", r.get("sector", "UNKNOWN")) or "UNKNOWN"),
                         beta=float(r.get("beta", 1.0) or 1.0),
                         enabled=True,
                         note=str(r.get("reason", r.get("notes", "")) or ""),
+                        wl_type=wl_type,
                     ))
                 if rows:
                     logger.debug("watchlist_read_source=firestore count=%d", len(rows))
@@ -177,9 +181,26 @@ class TradingService:
         cached = self.gcs.read_candles(path)
         need = 80
 
+        # Daily candle path for swing candidates
+        tf = str(timeframe or "").strip().lower()
+        if instrument_key and tf in {"1d", "day", "daily"}:
+            try:
+                end = now_ist()
+                start = end - timedelta(days=lookback_days)
+                api = self.upstox.get_historical_candles_v3_days(
+                    instrument_key,
+                    to_date=end.strftime("%Y-%m-%d"),
+                    from_date=start.strftime("%Y-%m-%d"),
+                )
+                if api:
+                    merged = self.gcs.merge_candles(path, api)
+                    return merged[-max(need, 120):]
+            except Exception:
+                logger.warning("swing_daily_candle_fetch_failed symbol=%s", symbol, exc_info=True)
+            return cached[-max(need, 120):]
+
         # Upstox-first path for scanner runtime candles (current intraday session).
         # We always attempt this first to keep scanner aligned with the active data provider.
-        tf = str(timeframe or "").strip().lower()
         if instrument_key and tf in {"15m", "15min", "15minute"}:
             try:
                 api = self.upstox.get_intraday_candles_v3(instrument_key, unit="minutes", interval=15)
@@ -340,6 +361,12 @@ class TradingService:
             _portfolio_sectors = self._build_portfolio_sector_map()
             _MAX_SAME_SECTOR = 2   # hard cap: max positions from one sector
 
+            # Count existing swing positions for separate cap
+            _open_swing_count = sum(
+                1 for p in self.state.list_open_positions()
+                if str(p.get("wl_type") or "").strip().lower() == "swing"
+            )
+
             symbol_set = {str(w.symbol).strip().upper() for w in subset if str(w.symbol).strip()}
             key_by_symbol: dict[str, str] = {}
             if symbol_set:
@@ -381,14 +408,15 @@ class TradingService:
                     logger.warning("live_ltp_prefetch_failed — falling back to candle close", exc_info=True)
 
             for w in subset:
+                _is_swing = getattr(w, "wl_type", "intraday") == "swing"
                 instrument_key = key_by_symbol.get(str(w.symbol).strip().upper(), "")
                 candles = self._fetch_candles(
                     w.symbol,
                     w.exchange,
                     w.segment,
                     instrument_key=instrument_key,
-                    timeframe="15m",
-                    lookback_days=8,
+                    timeframe="1d" if _is_swing else "15m",
+                    lookback_days=120 if _is_swing else 8,
                 )
                 ind = compute_indicators(candles, self.settings.strategy)
                 if ind is None:
@@ -432,6 +460,7 @@ class TradingService:
                         "scanner_run_id": scanner_run_id,
                         "symbol": w.symbol,
                         "setup": w.strategy or "",
+                        "wl_type": getattr(w, "wl_type", "intraday"),
                         "direction": "SKIP",
                         "raw_score": 0,
                         "adjusted_score": 0,
@@ -482,7 +511,10 @@ class TradingService:
                 else:
                     _atr_mult = self.settings.strategy.atr_sl_mult
 
-                pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult)
+                if _is_swing:
+                    pos = calc_swing_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult if _atr_mult != self.settings.strategy.atr_sl_mult else None)
+                else:
+                    pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult)
 
                 # ── Dynamic min_signal_score (Item 3) ────────────────────────
                 # adjust_signal() already penalises adjusted_score by 0.60–0.82×
@@ -497,10 +529,14 @@ class TradingService:
                     "DEFENSIVE":  58,   # ≈ raw 72 after ×0.82×0.88 adjustment
                     "LOCKDOWN":   45,   # ≈ raw 85 after ×0.60×0.88 adjustment
                 }
-                dynamic_min_score = _SCORE_THRESHOLDS.get(
-                    brain_state.risk_mode if brain_state else "NORMAL",
-                    self.settings.strategy.min_signal_score,
-                )
+                if _is_swing:
+                    # Swing: higher bar, not risk-mode-adjusted (swing should only fire on strong signals)
+                    dynamic_min_score = self.settings.strategy.swing_min_signal_score
+                else:
+                    dynamic_min_score = _SCORE_THRESHOLDS.get(
+                        brain_state.risk_mode if brain_state else "NORMAL",
+                        self.settings.strategy.min_signal_score,
+                    )
 
                 setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
                 liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
@@ -549,6 +585,7 @@ class TradingService:
                     "macdView": macd_view,
                     "supertrend": "UP" if ind.supertrend.dir == 1 else "DOWN",
                     "setup": w.strategy or "",
+                    "wlType": getattr(w, "wl_type", "intraday"),
                     "vwap": round(ind.vwap, 2) if ind.vwap else 0.0,
                     "sl": 0.0,
                     "target": 0.0,
@@ -568,7 +605,9 @@ class TradingService:
                     policy_block_reason = "policy_short_disabled"
                 elif market_policy is not None and not self._strategy_allowed(w.strategy, market_policy.allowed_strategies):
                     policy_block_reason = "policy_strategy_blocked"
-                elif qualified >= max_signals_allowed:
+                elif _is_swing and _open_swing_count >= self.settings.strategy.swing_max_positions:
+                    policy_block_reason = "swing_max_positions_reached"
+                elif not _is_swing and qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
                 # Live VWAP guard: if price drifted to wrong side of VWAP since candle close, reject entry.
                 # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
@@ -627,7 +666,9 @@ class TradingService:
                         "status": "qualified",
                         "reason": "entry_qualified",
                     })
-                    # Update in-memory sector map so later symbols in this cycle see the new position
+                    # Update in-memory counters so later symbols in this cycle see the new position
+                    if _is_swing:
+                        _open_swing_count += 1
                     if w.sector and w.sector.upper() != "UNKNOWN":
                         _portfolio_sectors.setdefault(w.sector.upper(), []).append(w.symbol)
                     self.order_service.place_entry_order(
@@ -644,6 +685,7 @@ class TradingService:
                         score=adjusted_score,
                         reason=reason,
                         allow_live_orders=allow_live_orders,
+                        wl_type=getattr(w, "wl_type", "intraday"),
                     )
                 else:
                     if direction == "HOLD":
@@ -666,6 +708,7 @@ class TradingService:
                     "scanner_run_id": scanner_run_id,
                     "symbol": w.symbol,
                     "setup": w.strategy or "",
+                    "wl_type": getattr(w, "wl_type", "intraday"),
                     "direction": direction,
                     "raw_score": int(meta.score),
                     "adjusted_score": int(adjusted_score),

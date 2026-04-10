@@ -4,6 +4,38 @@ from autotrader.domain.models import PositionSizing
 from autotrader.settings import StrategySettings
 
 
+def calc_swing_position_size(
+    entry_price: float,
+    atr: float,
+    direction: str,
+    cfg: StrategySettings,
+    *,
+    atr_mult_override: float | None = None,
+) -> PositionSizing:
+    """Position sizing for swing (CNC) trades — wider SL, higher R:R."""
+    sl_mult = atr_mult_override if atr_mult_override is not None else cfg.swing_atr_sl_mult
+    sl_dist = max(atr * sl_mult, entry_price * 0.01)  # floor at 1% for swing
+    sl_price = entry_price - sl_dist if direction == "BUY" else entry_price + sl_dist
+    target = entry_price + sl_dist * cfg.swing_rr if direction == "BUY" else entry_price - sl_dist * cfg.swing_rr
+
+    qty = int(cfg.swing_risk_per_trade // sl_dist) if sl_dist > 0 else 1
+    qty = min(qty, int((cfg.capital * 0.20) // max(entry_price, 1)))  # 20% max capital per swing
+    qty = max(1, qty)
+    brokerage = calc_brokerage(qty, entry_price)
+    max_loss = round(qty * sl_dist + brokerage, 2)
+    max_gain = round(qty * sl_dist * cfg.swing_rr - brokerage, 2)
+    return PositionSizing(
+        qty=qty,
+        sl_price=sl_price,
+        target=target,
+        sl_dist=sl_dist,
+        entry_price=entry_price,
+        max_loss=max_loss,
+        max_gain=max_gain,
+        brokerage=brokerage,
+    )
+
+
 def calc_brokerage(qty: int, price: float) -> float:
     turnover = qty * price
     brk = min(20.0, turnover * 0.0005)

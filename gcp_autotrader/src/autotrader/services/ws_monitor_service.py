@@ -122,6 +122,7 @@ class WsMonitorService:
                     entry_epoch = time.time()
                 # Preserve best_price tracking across refreshes
                 old = self._positions.get(ikey, {})
+                wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
                 new_map[ikey] = {
                     "position_tag": tag,
                     "sl_price": float(pos.get("sl_price") or 0),
@@ -131,6 +132,7 @@ class WsMonitorService:
                     "entry_price": entry_price,
                     "atr": atr,
                     "entry_epoch": entry_epoch,
+                    "wl_type": wl_type,
                     # Carry forward best_price from previous tick tracking
                     "best_price": old.get("best_price", entry_price),
                     "sl_moved": old.get("sl_moved", False),
@@ -179,22 +181,28 @@ class WsMonitorService:
             pos["best_price"] = ltp
             best = ltp
 
-        # ── Breakeven SL: once price reaches 1× ATR profit, move SL to entry ──
-        if not pos.get("sl_moved") and entry_price > 0 and atr > 0:
-            if side == "BUY" and best >= entry_price + atr:
-                pos["sl_price"] = entry_price + (atr * 0.1)  # tiny buffer above entry
-                pos["sl_moved"] = True
-                sl = pos["sl_price"]
-                logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f", tag, sl, best)
-            elif side == "SELL" and best <= entry_price - atr:
-                pos["sl_price"] = entry_price - (atr * 0.1)
-                pos["sl_moved"] = True
-                sl = pos["sl_price"]
-                logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f", tag, sl, best)
+        # ── Swing vs intraday parameters ────────────────────────────
+        is_swing = pos.get("wl_type") == "swing"
+        _breakeven_atr_mult = 1.5 if is_swing else 1.0   # swing needs more room
+        _trail_atr_mult = 2.5 if is_swing else 1.5       # wider trail for swing
+        _breakeven_buffer = 0.15 if is_swing else 0.1    # buffer above entry
 
-        # ── Trailing stop: once past breakeven, trail SL at 1.5× ATR from best ──
+        # ── Breakeven SL: once price reaches N× ATR profit, move SL to entry ──
+        if not pos.get("sl_moved") and entry_price > 0 and atr > 0:
+            if side == "BUY" and best >= entry_price + atr * _breakeven_atr_mult:
+                pos["sl_price"] = entry_price + (atr * _breakeven_buffer)
+                pos["sl_moved"] = True
+                sl = pos["sl_price"]
+                logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
+            elif side == "SELL" and best <= entry_price - atr * _breakeven_atr_mult:
+                pos["sl_price"] = entry_price - (atr * _breakeven_buffer)
+                pos["sl_moved"] = True
+                sl = pos["sl_price"]
+                logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
+
+        # ── Trailing stop: once past breakeven, trail SL at N× ATR from best ──
         if pos.get("sl_moved") and atr > 0:
-            trail_dist = atr * 1.5
+            trail_dist = atr * _trail_atr_mult
             if side == "BUY":
                 new_sl = round(best - trail_dist, 2)
                 if new_sl > sl:
@@ -219,8 +227,8 @@ class WsMonitorService:
             elif target > 0 and ltp <= target:
                 exit_reason = "TARGET_HIT"
 
-        # ── Time-based exit: close if flat after 2 hours ──────────────
-        if not exit_reason and entry_price > 0 and atr > 0:
+        # ── Time-based exit: close if flat after 2 hours (intraday only) ──
+        if not exit_reason and not is_swing and entry_price > 0 and atr > 0:
             elapsed = time.time() - pos.get("entry_epoch", time.time())
             if elapsed >= self._FLAT_TIMEOUT_SEC:
                 # "Flat" = hasn't moved 0.3× ATR from entry in either direction
@@ -267,6 +275,10 @@ class WsMonitorService:
                 logger.info("eod_close_triggered remaining_positions=%d", len(self._positions))
                 for ikey, pos in list(self._positions.items()):
                     tag = pos["position_tag"]
+                    # Skip swing positions — they persist overnight
+                    if pos.get("wl_type") == "swing":
+                        logger.info("eod_skip_swing tag=%s", tag)
+                        continue
                     if tag not in self._exiting:
                         self._exiting.add(tag)
                         asyncio.create_task(self._do_exit(tag, ikey, "EOD_CLOSE"))

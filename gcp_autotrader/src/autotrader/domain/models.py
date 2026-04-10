@@ -274,6 +274,7 @@ class WatchlistRow:
     beta: float = 1.0
     enabled: bool = True
     note: str = ""
+    wl_type: str = "intraday"  # "intraday" or "swing"
 
 
 @dataclass

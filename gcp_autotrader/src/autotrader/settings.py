@@ -57,6 +57,13 @@ class StrategySettings:
     pcr_bull_min: float = 0.8
     pcr_bear_max: float = 1.2
     nifty_trend_pct: float = 0.3
+    # Swing-specific settings
+    swing_atr_sl_mult: float = 2.5
+    swing_rr: float = 2.0
+    swing_risk_per_trade: float = 200.0
+    swing_max_positions: int = 5
+    swing_max_hold_days: int = 10
+    swing_min_signal_score: int = 75
 
 
 @dataclass(frozen=True)
@@ -135,6 +142,12 @@ class AppSettings:
             pcr_bull_min=_env_float("PCR_BULL_MIN", 0.8),
             pcr_bear_max=_env_float("PCR_BEAR_MAX", 1.2),
             nifty_trend_pct=_env_float("NIFTY_TREND_PCT", 0.3),
+            swing_atr_sl_mult=_env_float("SWING_ATR_SL_MULT", 2.5),
+            swing_rr=_env_float("SWING_RR", 2.0),
+            swing_risk_per_trade=_env_float("SWING_RISK_PER_TRADE", 200),
+            swing_max_positions=_env_int("SWING_MAX_POSITIONS", 5),
+            swing_max_hold_days=_env_int("SWING_MAX_HOLD_DAYS", 10),
+            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 75),
         )
         return AppSettings(
             gcp=GcpSettings(

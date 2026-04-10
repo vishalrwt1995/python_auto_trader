@@ -143,6 +143,8 @@ class OrderService:
         regime: str = "",
         risk_mode: str = "",
         signal_score: int = 0,
+        product: str = "MIS",
+        wl_type: str = "intraday",
     ) -> None:
         doc = {
             "position_tag": position_tag,
@@ -166,6 +168,8 @@ class OrderService:
             "regime": regime,
             "risk_mode": risk_mode,
             "signal_score": signal_score,
+            "product": product,
+            "wl_type": wl_type,
         }
         self.state.save_position(position_tag, doc)
         if self.pubsub:
@@ -251,6 +255,7 @@ class OrderService:
         regime: str = "",
         risk_mode: str = "",
         allow_live_orders: bool = False,
+        wl_type: str = "intraday",
     ) -> dict[str, Any] | None:
         if self.state.already_fired_today(symbol, side):
             return {"skipped": "duplicate_idempotency"}
@@ -279,6 +284,7 @@ class OrderService:
                 sl_price=sl_price, target=target, atr=atr,
                 strategy=strategy, order_id=ref_id,
                 regime=regime, risk_mode=risk_mode, signal_score=score,
+                product=product, wl_type=wl_type,
             )
             # Keep Sheets copy for human visibility
             self._append_position_sheets([
@@ -291,24 +297,41 @@ class OrderService:
             ])
             self.state.mark_fired_today(symbol, side)
             logger.info(
-                "paper_order symbol=%s side=%s qty=%d entry=%.2f sl=%.2f target=%.2f tag=%s",
-                symbol, side, qty, entry_price, sl_price, target, pos_tag,
+                "paper_order symbol=%s side=%s qty=%d entry=%.2f sl=%.2f target=%.2f tag=%s wl_type=%s",
+                symbol, side, qty, entry_price, sl_price, target, pos_tag, wl_type,
             )
             return {"paper": True, "order_id": ref_id, "position_tag": pos_tag}
 
-        # ---- Live bracket order ----
+        # ---- Live order ----
         token = instrument_key or symbol
+        is_swing = str(product).upper() in {"CNC", "D", "DELIVERY"}
         try:
-            resp = self.upstox.place_bracket_order(
-                instrument_token=token,
-                transaction_type=side.upper(),
-                quantity=qty,
-                stop_loss=abs(entry_price - sl_price),
-                square_off=abs(target - entry_price),
-                order_reference_id=ref_id,
-            )
+            if is_swing:
+                # Swing/CNC: regular MARKET order (bracket not supported for delivery)
+                resp = self.upstox.place_order({
+                    "quantity": qty,
+                    "product": "D",
+                    "validity": "DAY",
+                    "price": 0,
+                    "tag": ref_id,
+                    "instrument_token": token,
+                    "order_type": "MARKET",
+                    "transaction_type": side.upper(),
+                    "disclosed_quantity": 0,
+                    "trigger_price": 0,
+                    "is_amo": False,
+                })
+            else:
+                resp = self.upstox.place_bracket_order(
+                    instrument_token=token,
+                    transaction_type=side.upper(),
+                    quantity=qty,
+                    stop_loss=abs(entry_price - sl_price),
+                    square_off=abs(target - entry_price),
+                    order_reference_id=ref_id,
+                )
         except Exception as exc:
-            logger.exception("live_bracket_order_failed symbol=%s", symbol)
+            logger.exception("live_order_failed symbol=%s product=%s", symbol, product)
             return {"error": str(exc), "status": "API_FAIL"}
 
         order_id = str(
@@ -327,6 +350,7 @@ class OrderService:
                 sl_price=sl_price, target=target, atr=atr,
                 strategy=strategy, order_id=order_id,
                 regime=regime, risk_mode=risk_mode, signal_score=score,
+                product=product, wl_type=wl_type,
             )
             self._append_position_sheets([
                 now_ist_str(), symbol, exchange, segment, side,
@@ -422,10 +446,13 @@ class OrderService:
 
         # Live exit: MARKET order
         ref_id = make_ref_id()
+        # Use delivery product for swing/CNC positions, intraday for MIS
+        _pos_wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
+        _exit_product = "D" if _pos_wl_type == "swing" else "I"
         try:
             resp = self.upstox.place_order({
                 "quantity": qty,
-                "product": "I",
+                "product": _exit_product,
                 "validity": "DAY",
                 "price": 0,
                 "tag": ref_id,
@@ -549,6 +576,12 @@ class OrderService:
             checked += 1
             tag = str(pos.get("position_tag") or pos.get("_id") or "")
             if not tag:
+                continue
+            # Skip swing/CNC positions — they persist overnight
+            _pos_wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
+            if _pos_wl_type == "swing":
+                remaining += 1
+                logger.info("eod_skip_swing tag=%s symbol=%s", tag, pos.get("symbol", ""))
                 continue
             order_id = str(pos.get("order_id") or "")
             symbol = str(pos.get("symbol") or "")
