@@ -199,6 +199,7 @@ class IndicatorSnapshot:
     obv_curr: float
     obv_prev: float
     atr: float
+    adx: float
     bb: BollingerState | None
     stoch: StochasticState
     volume: VolumeState

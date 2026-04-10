@@ -13,7 +13,7 @@ from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.risk import calc_position_size
-from autotrader.domain.scoring import determine_direction, score_signal
+from autotrader.domain.scoring import check_strategy_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
 from autotrader.services.order_service import OrderService
 from autotrader.services.market_brain_service import MarketBrainService
@@ -551,6 +551,12 @@ class TradingService:
                     policy_block_reason = "live_price_below_vwap"
                 elif direction == "SELL" and _live > 0 and ltp > ind.vwap and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
                     policy_block_reason = "live_price_above_vwap"
+                else:
+                    # Strategy-specific hard gates: validate that the current market
+                    # structure actually matches the setup assigned at watchlist build time.
+                    _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind)
+                    if not _strategy_ok:
+                        policy_block_reason = _strategy_fail
 
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
                 if direction != "HOLD" and adjusted_score >= dynamic_min_score and is_entry_window_open_ist() and not policy_block_reason:
@@ -642,6 +648,7 @@ class TradingService:
                     "supertrend": "UP" if ind.supertrend.dir == 1 else "DOWN",
                     "vwap": round(ind.vwap, 2) if ind.vwap else 0.0,
                     "atr": round(ind.atr, 4),
+                    "adx": round(ind.adx, 1),
                     "atr_mult": round(_atr_mult, 3),
                     "score_regime": int(meta.breakdown.regime),
                     "score_options": int(meta.breakdown.options),

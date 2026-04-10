@@ -125,6 +125,16 @@ def score_signal(
     elif (is_buy and ind.macd.hist > 0) or ((not is_buy) and ind.macd.hist < 0):
         bd.technical += 4
 
+    # ADX: trend-strength filter — rewards trending markets, penalises choppy ones.
+    # For trend-following setups (BUY on TREND_UP, SELL on TREND_DOWN) a strong ADX
+    # confirms the move is real.  For mean-reversion we deliberately skip this bonus
+    # because reversals fire in low-ADX, ranging conditions.
+    if ind.adx >= 30:
+        bd.technical = min(40, bd.technical + 5)   # strong trend confirmed
+    elif ind.adx >= 20:
+        bd.technical = min(40, bd.technical + 2)   # moderate trend
+    # ADX < 20 → no bonus (chop / no trend)
+
     if (is_buy and ind.patterns.bull_engulf) or ((not is_buy) and ind.patterns.bear_engulf):
         bd.technical = min(40, bd.technical + 2)
     bd.technical = min(40, bd.technical)
@@ -146,6 +156,9 @@ def score_signal(
         bd.penalty -= 10
     if regime.regime == "RANGE":
         bd.penalty -= 8
+    # Low ADX in a non-mean-reversion context means no trend to trade — penalise.
+    if ind.adx < 15 and regime.regime != "RANGE":
+        bd.penalty -= 5
     if abs(ind.close - ind.open) / (ind.close or 1) * 100 > 2.5:
         bd.penalty -= 5
     if ind.patterns.doji:
@@ -162,6 +175,80 @@ def score_signal(
 
     final_score = max(0, min(100, int(round(score))))
     return SignalScore(score=final_score, direction=direction, breakdown=bd)
+
+
+def check_strategy_entry(
+    strategy: str,
+    direction: str,
+    ind: IndicatorSnapshot,
+) -> tuple[bool, str]:
+    """Validate strategy-specific entry conditions beyond the generic direction vote.
+
+    Returns (passed, reason).  When passed=False the signal is suppressed even if
+    direction and score would otherwise qualify.  Each strategy has a short list of
+    hard gates — conditions that *must* be true for that setup to make sense.
+
+    BREAKOUT  : needs trend strength (ADX ≥ 20), price near 52-week high, volume surge
+    PULLBACK  : needs intact trend (EMA stack), RSI in healthy pullback zone (40-60)
+    MEAN_REVERSION / VWAP_REVERSAL : needs RSI stretched, price extended from VWAP
+    VWAP_TREND: price must be on correct side of VWAP with positive slope proxy
+    All others (AUTO, DEFAULT, OPEN_DRIVE, etc.): pass through unchecked
+    """
+    s = str(strategy or "").strip().upper()
+    is_buy = direction == "BUY"
+
+    if s in ("BREAKOUT", "SHORT_BREAKDOWN"):
+        # Must have trend strength and be near the high (or low for shorts)
+        if ind.adx < 20:
+            return False, "strategy_breakout_adx_too_low"
+        if is_buy and ind.dist_from_52w_high > 5.0:
+            return False, "strategy_breakout_too_far_from_high"
+        if not is_buy and ind.dist_from_52w_high < 20.0:
+            # Short breakdown: stock should already be well off its highs
+            return False, "strategy_breakdown_price_too_high"
+        if ind.volume.ratio < 1.2:
+            return False, "strategy_breakout_no_volume_surge"
+        return True, ""
+
+    if s in ("PULLBACK", "SHORT_PULLBACK"):
+        # Pullback needs the higher-TF trend intact (EMA stack) and RSI in reload zone
+        if is_buy and not ind.ema_stack:
+            return False, "strategy_pullback_no_bull_ema_stack"
+        if not is_buy and not ind.ema_flip:
+            return False, "strategy_pullback_no_bear_ema_stack"
+        rsi = ind.rsi.curr
+        if is_buy and not (38 <= rsi <= 60):
+            return False, "strategy_pullback_rsi_outside_reload_zone"
+        if not is_buy and not (40 <= rsi <= 62):
+            return False, "strategy_pullback_rsi_outside_reload_zone"
+        return True, ""
+
+    if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
+        # Must be stretched: RSI oversold/overbought AND price meaningfully away from VWAP
+        rsi = ind.rsi.curr
+        if is_buy and rsi > 45:
+            return False, "strategy_mr_rsi_not_oversold"
+        if not is_buy and rsi < 55:
+            return False, "strategy_mr_rsi_not_overbought"
+        if ind.vwap > 0:
+            vwap_dev = abs(ind.close - ind.vwap) / ind.vwap * 100
+            if vwap_dev < 0.5:
+                return False, "strategy_mr_insufficient_vwap_extension"
+        return True, ""
+
+    if s == "VWAP_TREND":
+        # Price must be on the correct side of VWAP
+        if is_buy and ind.close <= ind.vwap:
+            return False, "strategy_vwap_trend_price_below_vwap"
+        if not is_buy and ind.close >= ind.vwap:
+            return False, "strategy_vwap_trend_price_above_vwap"
+        # Needs moderate trend strength
+        if ind.adx < 18:
+            return False, "strategy_vwap_trend_adx_too_low"
+        return True, ""
+
+    # OPEN_DRIVE, AUTO, DEFAULT, PHASE1_MOMENTUM, etc. — no extra gate
+    return True, ""
 
 
 def compute_universe_score_breakdown(ind: IndicatorSnapshot) -> tuple[int, dict[str, int]]:

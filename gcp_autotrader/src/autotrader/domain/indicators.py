@@ -257,6 +257,7 @@ def compute_indicators(candles: list[Candle], cfg: StrategySettings) -> Indicato
     vwap = calc_vwap(candles)
     obv = calc_obv(closes, volumes)
     atr = calc_atr(candles, 14)
+    adx = calc_adx(candles, 14)
     bb = calc_bb(closes, 20, 2)
     stoch_k, stoch_d = calc_stochastic(candles, 14, 3)
 
@@ -327,6 +328,7 @@ def compute_indicators(candles: list[Candle], cfg: StrategySettings) -> Indicato
         obv_curr=obv[n],
         obv_prev=obv[n - 1] if n > 0 else obv[n],
         atr=atr,
+        adx=adx,
         bb=bb[-1] if bb else None,
         stoch=StochasticState(k=(stoch_k[-1] if stoch_k else 50.0), d=(stoch_d[-1] if stoch_d else 50.0)),
         volume=VolumeState(curr=volumes[n], avg=avg_vol, ratio=(volumes[n] / avg_vol if avg_vol > 0 else 0.0)),
