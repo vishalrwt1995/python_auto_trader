@@ -239,4 +239,8 @@ create_job "autotrader-eod-recon-1510" "10 15 * * 1-5" "$SERVICE_URL/jobs/eod-po
 create_job "autotrader-eod-recon-1520" "20 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
 create_job "autotrader-eod-recon-1530" "30 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
 
+# Swing position reconciliation — re-evaluates open CNC/swing positions premarket.
+# Checks: daily SL breach, target hit, SuperTrend flip, max hold days; ratchets trailing SL.
+create_job "autotrader-swing-recon-0900" "30 3 * * 1-5" "$SERVICE_URL/jobs/swing-reconcile" "{}" "10m"
+
 echo "Scheduler jobs created/updated."

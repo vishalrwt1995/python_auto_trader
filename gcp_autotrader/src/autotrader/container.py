@@ -17,6 +17,7 @@ from autotrader.services.log_sink import LogSink
 from autotrader.services.market_brain_service import MarketBrainService
 from autotrader.services.order_service import OrderService
 from autotrader.services.regime_service import MarketRegimeService
+from autotrader.services.swing_reconciliation_service import SwingReconciliationService
 from autotrader.services.trading_service import TradingService
 from autotrader.services.universe_service import UniverseService
 from autotrader.settings import AppSettings
@@ -89,6 +90,7 @@ class AppContainer:
         self._market_brain_service: MarketBrainService | None = None
         self._order_service: OrderService | None = None
         self._trading_service: TradingService | None = None
+        self._swing_reconciliation_service: SwingReconciliationService | None = None
 
     def log_sink(self) -> LogSink:
         return LogSink()
@@ -137,6 +139,17 @@ class AppContainer:
                 pubsub=self.pubsub,
             )
         return self._trading_service
+
+
+    def swing_reconciliation_service(self) -> SwingReconciliationService:
+        if self._swing_reconciliation_service is None:
+            self._swing_reconciliation_service = SwingReconciliationService(
+                settings=self.settings,
+                state=self.state,
+                gcs=self.gcs,
+                upstox=self.upstox,
+            )
+        return self._swing_reconciliation_service
 
 
 @lru_cache(maxsize=1)

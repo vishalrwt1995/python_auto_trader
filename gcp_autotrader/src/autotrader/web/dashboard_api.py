@@ -1288,6 +1288,7 @@ _JOB_ROUTES: dict[str, str] = {
     "watchlist_5m":        "/jobs/watchlist-refresh?target_size=150&premarket=false&intraday_timeframe=5m",
     "scanner":             "/jobs/scan-once?force=true&allow_live_orders=false",
     "eod_recon":           "/jobs/eod-position-reconcile",
+    "swing_recon":         "/jobs/swing-reconcile",
 }
 
 

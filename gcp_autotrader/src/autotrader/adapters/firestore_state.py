@@ -271,3 +271,39 @@ class FirestoreStateStore:
                 out[d.id] = str(val)
         return out
 
+    def get_runtime_settings_overrides(self) -> dict[str, Any]:
+        """Return runtime-tunable StrategySettings overrides from Firestore.
+
+        Keys match StrategySettings field names (e.g. 'min_signal_score', 'max_positions').
+        Values are stored as strings and coerced to the appropriate type.
+        Set via dashboard or direct Firestore write to config/{key} with {"value": "..."}.
+
+        Supported keys (all optional):
+          min_signal_score, max_positions, risk_per_trade, max_daily_loss,
+          daily_profit_target, swing_min_signal_score, swing_max_positions
+        """
+        _FLOAT_KEYS = {"risk_per_trade", "max_daily_loss", "daily_profit_target",
+                       "swing_risk_per_trade", "atr_sl_mult", "swing_atr_sl_mult"}
+        _INT_KEYS = {"min_signal_score", "max_positions", "swing_min_signal_score",
+                     "swing_max_positions", "swing_max_hold_days"}
+        _BOOL_KEYS: set[str] = set()
+
+        overrides: dict[str, Any] = {}
+        try:
+            for key, raw in self.list_config().items():
+                if key in _INT_KEYS:
+                    try:
+                        overrides[key] = int(float(raw))
+                    except (ValueError, TypeError):
+                        pass
+                elif key in _FLOAT_KEYS:
+                    try:
+                        overrides[key] = float(raw)
+                    except (ValueError, TypeError):
+                        pass
+                elif key in _BOOL_KEYS:
+                    overrides[key] = str(raw).strip().lower() in {"1", "true", "yes"}
+        except Exception:
+            pass
+        return overrides
+

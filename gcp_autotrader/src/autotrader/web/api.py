@@ -1747,6 +1747,49 @@ def run_eod_position_reconcile(
         raise
 
 
+@app.post("/jobs/swing-reconcile")
+def run_swing_reconcile(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Re-evaluate open swing/CNC positions premarket against fresh daily candles.
+
+    Checks: max hold days, daily SL breach, target hit, daily SuperTrend flip.
+    Updates trailing SL if price made a new best overnight.
+
+    Called at 09:00 IST by Cloud Scheduler job: autotrader-swing-recon-0900
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("SwingReconciliationService", "swing_reconcile", "START", "", sched_ctx)
+        result = c.swing_reconciliation_service().run()
+        out = result.to_dict()
+        sink.action(
+            "SwingReconciliationService",
+            "swing_reconcile",
+            "DONE",
+            "swing reconcile complete",
+            {**sched_ctx, **_duration_ctx(started_perf), **out},
+        )
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action(
+            "SwingReconciliationService",
+            "swing_reconcile",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__},
+        )
+        sink.flush_all()
+        raise
+
+
 @app.get("/jobs/position-status")
 def get_position_status(
     x_job_token: str | None = Header(default=None),

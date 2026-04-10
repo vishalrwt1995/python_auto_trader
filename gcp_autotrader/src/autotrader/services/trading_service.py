@@ -340,7 +340,21 @@ class TradingService:
                 _today_pnl = self.state.get_today_realized_pnl(now_ist_str()[:10])
             except Exception:
                 logger.warning("daily_pnl_check_failed — proceeding without limit", exc_info=True)
+            # ── Runtime settings overrides (Firestore config/{key}) ───────
+            # Allows live tuning of thresholds without redeploy.
+            # Supported: min_signal_score, max_positions, risk_per_trade,
+            #            max_daily_loss, daily_profit_target,
+            #            swing_min_signal_score, swing_max_positions
             cfg = self.settings.strategy
+            try:
+                _rt_overrides = self.state.get_runtime_settings_overrides()
+                if _rt_overrides:
+                    from dataclasses import replace as _dc_replace
+                    cfg = _dc_replace(cfg, **_rt_overrides)
+                    logger.info("runtime_settings_overrides applied keys=%s", list(_rt_overrides))
+            except Exception:
+                logger.warning("runtime_settings_overrides_failed — using defaults", exc_info=True)
+
             if _today_pnl <= -abs(cfg.max_daily_loss):
                 _pnl_block_reason = "daily_loss_limit_hit"
             elif _today_pnl >= cfg.daily_profit_target:
@@ -816,12 +830,30 @@ class TradingService:
                 self.pubsub.publish_trade_signals_batch(bq_signals)
 
             # ── Firestore daily decision summary (running totals per day) ──
+            # Splits intraday vs swing stats for dashboard visibility.
             try:
                 _today = run_ts[:10]
                 _existing = self.state.get_json("decisions", _today) or {}
                 _rejection_counts: dict[str, int] = dict(_existing.get("rejection_breakdown", {}))
                 _top_scores: list[dict[str, Any]] = list(_existing.get("top_scores", []))
+
+                # Per-type counters (intraday vs swing)
+                _intraday_scanned = 0
+                _intraday_qualified = 0
+                _swing_scanned = 0
+                _swing_qualified = 0
+
                 for _d in bq_decisions:
+                    _d_type = _d.get("wl_type", "intraday")
+                    if _d_type == "swing":
+                        _swing_scanned += 1
+                        if _d["qualified"]:
+                            _swing_qualified += 1
+                    else:
+                        _intraday_scanned += 1
+                        if _d["qualified"]:
+                            _intraday_qualified += 1
+
                     if not _d["qualified"]:
                         _reason = _d["blocked_reason"] or "unknown"
                         _rejection_counts[_reason] = _rejection_counts.get(_reason, 0) + 1
@@ -836,6 +868,9 @@ class TradingService:
                             "rsi": _d["rsi"],
                             "vol_ratio": _d["vol_ratio"],
                             "setup": _d["setup"],
+                            "wl_type": _d.get("wl_type", "intraday"),
+                            "daily_trend": _d.get("daily_trend", ""),
+                            "affinity_mult": _d.get("affinity_mult", 1.0),
                             "scan_ts": _d["scan_ts"],
                         })
                 # Keep only top-10 by score across all cycles today
@@ -846,6 +881,10 @@ class TradingService:
                     "scanner_run_id": scanner_run_id,
                     "scanned": len(bq_decisions),
                     "qualified": qualified,
+                    "intraday_scanned": _intraday_scanned,
+                    "intraday_qualified": _intraday_qualified,
+                    "swing_scanned": _swing_scanned,
+                    "swing_qualified": _swing_qualified,
                     "regime": brain_state.regime if brain_state else "",
                     "risk_mode": brain_state.risk_mode if brain_state else "",
                 })
@@ -859,6 +898,10 @@ class TradingService:
                         "last_updated": run_ts,
                         "total_scanned": _existing.get("total_scanned", 0) + len(bq_decisions),
                         "total_qualified": _existing.get("total_qualified", 0) + qualified,
+                        "intraday_scanned": _existing.get("intraday_scanned", 0) + _intraday_scanned,
+                        "intraday_qualified": _existing.get("intraday_qualified", 0) + _intraday_qualified,
+                        "swing_scanned": _existing.get("swing_scanned", 0) + _swing_scanned,
+                        "swing_qualified": _existing.get("swing_qualified", 0) + _swing_qualified,
                         "avg_score": _avg_score,
                         "rejection_breakdown": _rejection_counts,
                         "top_scores": _top_scores,
