@@ -1,0 +1,137 @@
+"""Regime-strategy affinity matrix.
+
+Maps (regime, strategy, direction) to a score multiplier.  Strategies that
+are well-suited to the current market regime get a boost (up to 1.4x),
+while mismatched strategies get penalised (down to 0.2x).  This prevents
+the system from firing breakout entries in choppy markets or mean-reversion
+in strong trends — the #1 cause of false signals.
+"""
+from __future__ import annotations
+
+# Matrix: regime → {strategy: multiplier}
+# For directional strategies the multiplier applies when direction aligns with regime.
+# "short" variants use the mirror multiplier from the corresponding bearish regime.
+
+_AFFINITY: dict[str, dict[str, float]] = {
+    "TREND_UP": {
+        "BREAKOUT": 1.3,
+        "SHORT_BREAKDOWN": 0.4,   # shorting in uptrend is dangerous
+        "PULLBACK": 1.2,
+        "SHORT_PULLBACK": 0.5,
+        "MEAN_REVERSION": 0.5,
+        "VWAP_REVERSAL": 0.5,
+        "VWAP_TREND": 1.1,
+        "OPEN_DRIVE": 1.0,
+        "PHASE1_MOMENTUM": 1.2,
+        "AUTO": 1.0,
+        "DEFAULT": 1.0,
+    },
+    "TREND_DOWN": {
+        "BREAKOUT": 0.4,          # buying breakouts in downtrend rarely works
+        "SHORT_BREAKDOWN": 1.3,
+        "PULLBACK": 0.5,
+        "SHORT_PULLBACK": 1.2,
+        "MEAN_REVERSION": 0.6,
+        "VWAP_REVERSAL": 0.6,
+        "VWAP_TREND": 1.1,
+        "OPEN_DRIVE": 0.8,
+        "PHASE1_MOMENTUM": 0.8,
+        "AUTO": 0.9,
+        "DEFAULT": 0.9,
+    },
+    "RANGE": {
+        "BREAKOUT": 0.6,
+        "SHORT_BREAKDOWN": 0.6,
+        "PULLBACK": 0.8,
+        "SHORT_PULLBACK": 0.8,
+        "MEAN_REVERSION": 1.4,
+        "VWAP_REVERSAL": 1.3,
+        "VWAP_TREND": 0.7,
+        "OPEN_DRIVE": 0.8,
+        "PHASE1_MOMENTUM": 0.7,
+        "AUTO": 1.0,
+        "DEFAULT": 1.0,
+    },
+    "CHOP": {
+        "BREAKOUT": 0.3,
+        "SHORT_BREAKDOWN": 0.3,
+        "PULLBACK": 0.5,
+        "SHORT_PULLBACK": 0.5,
+        "MEAN_REVERSION": 1.2,
+        "VWAP_REVERSAL": 1.1,
+        "VWAP_TREND": 0.4,
+        "OPEN_DRIVE": 0.5,
+        "PHASE1_MOMENTUM": 0.4,
+        "AUTO": 0.7,
+        "DEFAULT": 0.7,
+    },
+    "PANIC": {
+        "BREAKOUT": 0.2,
+        "SHORT_BREAKDOWN": 0.8,
+        "PULLBACK": 0.3,
+        "SHORT_PULLBACK": 0.6,
+        "MEAN_REVERSION": 0.8,   # capitulation bounces can be profitable
+        "VWAP_REVERSAL": 0.8,
+        "VWAP_TREND": 0.2,
+        "OPEN_DRIVE": 0.3,
+        "PHASE1_MOMENTUM": 0.3,
+        "AUTO": 0.5,
+        "DEFAULT": 0.5,
+    },
+    "RECOVERY": {
+        "BREAKOUT": 1.1,
+        "SHORT_BREAKDOWN": 0.4,
+        "PULLBACK": 1.0,
+        "SHORT_PULLBACK": 0.5,
+        "MEAN_REVERSION": 0.7,
+        "VWAP_REVERSAL": 0.7,
+        "VWAP_TREND": 1.0,
+        "OPEN_DRIVE": 1.2,
+        "PHASE1_MOMENTUM": 1.1,
+        "AUTO": 1.0,
+        "DEFAULT": 1.0,
+    },
+}
+
+# Floor and ceiling to prevent extreme distortion
+_MIN_MULT = 0.2
+_MAX_MULT = 1.4
+
+
+def regime_strategy_multiplier(
+    regime: str,
+    strategy: str,
+    direction: str = "BUY",
+) -> float:
+    """Return a score multiplier for the (regime, strategy, direction) combination.
+
+    The multiplier is applied to the raw signal score to boost strategies
+    that match the regime and suppress those that don't.
+
+    Args:
+        regime: Market regime from brain_state (TREND_UP, TREND_DOWN, RANGE, etc.)
+        strategy: Watchlist setup (BREAKOUT, PULLBACK, MEAN_REVERSION, etc.)
+        direction: BUY or SELL
+
+    Returns:
+        float in [0.2, 1.4] — multiply by raw score
+    """
+    regime_upper = str(regime or "RANGE").strip().upper()
+    strategy_upper = str(strategy or "AUTO").strip().upper()
+
+    regime_map = _AFFINITY.get(regime_upper)
+    if regime_map is None:
+        # Unknown regime — no adjustment
+        return 1.0
+
+    mult = regime_map.get(strategy_upper, 1.0)
+
+    # Direction alignment bonus/penalty for directional regimes
+    # In TREND_UP, BUY gets the full multiplier; SELL gets a dampening
+    # In TREND_DOWN, SELL gets the full multiplier; BUY gets dampening
+    if regime_upper == "TREND_UP" and direction == "SELL":
+        mult = min(mult, 0.6)
+    elif regime_upper == "TREND_DOWN" and direction == "BUY":
+        mult = min(mult, 0.6)
+
+    return max(_MIN_MULT, min(_MAX_MULT, round(mult, 2)))

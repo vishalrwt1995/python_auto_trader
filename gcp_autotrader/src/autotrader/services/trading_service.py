@@ -12,8 +12,10 @@ from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.indicators import compute_indicators
+from autotrader.domain.daily_bias import compute_daily_bias
+from autotrader.domain.regime_affinity import regime_strategy_multiplier
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
-from autotrader.domain.scoring import check_strategy_entry, determine_direction, score_signal
+from autotrader.domain.scoring import check_strategy_entry, check_swing_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
 from autotrader.services.order_service import OrderService
 from autotrader.services.market_brain_service import MarketBrainService
@@ -418,6 +420,23 @@ class TradingService:
                     timeframe="1d" if _is_swing else "15m",
                     lookback_days=120 if _is_swing else 8,
                 )
+                # ── Daily bias (multi-timeframe confirmation) ──────────────
+                # For swing: candles are already daily → compute bias directly.
+                # For intraday: fetch daily candles separately for alignment overlay.
+                _daily_bias = None
+                try:
+                    if _is_swing:
+                        _daily_bias = compute_daily_bias(candles)
+                    elif instrument_key:
+                        _daily_candles = self._fetch_candles(
+                            w.symbol, w.exchange, w.segment,
+                            instrument_key=instrument_key,
+                            timeframe="1d", lookback_days=120,
+                        )
+                        _daily_bias = compute_daily_bias(_daily_candles)
+                except Exception:
+                    logger.debug("daily_bias_compute_failed symbol=%s", w.symbol)
+
                 ind = compute_indicators(candles, self.settings.strategy)
                 if ind is None:
                     self.log_sink.decision("SCAN", w.symbol, "SKIP", "insufficient_candles", {"candles": len(candles)})
@@ -487,8 +506,15 @@ class TradingService:
                     })
                     continue
                 direction = determine_direction(ind, regime)
-                meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy)
-                adjusted_score = max(0, min(100, int(self.market_brain_service.adjust_signal(meta.score, brain_state))))
+                meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy, daily_bias=_daily_bias)
+                # Apply regime-strategy affinity multiplier
+                _affinity_mult = regime_strategy_multiplier(
+                    brain_state.regime if brain_state else "RANGE",
+                    w.strategy,
+                    direction,
+                )
+                _affinity_score = max(0, min(100, int(round(meta.score * _affinity_mult))))
+                adjusted_score = max(0, min(100, int(self.market_brain_service.adjust_signal(_affinity_score, brain_state))))
                 # Use live LTP (real-time) for entry price; candle close as fallback if API unavailable
                 _live = live_ltp_map.get(instrument_key, 0.0)
                 ltp = _live if _live > 0 else ind.close
@@ -596,6 +622,9 @@ class TradingService:
                     # and we can tune thresholds from paper-trade data later.
                     "minScore": int(dynamic_min_score),
                     "atrMult": round(_atr_mult, 3),
+                    "affinityMult": round(_affinity_mult, 2),
+                    "dailyTrend": _daily_bias.trend if _daily_bias else "",
+                    "dailyStrength": round(_daily_bias.strength, 1) if _daily_bias else 0.0,
                 }
 
                 policy_block_reason = ""
@@ -618,7 +647,10 @@ class TradingService:
                 else:
                     # Strategy-specific hard gates: validate that the current market
                     # structure actually matches the setup assigned at watchlist build time.
-                    _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind)
+                    if _is_swing:
+                        _strategy_ok, _strategy_fail = check_swing_entry(w.strategy, direction, ind, _daily_bias)
+                    else:
+                        _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind)
                     if not _strategy_ok:
                         policy_block_reason = _strategy_fail
                     # Portfolio sector concentration: don't pile into the same sector
@@ -730,7 +762,11 @@ class TradingService:
                     "score_options": int(meta.breakdown.options),
                     "score_technical": int(meta.breakdown.technical),
                     "score_volume": int(meta.breakdown.volume),
+                    "score_alignment": int(meta.breakdown.alignment),
                     "score_penalty": int(meta.breakdown.penalty),
+                    "affinity_mult": round(_affinity_mult, 2),
+                    "daily_trend": _daily_bias.trend if _daily_bias else "",
+                    "daily_strength": round(_daily_bias.strength, 1) if _daily_bias else 0.0,
                     "regime": brain_state.regime if brain_state else regime.regime,
                     "risk_mode": brain_state.risk_mode if brain_state else "",
                 })

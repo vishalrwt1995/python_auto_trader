@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from autotrader.domain.models import Direction, IndicatorSnapshot, RegimeSnapshot, ScoreBreakdown, SignalScore
 from autotrader.settings import StrategySettings
+
+if TYPE_CHECKING:
+    from autotrader.domain.daily_bias import DailyBias
 
 
 def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot) -> Direction:
@@ -50,6 +55,8 @@ def score_signal(
     ind: IndicatorSnapshot,
     regime: RegimeSnapshot,
     cfg: StrategySettings,
+    *,
+    daily_bias: DailyBias | None = None,
 ) -> SignalScore:
     bd = ScoreBreakdown()
     if direction == "HOLD" or regime.regime == "AVOID":
@@ -58,105 +65,133 @@ def score_signal(
     score = 0.0
     is_buy = direction == "BUY"
 
-    # Layer 1: Regime (25)
+    # Layer 1: Regime (20)
     if (is_buy and regime.nifty.change_pct > 0.1) or ((not is_buy) and regime.nifty.change_pct < -0.1):
-        bd.regime += 10
-    elif abs(regime.nifty.change_pct) < 0.1:
-        bd.regime += 5
-
-    if regime.vix < cfg.vix_trend_max:
         bd.regime += 8
-    elif regime.vix < cfg.vix_safe_max:
+    elif abs(regime.nifty.change_pct) < 0.1:
         bd.regime += 4
 
-    if (is_buy and regime.fii.fii > 500) or ((not is_buy) and regime.fii.fii < -500):
+    if regime.vix < cfg.vix_trend_max:
         bd.regime += 7
-    elif abs(regime.fii.fii) < 500:
+    elif regime.vix < cfg.vix_safe_max:
         bd.regime += 3
+
+    if (is_buy and regime.fii.fii > 500) or ((not is_buy) and regime.fii.fii < -500):
+        bd.regime += 5
+    elif abs(regime.fii.fii) < 500:
+        bd.regime += 2
+    bd.regime = min(20, bd.regime)
     score += bd.regime
 
-    # Layer 2: Options (20)
+    # Layer 2: Options (15)
     if (is_buy and regime.pcr.pcr >= cfg.pcr_bull_min) or ((not is_buy) and regime.pcr.pcr <= cfg.pcr_bear_max):
-        bd.options += 10
+        bd.options += 8
     else:
-        bd.options += 3
+        bd.options += 2
     if regime.pcr.max_pain > 0:
         mp = regime.pcr.max_pain
         if (is_buy and ind.close > mp * 0.998) or ((not is_buy) and ind.close < mp * 1.002):
-            bd.options += 10
+            bd.options += 7
         else:
-            bd.options += 4
+            bd.options += 3
     else:
-        bd.options += 5
+        bd.options += 4
+    bd.options = min(15, bd.options)
     score += bd.options
 
-    # Layer 3: Technical (40)
+    # Layer 3: Technical (35)
     if ind.supertrend.fresh and ((is_buy and ind.supertrend.dir == 1) or ((not is_buy) and ind.supertrend.dir == -1)):
-        bd.technical += 10
+        bd.technical += 9
     elif (is_buy and ind.supertrend.dir == 1) or ((not is_buy) and ind.supertrend.dir == -1):
-        bd.technical += 6
+        bd.technical += 5
 
     if (is_buy and ind.close > ind.vwap) or ((not is_buy) and ind.close < ind.vwap):
-        bd.technical += 8
+        bd.technical += 7
 
     if is_buy:
         if ind.ema_fast.curr > ind.ema_med.curr > ind.ema_slow.curr:
-            bd.technical += 7
+            bd.technical += 6
         elif ind.ema_fast.curr > ind.ema_med.curr:
-            bd.technical += 4
+            bd.technical += 3
         elif ind.ema_fast.curr > ind.ema_fast.prev:
-            bd.technical += 2
+            bd.technical += 1
     else:
         if ind.ema_fast.curr < ind.ema_med.curr < ind.ema_slow.curr:
-            bd.technical += 7
+            bd.technical += 6
         elif ind.ema_fast.curr < ind.ema_med.curr:
-            bd.technical += 4
+            bd.technical += 3
         elif ind.ema_fast.curr < ind.ema_fast.prev:
-            bd.technical += 2
+            bd.technical += 1
 
     rsi = ind.rsi.curr
     if (is_buy and cfg.rsi_buy_min <= rsi <= cfg.rsi_buy_max) or ((not is_buy) and cfg.rsi_sell_min <= rsi <= cfg.rsi_sell_max):
-        bd.technical += 7
+        bd.technical += 6
     elif (is_buy and rsi > ind.rsi.prev and rsi < cfg.rsi_buy_max) or ((not is_buy) and rsi < ind.rsi.prev and rsi > cfg.rsi_sell_min):
-        bd.technical += 3
+        bd.technical += 2
 
     if (ind.macd.crossed == "BUY" and is_buy) or (ind.macd.crossed == "SELL" and (not is_buy)):
-        bd.technical += 8
+        bd.technical += 7
     elif (is_buy and ind.macd.hist > 0) or ((not is_buy) and ind.macd.hist < 0):
-        bd.technical += 4
+        bd.technical += 3
 
-    # ADX: trend-strength filter — rewards trending markets, penalises choppy ones.
-    # For trend-following setups (BUY on TREND_UP, SELL on TREND_DOWN) a strong ADX
-    # confirms the move is real.  For mean-reversion we deliberately skip this bonus
-    # because reversals fire in low-ADX, ranging conditions.
+    # ADX: trend-strength filter
     if ind.adx >= 30:
-        bd.technical = min(40, bd.technical + 5)   # strong trend confirmed
+        bd.technical = min(35, bd.technical + 4)
     elif ind.adx >= 20:
-        bd.technical = min(40, bd.technical + 2)   # moderate trend
-    # ADX < 20 → no bonus (chop / no trend)
+        bd.technical = min(35, bd.technical + 2)
 
     if (is_buy and ind.patterns.bull_engulf) or ((not is_buy) and ind.patterns.bear_engulf):
-        bd.technical = min(40, bd.technical + 2)
-    bd.technical = min(40, bd.technical)
+        bd.technical = min(35, bd.technical + 2)
+    bd.technical = min(35, bd.technical)
     score += bd.technical
 
-    # Layer 4: Volume (15)
+    # Layer 4: Volume (10)
     if ind.volume.ratio >= cfg.vol_mult:
-        bd.volume += 10
+        bd.volume += 7
     elif ind.volume.ratio >= 1.2:
-        bd.volume += 6
+        bd.volume += 4
     elif ind.volume.ratio >= 1.0:
-        bd.volume += 3
+        bd.volume += 2
     if (is_buy and ind.obv_curr > ind.obv_prev) or ((not is_buy) and ind.obv_curr < ind.obv_prev):
-        bd.volume += 5
+        bd.volume += 3
+    bd.volume = min(10, bd.volume)
     score += bd.volume
+
+    # Layer 5: Multi-timeframe Alignment (15)
+    # When daily_bias is provided, reward signals aligned with the daily trend
+    # and penalise those fighting it.
+    if daily_bias is not None:
+        if is_buy:
+            if daily_bias.trend == "UP":
+                # Perfect alignment: intraday BUY + daily uptrend
+                bd.alignment += 15
+            elif daily_bias.trend == "NEUTRAL":
+                bd.alignment += 5
+            else:
+                # Counter-trend: intraday BUY against daily downtrend
+                bd.alignment -= 10
+        else:  # SELL
+            if daily_bias.trend == "DOWN":
+                bd.alignment += 15
+            elif daily_bias.trend == "NEUTRAL":
+                bd.alignment += 5
+            else:
+                bd.alignment -= 10
+
+        # Strength bonus: stronger daily trend = more alignment weight
+        if daily_bias.strength >= 70 and bd.alignment > 0:
+            bd.alignment = min(15, bd.alignment + 3)
+        elif daily_bias.strength < 30 and bd.alignment > 0:
+            bd.alignment = max(0, bd.alignment - 3)
+
+        bd.alignment = max(-10, min(15, bd.alignment))
+    score += bd.alignment
 
     # Penalties
     if regime.vix > 18:
         bd.penalty -= 10
     if regime.regime == "RANGE":
         bd.penalty -= 8
-    # Low ADX in a non-mean-reversion context means no trend to trade — penalise.
     if ind.adx < 15 and regime.regime != "RANGE":
         bd.penalty -= 5
     if abs(ind.close - ind.open) / (ind.close or 1) * 100 > 2.5:
@@ -248,6 +283,65 @@ def check_strategy_entry(
         return True, ""
 
     # OPEN_DRIVE, AUTO, DEFAULT, PHASE1_MOMENTUM, etc. — no extra gate
+    return True, ""
+
+
+def check_swing_entry(
+    strategy: str,
+    direction: str,
+    ind: IndicatorSnapshot,
+    daily_bias: DailyBias | None,
+) -> tuple[bool, str]:
+    """Swing-specific entry gates — tighter than intraday because positions are held for days.
+
+    Uses daily-timeframe indicators from daily_bias when available, falls back to
+    the intraday IndicatorSnapshot for basic checks.
+    """
+    if daily_bias is None:
+        return True, ""  # No daily data — pass through, let score handle it
+
+    s = str(strategy or "").strip().upper()
+    is_buy = direction == "BUY"
+
+    if s in ("BREAKOUT", "SHORT_BREAKDOWN"):
+        # Swing breakout: needs strong daily trend + daily ADX ≥ 25
+        if daily_bias.adx_daily < 25:
+            return False, "swing_breakout_daily_adx_too_low"
+        # Daily trend must align with direction
+        if is_buy and daily_bias.trend != "UP":
+            return False, "swing_breakout_daily_trend_not_up"
+        if not is_buy and daily_bias.trend != "DOWN":
+            return False, "swing_breakout_daily_trend_not_down"
+        if ind.volume.ratio < 1.3:
+            return False, "swing_breakout_volume_insufficient"
+        return True, ""
+
+    if s in ("PULLBACK", "SHORT_PULLBACK"):
+        # Swing pullback: daily EMA stack intact, daily RSI in reload zone
+        if is_buy and not daily_bias.ema_stack:
+            return False, "swing_pullback_daily_ema_not_stacked"
+        if not is_buy and not daily_bias.ema_flip:
+            return False, "swing_pullback_daily_ema_not_flipped"
+        if is_buy and not (40 <= daily_bias.rsi_daily <= 55):
+            return False, "swing_pullback_daily_rsi_outside_zone"
+        if not is_buy and not (45 <= daily_bias.rsi_daily <= 60):
+            return False, "swing_pullback_daily_rsi_outside_zone"
+        return True, ""
+
+    if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
+        # Swing mean-reversion: daily RSI must be stretched
+        if is_buy and daily_bias.rsi_daily > 35:
+            return False, "swing_mr_daily_rsi_not_oversold"
+        if not is_buy and daily_bias.rsi_daily < 65:
+            return False, "swing_mr_daily_rsi_not_overbought"
+        # Price should be near daily BB band (use support/resistance as proxy)
+        if is_buy and daily_bias.support > 0 and ind.close > daily_bias.support * 1.03:
+            return False, "swing_mr_price_not_near_support"
+        if not is_buy and daily_bias.resistance > 0 and ind.close < daily_bias.resistance * 0.97:
+            return False, "swing_mr_price_not_near_resistance"
+        return True, ""
+
+    # AUTO, DEFAULT, VWAP_TREND, OPEN_DRIVE — pass through for swing
     return True, ""
 
 

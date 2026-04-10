@@ -222,6 +222,7 @@ class ScoreBreakdown:
     options: float = 0.0
     technical: float = 0.0
     volume: float = 0.0
+    alignment: float = 0.0  # multi-timeframe alignment (daily vs 15m)
     penalty: float = 0.0
 
 
