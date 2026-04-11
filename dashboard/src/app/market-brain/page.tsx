@@ -14,10 +14,13 @@ import { PARTICIPATION_COLORS } from "@/lib/constants";
 /** Classify a reason string by sentiment for border color */
 function reasonSentiment(r: string): "positive" | "negative" | "warning" | "neutral" {
   const u = r.toUpperCase();
-  if (/BLOCKED|DISABLED|DEGRADED|FAILED|MISSING|BELOW|ERROR|LOCKDOWN|PANIC|SUSPENDED/.test(u))
+  // Negative: explicit failure/block keywords (not "below safe/threshold")
+  if (/\bBLOCKED\b|\bDISABLED\b|\bDEGRADED\b|\bFAILED\b|\bMISSING\b|\bERROR\b|\bLOCKDOWN\b|\bPANIC\b|\bSUSPENDED\b/.test(u))
     return "negative";
-  if (/WARNING|CAUTION|REDUCED|TIGHT|ELEVATED|WEAK/.test(u)) return "warning";
-  if (/ENABLED|PASSED|HEALTHY|STRONG|VALID|OK|ABOVE|ACTIVE|CLEAR/.test(u)) return "positive";
+  // "BELOW" is only negative when paired with "THRESHOLD" or "MIN" (e.g. "score below threshold"), NOT "below safe"
+  if (/BELOW\s+(THRESHOLD|MIN|MINIMUM|LIMIT)\b/.test(u)) return "negative";
+  if (/\bWARNING\b|\bCAUTION\b|\bREDUCED\b|\bTIGHT\b|\bELEVATED\b|\bWEAK\b|\bDELAYED\b/.test(u)) return "warning";
+  if (/\bENABLED\b|\bPASSED\b|\bHEALTHY\b|\bSTRONG\b|\bVALID\b|\b\bOK\b|\bABOVE\b|\bACTIVE\b|\bCLEAR\b|\bCONFIRMED\b|\bBELOW SAFE\b/.test(u)) return "positive";
   return "neutral";
 }
 
