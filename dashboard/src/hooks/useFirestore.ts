@@ -59,8 +59,7 @@ export function useFirestoreCollection<T = DocumentData>(
 
   useEffect(() => {
     if (!db) return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const constraints: any[] = [];
+    const constraints: Parameters<typeof query>[1][] = [];
     if (options?.filters?.length) {
       constraints.push(...options.filters.map((f) => where(f.field, f.op, f.value)));
     }
@@ -86,8 +85,7 @@ export function useFirestoreCollection<T = DocumentData>(
       },
     );
     return unsub;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectionName]);
+  }, [collectionName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { data, loading, error };
 }
