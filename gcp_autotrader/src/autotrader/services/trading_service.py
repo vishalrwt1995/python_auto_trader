@@ -642,7 +642,9 @@ class TradingService:
                 }
 
                 policy_block_reason = ""
-                if direction == "BUY" and market_policy is not None and not bool(market_policy.long_enabled):
+                if pos.qty == 0:
+                    policy_block_reason = "sl_too_wide_for_risk_budget"
+                elif direction == "BUY" and market_policy is not None and not bool(market_policy.long_enabled):
                     policy_block_reason = "policy_long_disabled"
                 elif direction == "SELL" and market_policy is not None and not bool(market_policy.short_enabled):
                     policy_block_reason = "policy_short_disabled"

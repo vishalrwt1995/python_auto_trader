@@ -57,12 +57,12 @@ export default function MarketBrainPage() {
   if (!brain) return <LoadingSkeleton lines={12} className="max-w-4xl" />;
 
   const radarData = [
-    { label: "Trend",     current: brain.trend_score },
-    { label: "Breadth",   current: brain.breadth_score },
-    { label: "Leadership",current: brain.leadership_score },
-    { label: "Vol Calm",  current: Math.max(0, 100 - brain.volatility_stress_score) },
-    { label: "Liquidity", current: brain.liquidity_health_score },
-    { label: "Data Qual", current: brain.data_quality_score },
+    { label: "Trend",     current: brain.trend_score ?? 0 },
+    { label: "Breadth",   current: brain.breadth_score ?? 0 },
+    { label: "Leadership",current: brain.leadership_score ?? 0 },
+    { label: "Vol Calm",  current: Math.max(0, 100 - (brain.volatility_stress_score ?? 0)) },
+    { label: "Liquidity", current: brain.liquidity_health_score ?? 0 },
+    { label: "Data Qual", current: brain.data_quality_score ?? 0 },
   ];
 
   const swingColor =
@@ -175,9 +175,9 @@ export default function MarketBrainPage() {
             <span
               className={cn(
                 "font-mono font-semibold",
-                brain.volatility_stress_score >= 70
+                (brain.volatility_stress_score ?? 0) >= 70
                   ? "text-loss"
-                  : brain.volatility_stress_score >= 40
+                  : (brain.volatility_stress_score ?? 0) >= 40
                     ? "text-neutral"
                     : "text-profit",
               )}
@@ -189,7 +189,7 @@ export default function MarketBrainPage() {
           <span>
             Liquidity:{" "}
             <span className={cn("font-mono font-semibold",
-              brain.liquidity_health_score >= 60 ? "text-profit" : brain.liquidity_health_score >= 30 ? "text-neutral" : "text-loss",
+              (brain.liquidity_health_score ?? 0) >= 60 ? "text-profit" : (brain.liquidity_health_score ?? 0) >= 30 ? "text-neutral" : "text-loss",
             )}>
               {brain.liquidity_health_score?.toFixed(0) ?? "--"}
             </span>
@@ -197,7 +197,7 @@ export default function MarketBrainPage() {
           <span>
             Data Quality:{" "}
             <span className={cn("font-mono font-semibold",
-              brain.data_quality_score >= 80 ? "text-profit" : brain.data_quality_score >= 50 ? "text-neutral" : "text-loss",
+              (brain.data_quality_score ?? 0) >= 80 ? "text-profit" : (brain.data_quality_score ?? 0) >= 50 ? "text-neutral" : "text-loss",
             )}>
               {brain.data_quality_score?.toFixed(0) ?? "--"}
             </span>

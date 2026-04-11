@@ -158,13 +158,13 @@ export default function JournalPage() {
         key: "entry",
         label: "Entry",
         className: "text-right font-mono",
-        render: (r) => <span>{r.entry_price.toFixed(2)}</span>,
+        render: (r) => <span>{r.entry_price?.toFixed(2) ?? "—"}</span>,
       },
       {
         key: "exit",
         label: "Exit",
         className: "text-right font-mono",
-        render: (r) => <span>{r.exit_price.toFixed(2)}</span>,
+        render: (r) => <span>{r.exit_price?.toFixed(2) ?? "—"}</span>,
       },
       {
         key: "pnl",

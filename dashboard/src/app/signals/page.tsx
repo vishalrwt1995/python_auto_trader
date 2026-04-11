@@ -64,7 +64,7 @@ function ScoreBar({ score, status }: { score: number; status: string }) {
 }
 
 function RsiDisplay({ rsi }: { rsi: number | null | undefined }) {
-  if (!rsi) return <span className="text-text-secondary">—</span>;
+  if (rsi == null) return <span className="text-text-secondary">—</span>;
   const color =
     rsi < 35
       ? "text-profit"

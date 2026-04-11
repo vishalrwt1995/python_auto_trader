@@ -18,9 +18,13 @@ def calc_swing_position_size(
     sl_price = entry_price - sl_dist if direction == "BUY" else entry_price + sl_dist
     target = entry_price + sl_dist * cfg.swing_rr if direction == "BUY" else entry_price - sl_dist * cfg.swing_rr
 
-    qty = int(cfg.swing_risk_per_trade // sl_dist) if sl_dist > 0 else 1
-    qty = min(qty, int((cfg.capital * 0.20) // max(entry_price, 1)))  # 20% max capital per swing
-    qty = max(1, qty)
+    raw_qty = int(cfg.swing_risk_per_trade // sl_dist) if sl_dist > 0 else 0
+    qty = min(raw_qty, int((cfg.capital * 0.20) // max(entry_price, 1)))  # 20% max capital per swing
+    # Skip trade if even 1 share exceeds 2× risk budget (SL too wide for this stock/ATR)
+    if qty < 1 and sl_dist > cfg.swing_risk_per_trade * 2:
+        qty = 0
+    else:
+        qty = max(1, qty)
     brokerage = calc_brokerage(qty, entry_price)
     max_loss = round(qty * sl_dist + brokerage, 2)
     max_gain = round(qty * sl_dist * cfg.swing_rr - brokerage, 2)
@@ -67,9 +71,13 @@ def calc_position_size(
     sl_price = entry_price - sl_dist if direction == "BUY" else entry_price + sl_dist
     target = entry_price + sl_dist * cfg.rr_intraday if direction == "BUY" else entry_price - sl_dist * cfg.rr_intraday
 
-    qty = int(cfg.risk_per_trade // sl_dist) if sl_dist > 0 else 1
-    qty = min(qty, int((cfg.capital * 0.15) // max(entry_price, 1)))
-    qty = max(1, qty)
+    raw_qty = int(cfg.risk_per_trade // sl_dist) if sl_dist > 0 else 0
+    qty = min(raw_qty, int((cfg.capital * 0.15) // max(entry_price, 1)))
+    # Skip trade if even 1 share exceeds 2× risk budget (SL too wide for this stock/ATR)
+    if qty < 1 and sl_dist > cfg.risk_per_trade * 2:
+        qty = 0
+    else:
+        qty = max(1, qty)
     brokerage = calc_brokerage(qty, entry_price)
     max_loss = round(qty * sl_dist + brokerage, 2)
     max_gain = round(qty * sl_dist * cfg.rr_intraday - brokerage, 2)

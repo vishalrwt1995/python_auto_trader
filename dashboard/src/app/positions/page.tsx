@@ -123,7 +123,7 @@ export default function PositionsPage() {
         key: "entry",
         label: "Entry",
         className: "text-right font-mono",
-        render: (r) => <span>{r.entry_price.toFixed(2)}</span>,
+        render: (r) => <span>{r.entry_price?.toFixed(2) ?? "—"}</span>,
       },
       {
         key: "ltp",
@@ -200,13 +200,13 @@ export default function PositionsPage() {
         key: "sl",
         label: "SL",
         className: "text-right font-mono text-loss/80",
-        render: (r) => <span>{r.sl_price.toFixed(2)}</span>,
+        render: (r) => <span>{r.sl_price != null ? r.sl_price.toFixed(2) : "—"}</span>,
       },
       {
         key: "target",
         label: "Target",
         className: "text-right font-mono text-profit/80",
-        render: (r) => <span>{r.target.toFixed(2)}</span>,
+        render: (r) => <span>{r.target != null ? r.target.toFixed(2) : "—"}</span>,
       },
       {
         key: "rr",

@@ -185,9 +185,12 @@ class MarketPolicyService:
             * max(0.40, min(1.25, float(liquidity_multiplier)))
             * max(0.40, min(1.20, float(data_quality_multiplier)))
         )
-        qty = int(max(1, math.floor(float(position_sizing.qty) * risk_mult)))
-        if state.risk_mode == "LOCKDOWN":
-            qty = max(1, min(qty, max(1, int(position_sizing.qty // 2 or 1))))
+        if position_sizing.qty == 0:
+            qty = 0  # Preserve skip-flag from risk.py (SL too wide for risk budget)
+        else:
+            qty = int(max(1, math.floor(float(position_sizing.qty) * risk_mult)))
+            if state.risk_mode == "LOCKDOWN":
+                qty = max(1, min(qty, max(1, int(position_sizing.qty // 2 or 1))))
         return PositionSizing(
             qty=qty,
             sl_price=position_sizing.sl_price,

@@ -526,7 +526,7 @@ export default function SectorsPage() {
         render: (r) => (
           <div className="flex items-center gap-2">
             <LiqBar row={r} />
-            <span className="text-[10px] text-text-secondary">{r.liq_score.toFixed(1)}</span>
+            <span className="text-[10px] text-text-secondary">{r.liq_score?.toFixed(1) ?? "—"}</span>
           </div>
         ),
       },
