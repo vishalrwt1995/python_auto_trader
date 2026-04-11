@@ -14,7 +14,7 @@ export function usePositions(statusFilter?: "OPEN" | "CLOSED") {
 
   const { data, loading, error } = useFirestoreCollection<Position>(
     "positions",
-    filters,
+    filters ? { filters } : undefined,
   );
   const setPositions = useDashboardStore((s) => s.setPositions);
   const voiceEnabled = useSettingsStore((s) => s.voiceEnabled);
