@@ -179,7 +179,7 @@ export default function AnalyticsPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
           <MetricCard label="Total P&L" value={formatCurrency(summary.total_pnl)} positive={summary.total_pnl >= 0} />
           <MetricCard label="Win Rate" value={`${summary.win_rate}%`} positive={summary.win_rate >= 50} />
-          <MetricCard label="Profit Factor" value={String(summary.profit_factor)} positive={summary.profit_factor >= 1.5} />
+          <MetricCard label="Profit Factor" value={summary.profit_factor?.toFixed(2) ?? "--"} positive={summary.profit_factor >= 1.5} />
           <MetricCard label="Avg Trades/Day" value={avgTradesPerDay} />
           <MetricCard label="Max Win Streak" value={String(streaks.maxWin)} positive />
           <MetricCard label="Max Loss Streak" value={String(streaks.maxLoss)} />

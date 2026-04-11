@@ -61,6 +61,16 @@ const CONFIG_GROUPS: {
     ],
   },
   {
+    group: "Swing Trading",
+    items: [
+      { key: "swing_atr_sl_mult", label: "Swing SL Mult", fmt: RAW, description: "ATR multiplier for swing stop loss (wider than intraday)" },
+      { key: "swing_rr", label: "Swing R:R", fmt: RAW, description: "R:R target for swing trades" },
+      { key: "swing_risk_per_trade", label: "Swing Risk/Trade", fmt: INR, description: "Max loss per swing trade in ₹" },
+      { key: "swing_max_positions", label: "Swing Max Pos", fmt: RAW },
+      { key: "swing_min_signal_score", label: "Swing Min Score", fmt: RAW, description: "Minimum score to qualify swing entry" },
+    ],
+  },
+  {
     group: "Market Filters",
     items: [
       { key: "vix_safe_max", label: "VIX Safe Max", fmt: RAW, description: "VIX above this = cautious mode" },
