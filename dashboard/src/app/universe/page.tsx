@@ -11,13 +11,10 @@ import {
   Cell,
   ResponsiveContainer,
   Tooltip,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
 } from "recharts";
 import { InfoBadge, Tooltip as AppTooltip } from "@/components/shared/Tooltip";
 import { useRouter } from "next/navigation";
+import { Globe, TrendingUp, Zap, XCircle } from "lucide-react";
 
 const PIE_COLORS = [
   "#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#8b5cf6",
@@ -41,7 +38,6 @@ const DQ_COLOR: Record<string, string> = {
   "": "#6b7280",
 };
 
-// InfoTooltip → now uses shared InfoBadge
 function InfoTooltip({ text }: { text: string }) {
   return <InfoBadge text={text} />;
 }
@@ -50,15 +46,15 @@ function InfoTooltip({ text }: { text: string }) {
 
 function ActivePill({ label, value, onClear }: { label: string; value: string; onClear: () => void }) {
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-accent/20 text-accent text-xs border border-accent/30">
-      <span className="text-text-secondary text-[10px]">{label}:</span>
+    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-accent/20 border border-accent/40 text-accent text-xs">
+      <span className="text-accent/70 text-[10px]">{label}:</span>
       <span className="font-medium">{value}</span>
       <button
         onClick={onClear}
         className="ml-0.5 text-accent/70 hover:text-accent transition-colors leading-none"
         aria-label="Remove filter"
       >
-        ✕
+        ×
       </button>
     </span>
   );
@@ -74,9 +70,9 @@ interface UniverseSymbol {
   beta: number;
   eligible_swing: boolean;
   eligible_intraday: boolean;
-  universe_score?: number;   // 0-100 computed indicator score (EMA/RSI/MACD/Breakout/Volume)
-  score_calc?: string;       // breakdown string e.g. "E20|P10|R15|M10|B15|V15|O5|N-5|S85"
-  priority?: number;         // manual priority (legacy)
+  universe_score?: number;
+  score_calc?: string;
+  priority?: number;
   price_last?: number;
   atr_pct_14d?: number;
   atr_14?: number;
@@ -132,7 +128,6 @@ export default function UniversePage() {
     [symbols],
   );
 
-  // Eligible by sector — all sectors, no truncation
   const sectorBreakdown = useMemo(() => {
     const eligible = symbols.filter((s) => s.eligible_swing || s.eligible_intraday);
     const map: Record<string, number> = {};
@@ -150,7 +145,6 @@ export default function UniversePage() {
     [symbols],
   );
 
-  // Liquidity buckets — denominator = symbols that actually have a bucket
   const bucketBreakdown = useMemo(() => {
     const counts: Record<string, number> = { A: 0, B: 0, C: 0, D: 0 };
     symbols.forEach((s) => {
@@ -162,7 +156,6 @@ export default function UniversePage() {
     return { counts, withBucket, noBucket };
   }, [symbols]);
 
-  // Data quality — dynamic from actual data, empty string normalised to ""
   const dqBreakdown = useMemo(() => {
     const map: Record<string, number> = {};
     symbols.forEach((s) => {
@@ -172,21 +165,18 @@ export default function UniversePage() {
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
   }, [symbols]);
 
-  // Bucket counts per option (for filter badges)
   const bucketCounts = useMemo(() => {
     const m: Record<string, number> = { "": symbols.length, A: 0, B: 0, C: 0, D: 0 };
     symbols.forEach((s) => { if (s.liquidity_bucket && m[s.liquidity_bucket] !== undefined) m[s.liquidity_bucket]++; });
     return m;
   }, [symbols]);
 
-  // DQ counts per option (for filter badges)
   const dqCounts = useMemo(() => {
     const m: Record<string, number> = { "": symbols.length };
     symbols.forEach((s) => { const f = s.data_quality_flag ?? ""; m[f] = (m[f] ?? 0) + 1; });
     return m;
   }, [symbols]);
 
-  // Sector counts (for filter badge on selected sector)
   const sectorCounts = useMemo(() => {
     const m: Record<string, number> = {};
     symbols.forEach((s) => { const sec = s.sector || ""; m[sec] = (m[sec] ?? 0) + 1; });
@@ -263,12 +253,20 @@ export default function UniversePage() {
         render: (r) => {
           const s = r.universe_score;
           if (s == null) return <span className="text-text-secondary text-xs">—</span>;
-          const color = s >= 60 ? "#22c55e" : s >= 40 ? "#f59e0b" : "#6b7280";
+          const cellClass = s >= 80
+            ? "bg-profit/8 text-profit"
+            : s >= 60
+            ? "bg-accent/5 text-accent"
+            : s < 40
+            ? "bg-loss/5 text-loss"
+            : "text-text-secondary";
           return (
             <AppTooltip text={r.score_calc || `Score: ${s}`}>
               <span
-                className="font-mono text-xs font-semibold px-1.5 py-0.5 rounded cursor-default"
-                style={{ color, background: `${color}18` }}
+                className={cn(
+                  "font-mono text-xs font-semibold px-1.5 py-0.5 rounded cursor-default",
+                  cellClass,
+                )}
               >
                 {s}
               </span>
@@ -458,11 +456,51 @@ export default function UniversePage() {
 
   const tabClass = (t: ViewTab) =>
     cn(
-      "px-3 py-1 text-xs rounded-md transition-colors",
+      "px-4 py-1.5 text-xs rounded-lg transition-all font-medium",
       tab === t
-        ? "bg-accent text-white"
-        : "bg-bg-tertiary text-text-secondary hover:text-text-primary",
+        ? "bg-accent text-white shadow-sm"
+        : "text-text-secondary hover:text-text-primary hover:bg-bg-tertiary",
     );
+
+  // Bucket tier config
+  const BUCKET_TIERS = [
+    {
+      key: "A" as const,
+      label: "A",
+      quality: "AAA Quality",
+      borderColor: "border-amber-500",
+      bg: "bg-amber-500/10",
+      textColor: "text-amber-400",
+      barColor: "bg-amber-500",
+    },
+    {
+      key: "B" as const,
+      label: "B",
+      quality: "High Quality",
+      borderColor: "border-slate-400",
+      bg: "bg-slate-500/10",
+      textColor: "text-slate-300",
+      barColor: "bg-slate-400",
+    },
+    {
+      key: "C" as const,
+      label: "C",
+      quality: "Mid Quality",
+      borderColor: "border-orange-500",
+      bg: "bg-orange-500/10",
+      textColor: "text-orange-400",
+      barColor: "bg-orange-500",
+    },
+    {
+      key: "D" as const,
+      label: "D",
+      quality: "Low Quality",
+      borderColor: "border-rose-600",
+      bg: "bg-rose-500/10",
+      textColor: "text-rose-400",
+      barColor: "bg-rose-600",
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -474,24 +512,40 @@ export default function UniversePage() {
           <StatCard
             label="Total Symbols"
             value={stats.total_symbols}
+            icon={<Globe className="h-4 w-4" />}
+            borderColor="border-slate-500"
+            iconBg="bg-slate-500/10"
+            iconColor="text-slate-400"
             tooltip="All instruments loaded into Firestore universe. Includes enabled and disabled symbols across NSE/BSE."
           />
           <StatCard
             label="Swing Eligible"
             value={stats.eligible_swing}
             color="#22c55e"
+            icon={<TrendingUp className="h-4 w-4" />}
+            borderColor="border-indigo-500"
+            iconBg="bg-indigo-500/10"
+            iconColor="text-indigo-400"
             tooltip="Symbols allowed for overnight swing trades. Derived from eligible_swing flag, or allowed_product ∈ {BOTH, SWING}."
           />
           <StatCard
             label="Intraday Eligible"
             value={stats.eligible_intraday}
             color="#3b82f6"
+            icon={<Zap className="h-4 w-4" />}
+            borderColor="border-cyan-500"
+            iconBg="bg-cyan-500/10"
+            iconColor="text-cyan-400"
             tooltip="Symbols allowed for same-day intraday trades. Derived from eligible_intraday flag, or allowed_product ∈ {BOTH, INTRADAY}."
           />
           <StatCard
             label="Excluded"
             value={stats.neither}
-            color="#6b7280"
+            color="#ef4444"
+            icon={<XCircle className="h-4 w-4" />}
+            borderColor="border-loss"
+            iconBg="bg-loss/10"
+            iconColor="text-loss"
             tooltip="Symbols not eligible for either swing or intraday. Formula: total − swing − intraday + both (set union avoids double-counting)."
           />
         </div>
@@ -555,38 +609,49 @@ export default function UniversePage() {
           )}
         </div>
 
-        {/* Liquidity Buckets */}
+        {/* Liquidity Buckets — tier cards */}
         <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
           <div className="flex items-center mb-3">
             <h3 className="text-sm font-medium">Liquidity Buckets</h3>
             <InfoTooltip text="A = top 25% by 60-day median turnover (most liquid) · B = 25–50% · C = 50–75% · D = bottom 25%. Percentages are share of symbols that have bucket data assigned." />
           </div>
-          <div className="space-y-3">
-            {(["A", "B", "C", "D"] as const).map((b) => {
-              const count = bucketBreakdown.counts[b] ?? 0;
+          <div className="space-y-2">
+            {BUCKET_TIERS.map((tier) => {
+              const count = bucketBreakdown.counts[tier.key] ?? 0;
               const denom = bucketBreakdown.withBucket || 1;
               const pct = Math.round((count / denom) * 100);
               return (
-                <div key={b}>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="font-bold" style={{ color: BUCKET_COLOR[b] }}>
-                      Bucket {b}
-                    </span>
-                    <span className="font-mono text-text-secondary">
-                      {count} ({pct}%)
-                    </span>
+                <div
+                  key={tier.key}
+                  className={cn(
+                    "rounded-lg border-l-4 p-3 flex items-center gap-3",
+                    tier.bg,
+                    tier.borderColor,
+                  )}
+                >
+                  <div className="shrink-0">
+                    <p className={cn("text-2xl font-mono font-bold leading-none", tier.textColor)}>
+                      {tier.label}
+                    </p>
+                    <p className="text-[9px] text-text-secondary mt-0.5 uppercase tracking-wide">{tier.quality}</p>
                   </div>
-                  <div className="h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full"
-                      style={{ width: `${pct}%`, backgroundColor: BUCKET_COLOR[b] }}
-                    />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-xs font-semibold text-text-primary">{count}</span>
+                      <span className="text-[10px] text-text-secondary">{pct}%</span>
+                    </div>
+                    <div className="h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                      <div
+                        className={cn("h-full rounded-full", tier.barColor)}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
                   </div>
                 </div>
               );
             })}
           </div>
-          <div className="mt-4 flex justify-between text-[10px] text-text-secondary">
+          <div className="mt-3 flex justify-between text-[10px] text-text-secondary">
             <span>With bucket data: {bucketBreakdown.withBucket}</span>
             <span>No bucket: {bucketBreakdown.noBucket}</span>
           </div>
@@ -678,7 +743,7 @@ export default function UniversePage() {
                 className={cn(
                   "px-2.5 py-0.5 rounded-full text-xs font-medium flex items-center gap-1.5 border transition-colors",
                   active
-                    ? "bg-accent text-white border-accent"
+                    ? "bg-accent/20 border border-accent/40 text-accent"
                     : "bg-bg-tertiary text-text-secondary hover:text-text-primary border-transparent",
                 )}
               >
@@ -686,7 +751,7 @@ export default function UniversePage() {
                 <span
                   className={cn(
                     "text-[10px] px-1 py-0 rounded-full",
-                    active ? "bg-white/20" : "bg-bg-secondary",
+                    active ? "bg-accent/20" : "bg-bg-secondary",
                   )}
                 >
                   {count}
@@ -704,12 +769,12 @@ export default function UniversePage() {
             className={cn(
               "px-2.5 py-0.5 rounded-full text-xs font-medium flex items-center gap-1.5 border transition-colors",
               dqFilter === ""
-                ? "bg-accent text-white border-accent"
+                ? "bg-accent/20 border border-accent/40 text-accent"
                 : "bg-bg-tertiary text-text-secondary hover:text-text-primary border-transparent",
             )}
           >
             <span>All</span>
-            <span className={cn("text-[10px] px-1 rounded-full", dqFilter === "" ? "bg-white/20" : "bg-bg-secondary")}>
+            <span className={cn("text-[10px] px-1 rounded-full", dqFilter === "" ? "bg-accent/20" : "bg-bg-secondary")}>
               {symbols.length}
             </span>
           </button>
@@ -754,7 +819,7 @@ export default function UniversePage() {
                 className={cn(
                   "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all",
                   active
-                    ? "bg-accent text-white border-accent"
+                    ? "bg-accent/20 border border-accent/40 text-accent"
                     : "bg-bg-tertiary text-text-secondary border-transparent hover:text-text-primary hover:border-border",
                 )}
               >
@@ -762,7 +827,7 @@ export default function UniversePage() {
                 <span
                   className={cn(
                     "text-[10px] px-1 rounded-full",
-                    active ? "bg-white/10" : "bg-bg-secondary",
+                    active ? "bg-accent/20" : "bg-bg-secondary",
                   )}
                 >
                   {count}
@@ -775,7 +840,7 @@ export default function UniversePage() {
 
       {/* ── Table ───────────────────────────────────────────────────────── */}
       <div className="space-y-3">
-        <div className="flex gap-1 items-center">
+        <div className="flex gap-1 items-center bg-bg-tertiary/40 rounded-xl p-1 w-fit">
           <button className={tabClass("all")} onClick={() => setTab("all")}>
             All ({symbols.length})
           </button>
@@ -804,20 +869,33 @@ function StatCard({
   value,
   color,
   tooltip,
+  icon,
+  borderColor,
+  iconBg,
+  iconColor,
 }: {
   label: string;
   value: number;
   color?: string;
   tooltip: string;
+  icon: React.ReactNode;
+  borderColor: string;
+  iconBg: string;
+  iconColor: string;
 }) {
   return (
-    <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-      <p className="text-3xl font-mono font-bold" style={{ color }}>
+    <div className={cn("bg-bg-secondary rounded-lg border-t-2 border border-bg-tertiary p-4 shadow-md", borderColor)}>
+      <div className="flex items-start justify-between">
+        <div className={cn("p-2 rounded-lg", iconBg)}>
+          <span className={iconColor}>{icon}</span>
+        </div>
+      </div>
+      <p className="text-xl font-mono font-bold mt-2" style={{ color }}>
         {value}
       </p>
-      <div className="flex items-center justify-center mt-1">
+      <div className="flex items-center mt-1">
         <p className="text-xs text-text-secondary">{label}</p>
-        <InfoTooltip text={tooltip} />
+        <InfoBadge text={tooltip} />
       </div>
     </div>
   );

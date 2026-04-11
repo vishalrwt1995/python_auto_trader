@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { cn } from "@/lib/utils";
-import { X } from "lucide-react";
+import { X, LayoutGrid, Building2, CheckCircle, IndianRupee } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -17,7 +17,6 @@ import {
 } from "recharts";
 import { InfoBadge } from "@/components/shared/Tooltip";
 
-// InfoTooltip → now uses shared InfoBadge
 function InfoTooltip({ text }: { text: string }) {
   return <InfoBadge text={text} />;
 }
@@ -82,13 +81,19 @@ const BUCKET_COLOR: Record<string, string> = {
   D: "#f87171",
 };
 
-
 function fmtTurnover(v: number): string {
   const cr = v / 1e7;
   if (cr >= 10000) return `₹${(cr / 1000).toFixed(0)}kCr`;
   if (cr >= 1000) return `₹${(cr / 1000).toFixed(1)}kCr`;
   if (cr >= 100) return `₹${Math.round(cr)}Cr`;
   return `₹${cr.toFixed(1)}Cr`;
+}
+
+// eligible% → color
+function eligibleColor(pct: number): string {
+  if (pct >= 70) return "#22c55e";
+  if (pct >= 40) return "#3b82f6";
+  return "#f59e0b";
 }
 
 // ── LiqBar ────────────────────────────────────────────────────────────────────
@@ -115,17 +120,17 @@ function LiqBar({ row }: { row: SectorRow }) {
   );
 }
 
-
 // ── Sector Card ───────────────────────────────────────────────────────────────
 
 function SectorCard({ row, onClick }: { row: SectorRow; onClick: () => void }) {
-  // Union: symbols eligible for swing OR intraday (avoid double-counting symbols in both)
   const eligible = row.eligible_swing + row.eligible_intraday - (row.both ?? 0);
+  const borderColor = eligibleColor(row.eligible_pct);
 
   return (
     <button
       onClick={onClick}
-      className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-left hover:border-slate-600 transition-colors group w-full"
+      className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-left hover:border-accent/30 hover:shadow-lg transition-all group w-full"
+      style={{ borderTop: `3px solid ${borderColor}` }}
     >
       {/* Header */}
       <div className="mb-3">
@@ -135,13 +140,18 @@ function SectorCard({ row, onClick }: { row: SectorRow; onClick: () => void }) {
 
       {/* Eligible bar */}
       <div className="flex items-center gap-2 mb-3">
-        <div className="flex-1 h-1 bg-bg-tertiary rounded-full overflow-hidden">
+        <div className="flex-1 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
           <div
-            className="h-full rounded-full bg-accent/60"
-            style={{ width: `${row.eligible_pct}%` }}
+            className="h-full rounded-full"
+            style={{
+              width: `${row.eligible_pct}%`,
+              background: `linear-gradient(90deg, ${borderColor}99, ${borderColor})`,
+            }}
           />
         </div>
-        <span className="text-[10px] text-text-secondary font-mono shrink-0">{row.eligible_pct}%</span>
+        <span className="text-[10px] font-mono shrink-0" style={{ color: borderColor }}>
+          {row.eligible_pct}%
+        </span>
       </div>
 
       {/* Metrics */}
@@ -159,7 +169,12 @@ function SectorCard({ row, onClick }: { row: SectorRow; onClick: () => void }) {
           dim={row.avg_atr_pct == null}
           warn={row.avg_atr_pct != null && row.avg_atr_pct > 0.08}
         />
-        <Metric label="Turnover" value={fmtTurnover(row.total_turnover)} />
+        <Metric
+          label="Turnover"
+          value={fmtTurnover(row.total_turnover)}
+          chip
+          chipColor={borderColor}
+        />
         <Metric label="Industries" value={String(row.industries.length)} dim />
       </div>
 
@@ -176,18 +191,31 @@ function Metric({
   value,
   dim,
   warn,
+  chip,
+  chipColor,
 }: {
   label: string;
   value: string;
   dim?: boolean;
   warn?: boolean;
+  chip?: boolean;
+  chipColor?: string;
 }) {
   return (
     <div>
       <p className="text-[9px] text-text-secondary uppercase tracking-wide leading-none mb-0.5">{label}</p>
-      <p className={cn("text-xs font-mono", warn ? "text-amber-400" : dim ? "text-text-secondary" : "text-text-primary")}>
-        {value}
-      </p>
+      {chip && chipColor ? (
+        <p
+          className="text-xs font-mono px-1.5 py-0.5 rounded-md inline-block"
+          style={{ color: chipColor, background: `${chipColor}18` }}
+        >
+          {value}
+        </p>
+      ) : (
+        <p className={cn("text-xs font-mono", warn ? "text-amber-400" : dim ? "text-text-secondary" : "text-text-primary")}>
+          {value}
+        </p>
+      )}
     </div>
   );
 }
@@ -286,14 +314,21 @@ function SectorDetailDrawer({ sector, onClose }: { sector: string; onClose: () =
       <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
       <div className="fixed right-0 top-0 bottom-0 w-full sm:w-[680px] bg-bg-secondary border-l border-bg-tertiary z-50 overflow-y-auto scrollbar-thin">
         <div className="p-5 space-y-5">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-base font-semibold">{sector}</h2>
-              {detail && (
-                <p className="text-xs text-text-secondary mt-0.5">
-                  {detail.total} symbols · {detail.industries.length} industries
-                </p>
-              )}
+          <div className="flex items-start justify-between">
+            <div className="flex gap-3 items-start">
+              {/* gradient left-border strip */}
+              <div
+                className="w-1 self-stretch rounded-full shrink-0"
+                style={{ background: "linear-gradient(180deg, #3b82f6, #22c55e)" }}
+              />
+              <div>
+                <h2 className="text-base font-semibold">{sector}</h2>
+                {detail && (
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    {detail.total} symbols · {detail.industries.length} industries
+                  </p>
+                )}
+              </div>
             </div>
             <button onClick={onClose} className="p-1.5 rounded hover:bg-bg-tertiary transition-colors">
               <X className="h-4 w-4" />
@@ -325,9 +360,13 @@ function SectorDetailDrawer({ sector, onClose }: { sector: string; onClose: () =
                       <Tooltip
                         contentStyle={{ backgroundColor: "#0d1117", border: "1px solid #1e293b", fontSize: 10 }}
                       />
-                      <Bar dataKey="count" radius={[0, 3, 3, 0]} maxBarSize={12}>
+                      <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={14}>
                         {detail.industries.map((_, i) => (
-                          <Cell key={i} fill="#3b82f6" fillOpacity={0.5 + (i === 0 ? 0.3 : 0)} />
+                          <Cell
+                            key={i}
+                            fill={i === 0 ? "#3b82f6" : "#3b82f6"}
+                            fillOpacity={0.4 + (i === 0 ? 0.4 : Math.max(0, 0.3 - i * 0.03))}
+                          />
                         ))}
                       </Bar>
                     </BarChart>
@@ -425,14 +464,23 @@ export default function SectorsPage() {
         tooltip: "% eligible = max(eligible_swing, eligible_intraday) / total × 100. A symbol is eligible if its swing or intraday flag is set, or allowed_product ∈ {BOTH, SWING, INTRADAY}.",
         sortable: true,
         sortValue: (r) => r.eligible_pct,
-        render: (r) => (
-          <div className="flex items-center gap-2">
-            <div className="w-12 h-1 bg-bg-tertiary rounded-full overflow-hidden">
-              <div className="h-full rounded-full bg-accent/60" style={{ width: `${r.eligible_pct}%` }} />
+        render: (r) => {
+          const color = eligibleColor(r.eligible_pct);
+          return (
+            <div className="flex items-center gap-2">
+              <div className="w-16 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${r.eligible_pct}%`,
+                    background: `linear-gradient(90deg, ${color}80, ${color})`,
+                  }}
+                />
+              </div>
+              <span className="font-mono text-xs" style={{ color }}>{r.eligible_pct}%</span>
             </div>
-            <span className="font-mono text-xs text-text-secondary">{r.eligible_pct}%</span>
-          </div>
-        ),
+          );
+        },
       },
       {
         key: "avg_beta",
@@ -462,8 +510,12 @@ export default function SectorsPage() {
         tooltip: "Σ median(close × volume, 60d) across all symbols. Each symbol's turnover = daily close × volume. Median of last 60 days taken per symbol, then summed for the sector.",
         sortable: true,
         sortValue: (r) => r.total_turnover,
-        className: "text-right font-mono text-xs text-text-secondary",
-        render: (r) => <span>{fmtTurnover(r.total_turnover)}</span>,
+        className: "text-right font-mono text-xs",
+        render: (r) => (
+          <span className="px-1.5 py-0.5 rounded text-xs bg-accent/10 text-accent font-mono">
+            {fmtTurnover(r.total_turnover)}
+          </span>
+        ),
       },
       {
         key: "liq",
@@ -491,28 +543,64 @@ export default function SectorsPage() {
 
   if (loading) return <LoadingSkeleton lines={12} />;
 
+  const viewTabClass = (v: "table" | "cards") =>
+    cn(
+      "px-4 py-1.5 rounded-lg text-xs font-medium transition-all",
+      view === v ? "bg-accent text-white shadow-sm" : "text-text-secondary hover:text-text-primary hover:bg-bg-tertiary",
+    );
+
+  // Stats card configs
+  const statCards = [
+    {
+      label: "Sectors",
+      value: totals.sectors.toString(),
+      icon: <LayoutGrid className="h-4 w-4" />,
+      iconBg: "bg-slate-500/10",
+      iconColor: "text-slate-400",
+      borderColor: "border-t-2 border-slate-500",
+      tip: "Total distinct sectors derived from the universe sector field.",
+    },
+    {
+      label: "Symbols",
+      value: totals.symbols.toLocaleString(),
+      icon: <Building2 className="h-4 w-4" />,
+      iconBg: "bg-indigo-500/10",
+      iconColor: "text-indigo-400",
+      borderColor: "border-t-2 border-indigo-500",
+      tip: "Total symbols across all sectors in the Firestore universe.",
+    },
+    {
+      label: "Eligible",
+      value: totals.eligible.toLocaleString(),
+      icon: <CheckCircle className="h-4 w-4" />,
+      iconBg: "bg-profit/10",
+      iconColor: "text-profit",
+      borderColor: "border-t-2 border-profit",
+      valueColor: "text-profit",
+      tip: "Symbols eligible for swing or intraday trading (max of both).",
+    },
+    {
+      label: "Daily Turnover",
+      value: fmtTurnover(totals.turnover),
+      sub: "sum of 60d medians",
+      icon: <IndianRupee className="h-4 w-4" />,
+      iconBg: "bg-accent/10",
+      iconColor: "text-accent",
+      borderColor: "border-t-2 border-accent",
+      tip: "Sum of each symbol's 60-day median daily turnover (close × volume). Represents total daily liquidity across all sectors.",
+    },
+  ];
+
   return (
     <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Sectors</h1>
-        <div className="flex gap-1">
-          <button
-            onClick={() => setView("table")}
-            className={cn(
-              "px-3 py-1.5 rounded text-xs transition-colors",
-              view === "table" ? "bg-accent text-white" : "bg-bg-tertiary text-text-secondary hover:text-text-primary",
-            )}
-          >
+        <div className="flex gap-1 bg-bg-tertiary/40 rounded-xl p-1">
+          <button onClick={() => setView("table")} className={viewTabClass("table")}>
             Table
           </button>
-          <button
-            onClick={() => setView("cards")}
-            className={cn(
-              "px-3 py-1.5 rounded text-xs transition-colors",
-              view === "cards" ? "bg-accent text-white" : "bg-bg-tertiary text-text-secondary hover:text-text-primary",
-            )}
-          >
+          <button onClick={() => setView("cards")} className={viewTabClass("cards")}>
             Cards
           </button>
         </div>
@@ -520,15 +608,18 @@ export default function SectorsPage() {
 
       {/* Summary row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[
-          { label: "Sectors", value: totals.sectors.toString(), sub: undefined, tip: "Total distinct sectors derived from the universe sector field." },
-          { label: "Symbols", value: totals.symbols.toLocaleString(), sub: undefined, tip: "Total symbols across all sectors in the Firestore universe." },
-          { label: "Eligible", value: totals.eligible.toLocaleString(), sub: undefined, tip: "Symbols eligible for swing or intraday trading (max of both)." },
-          { label: "Daily Turnover", value: fmtTurnover(totals.turnover), sub: "sum of 60d medians", tip: "Sum of each symbol's 60-day median daily turnover (close × volume). Represents total daily liquidity across all sectors." },
-        ].map(({ label, value, sub, tip }) => (
-          <div key={label} className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-            <p className="text-3xl font-mono font-bold">{value}</p>
-            <div className="flex items-center justify-center mt-1">
+        {statCards.map(({ label, value, sub, icon, iconBg, iconColor, borderColor, valueColor, tip }) => (
+          <div
+            key={label}
+            className={cn("bg-bg-secondary rounded-lg border border-bg-tertiary p-4 shadow-md", borderColor)}
+          >
+            <div className="flex items-start justify-between">
+              <div className={cn("p-2 rounded-lg", iconBg)}>
+                <span className={iconColor}>{icon}</span>
+              </div>
+            </div>
+            <p className={cn("text-xl font-mono font-bold mt-2", valueColor ?? "text-text-primary")}>{value}</p>
+            <div className="flex items-center mt-1">
               <p className="text-xs text-text-secondary">{label}</p>
               <InfoTooltip text={tip} />
             </div>
@@ -588,6 +679,7 @@ export default function SectorsPage() {
           data={filtered}
           onRowClick={(r) => setDrawerSector(r.sector)}
           emptyMessage="No sectors"
+          rowClassName={() => "hover:bg-accent/5"}
         />
       )}
 

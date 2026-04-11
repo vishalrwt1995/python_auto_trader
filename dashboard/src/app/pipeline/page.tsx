@@ -8,7 +8,17 @@ import { LiveDot } from "@/components/shared/LiveDot";
 import { cn, formatTime, isMarketOpen } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
 import type { AuditLogEntry } from "@/lib/types";
-import { RefreshCw } from "lucide-react";
+import {
+  RefreshCw,
+  CheckCircle,
+  Loader2,
+  Key,
+  Wifi,
+  Check,
+  Play,
+  Clock,
+  X,
+} from "lucide-react";
 
 // schedulerJobHint: substring matched against entry.scheduler_job (Cloud Scheduler job name in ctx).
 const PIPELINE_JOBS = [
@@ -49,11 +59,9 @@ export default function PipelinePage() {
 
   const jobStatuses = useMemo(() => {
     return PIPELINE_JOBS.map((job) => {
-      // Match by schedulerJob substring (from ctx.schedulerJob parsed by backend)
       const matching = entries.filter((e) =>
         !!e.scheduler_job && e.scheduler_job.includes(job.schedulerJobHint),
       );
-      // Prefer terminal state (success/error/skipped) over a stale "running" START entry
       const latest = matching.find((e) => e.status !== "running") ?? matching[0];
       return {
         ...job,
@@ -153,6 +161,24 @@ export default function PipelinePage() {
 
   const marketOpen = isMarketOpen();
 
+  // Dot classes per status
+  const dotClass = (status: string) => {
+    if (status === "ok" || status === "success")
+      return "bg-profit/20 border-2 border-profit text-profit";
+    if (status === "running")
+      return "bg-neutral/20 border-2 border-neutral text-neutral";
+    if (status === "error" || status === "failed")
+      return "bg-loss/20 border-2 border-loss text-loss";
+    return "bg-bg-tertiary border-2 border-bg-tertiary text-text-secondary";
+  };
+
+  const DotIcon = ({ status }: { status: string }) => {
+    if (status === "ok" || status === "success") return <Check className="h-3.5 w-3.5" />;
+    if (status === "running") return <Play className="h-3 w-3" />;
+    if (status === "error" || status === "failed") return <X className="h-3.5 w-3.5" />;
+    return <Clock className="h-3 w-3" />;
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -175,22 +201,54 @@ export default function PipelinePage() {
 
       {/* Stats Row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-          <p className="text-2xl font-mono font-bold text-profit">{passedCount}/{PIPELINE_JOBS.length}</p>
+        {/* Jobs Passed */}
+        <div className="bg-bg-secondary rounded-lg border-t-2 border border-profit/40 border-bg-tertiary p-4 shadow-md">
+          <div className="flex items-start justify-between">
+            <div className="p-2 rounded-lg bg-profit/10">
+              <CheckCircle className="h-4 w-4 text-profit" />
+            </div>
+          </div>
+          <p className="text-xl font-mono font-bold text-profit mt-2">{passedCount}/{PIPELINE_JOBS.length}</p>
           <p className="text-xs text-text-secondary mt-1">Jobs Passed</p>
         </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-          <p className="text-2xl font-mono font-bold text-neutral">{runningCount}</p>
+
+        {/* Running */}
+        <div className="bg-bg-secondary rounded-lg border-t-2 border border-neutral/40 border-bg-tertiary p-4 shadow-md">
+          <div className="flex items-start justify-between">
+            <div className="p-2 rounded-lg bg-neutral/10">
+              <Loader2 className={cn("h-4 w-4 text-neutral", runningCount > 0 && "animate-spin")} />
+            </div>
+          </div>
+          <p className="text-xl font-mono font-bold text-neutral mt-2">{runningCount}</p>
           <p className="text-xs text-text-secondary mt-1">Running</p>
         </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-          <p className={cn("text-2xl font-mono font-bold", upstoxHealth?.token_valid ? "text-profit" : "text-loss")}>
+
+        {/* Upstox Token */}
+        <div
+          className={cn(
+            "bg-bg-secondary rounded-lg border-t-2 border border-bg-tertiary p-4 shadow-md",
+            upstoxHealth?.token_valid ? "border-t-profit/40" : "border-t-loss/40",
+          )}
+        >
+          <div className="flex items-start justify-between">
+            <div className={cn("p-2 rounded-lg", upstoxHealth?.token_valid ? "bg-profit/10" : "bg-loss/10")}>
+              <Key className={cn("h-4 w-4", upstoxHealth?.token_valid ? "text-profit" : "text-loss")} />
+            </div>
+          </div>
+          <p className={cn("text-xl font-mono font-bold mt-2", upstoxHealth?.token_valid ? "text-profit" : "text-loss")}>
             {upstoxHealth?.token_valid ? "Valid" : "Expired"}
           </p>
           <p className="text-xs text-text-secondary mt-1">Upstox Token</p>
         </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 text-center">
-          <p className="text-2xl font-mono font-bold text-accent">
+
+        {/* WebSocket */}
+        <div className="bg-bg-secondary rounded-lg border-t-2 border border-accent/40 border-bg-tertiary p-4 shadow-md">
+          <div className="flex items-start justify-between">
+            <div className="p-2 rounded-lg bg-accent/10">
+              <Wifi className="h-4 w-4 text-accent" />
+            </div>
+          </div>
+          <p className="text-xl font-mono font-bold text-accent mt-2">
             {marketOpen ? "Active" : "Idle"}
           </p>
           <p className="text-xs text-text-secondary mt-1">WebSocket</p>
@@ -200,46 +258,62 @@ export default function PipelinePage() {
       {/* Pipeline Timeline */}
       <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-5">
         <h3 className="text-sm font-medium mb-4">Pipeline Timeline — Today</h3>
-        <div className="relative pl-5">
+        <div className="relative pl-6">
           {jobStatuses.map((job, i) => {
             const color = statusColor(job.status);
             const icon = statusIcon(job.status);
+            const isRunning = icon === "running";
+            const isPassed = icon === "checkmark";
             return (
               <div key={job.name} className="flex items-center gap-3.5 py-2.5 relative">
                 {/* Connector line */}
                 {i < jobStatuses.length - 1 && (
                   <div
-                    className="absolute left-[9px] top-[30px] w-0.5"
+                    className="absolute left-[15px] top-[36px] w-0.5"
                     style={{
-                      height: "calc(100% - 10px)",
-                      background: (icon === "checkmark" || icon === "running") ? `${color}30` : "#1e293b",
+                      height: "calc(100% - 12px)",
+                      background: (isPassed || isRunning) ? `${color}30` : "#1e293b",
                     }}
                   />
                 )}
-                {/* Status dot */}
-                <div
-                  className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold z-10 shrink-0"
-                  style={{
-                    background: `${color}20`,
-                    border: `2px solid ${color}`,
-                    color,
-                    ...(icon === "running" ? { boxShadow: `0 0 8px ${color}` } : {}),
-                  }}
-                >
-                  {icon === "checkmark" ? "✓" : icon === "running" ? "●" : "○"}
+
+                {/* Status dot with optional ping ring */}
+                <div className="relative z-10 shrink-0">
+                  {isRunning && (
+                    <div
+                      className="absolute inset-0 rounded-full animate-ping"
+                      style={{ background: `${color}40` }}
+                    />
+                  )}
+                  <div
+                    className={cn(
+                      "w-8 h-8 rounded-full flex items-center justify-center z-10 relative",
+                      dotClass(job.status),
+                    )}
+                  >
+                    <DotIcon status={job.status} />
+                  </div>
                 </div>
+
                 {/* Label */}
                 <div className="flex-1 min-w-0">
                   <span className="text-xs font-semibold">{job.label}</span>
-                  {"desc" in job && job.desc && (
+                  {job.desc && (
                     <p className="text-[10px] text-text-secondary truncate">{job.desc}</p>
                   )}
                 </div>
+
+                {/* Duration / last run */}
+                {job.lastRun && (
+                  <span className="text-[10px] text-text-secondary font-mono shrink-0">{job.lastRun}</span>
+                )}
+
                 {/* Time */}
-                <span className="font-mono text-[11px] text-text-secondary">{job.cron}</span>
+                <span className="font-mono text-[11px] text-text-secondary shrink-0">{job.cron}</span>
+
                 {/* Status badge */}
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded font-semibold uppercase"
+                  className="text-[10px] px-2 py-0.5 rounded font-semibold uppercase shrink-0"
                   style={{ background: `${color}15`, color }}
                 >
                   {job.status === "ok" ? "success" : job.status}
@@ -262,6 +336,11 @@ export default function PipelinePage() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
             {PIPELINE_JOBS.map((job) => {
               const state = triggerStates[job.name] ?? "idle";
+              const lastRunEntry = entries.find((e) =>
+                !!e.scheduler_job && e.scheduler_job.includes(job.schedulerJobHint),
+              );
+              const lastRunTime = lastRunEntry?.log_ts ? formatTime(new Date(lastRunEntry.log_ts)) : null;
+
               return (
                 <button
                   key={job.name}
@@ -279,26 +358,37 @@ export default function PipelinePage() {
                     }
                   }}
                   className={cn(
-                    "flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs text-left transition-all border",
-                    state === "idle"    && "bg-bg-tertiary border-transparent text-text-secondary hover:text-text-primary hover:border-accent/30",
+                    "flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs text-left transition-all border",
+                    state === "idle"    && "bg-bg-tertiary border-transparent text-text-secondary hover:text-text-primary hover:border-accent/30 hover:bg-gradient-to-r hover:from-bg-tertiary hover:to-accent/5",
                     state === "loading" && "bg-accent/10 border-accent/30 text-accent opacity-80 cursor-not-allowed",
                     state === "ok"      && "bg-profit/10 border-profit/30 text-profit",
                     state === "error"   && "bg-loss/10 border-loss/30 text-loss",
                   )}
                 >
-                  <span className="text-base leading-none">
-                    {state === "loading" ? "⏳" : state === "ok" ? "✓" : state === "error" ? "✗" : "▶"}
+                  <span className="shrink-0">
+                    {state === "loading" ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-accent" />
+                    ) : state === "ok" ? (
+                      <Check className="h-4 w-4 text-profit" />
+                    ) : state === "error" ? (
+                      <X className="h-4 w-4 text-loss" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    )}
                   </span>
                   <div className="min-w-0">
                     <div className="font-medium truncate">{job.label}</div>
                     <div className="text-[10px] opacity-60 truncate">{job.cron}</div>
+                    {lastRunTime && (
+                      <div className="text-[10px] text-text-secondary truncate mt-0.5">Last: {lastRunTime}</div>
+                    )}
                   </div>
                 </button>
               );
             })}
           </div>
           <p className="text-[10px] text-text-secondary mt-3">
-            ✓ = dispatched to backend · jobs may take several minutes · check Audit Log below for status
+            Dispatched to backend · jobs may take several minutes · check Audit Log below for status
           </p>
         </div>
       )}
@@ -329,6 +419,18 @@ export default function PipelinePage() {
           columns={columns}
           data={entries}
           emptyMessage="No audit log entries today"
+          rowClassName={(r) =>
+            cn(
+              "border-l-2",
+              r.status === "ok" || r.status === "success"
+                ? "border-l-profit"
+                : r.status === "error" || r.status === "failed"
+                ? "border-l-loss"
+                : r.status === "running"
+                ? "border-l-neutral"
+                : "border-l-transparent",
+            )
+          }
         />
       </div>
     </div>

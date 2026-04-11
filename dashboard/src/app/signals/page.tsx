@@ -7,13 +7,7 @@ import { DataTable, type Column } from "@/components/shared/DataTable";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
 import { cn } from "@/lib/utils";
 import type { ScanLatest, ScanRow } from "@/lib/types";
-
-const DIRECTION_STYLE: Record<string, string> = {
-  BUY:  "bg-profit/20 text-profit",
-  SELL: "bg-loss/20 text-loss",
-  HOLD: "bg-bg-tertiary text-text-secondary",
-  SKIP: "bg-bg-tertiary text-text-secondary",
-};
+import { ScanLine, CheckCircle, Zap, TrendingUp, Filter } from "lucide-react";
 
 const STATUS_STYLE: Record<string, string> = {
   qualified: "text-profit font-semibold",
@@ -40,13 +34,20 @@ function ScoreBar({ score, status }: { score: number; status: string }) {
     return <span className="text-text-secondary font-mono text-xs">—</span>;
   }
   return (
-    <div className="flex items-center gap-2 justify-end">
+    <div
+      className="flex items-center gap-2 justify-end px-1 py-0.5 rounded"
+      style={{
+        background:
+          score >= 80
+            ? "rgba(34,197,94,0.08)"
+            : score >= 60
+            ? "rgba(59,130,246,0.05)"
+            : "transparent",
+      }}
+    >
       <div className="w-12 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
         <div
-          className={cn(
-            "h-full rounded-full",
-            score >= 72 ? "bg-profit" : score >= 45 ? "bg-neutral" : "bg-loss",
-          )}
+          className="h-full rounded-full bg-gradient-to-r from-accent/50 to-accent"
           style={{ width: `${Math.min(100, score)}%` }}
         />
       </div>
@@ -60,6 +61,75 @@ function ScoreBar({ score, status }: { score: number; status: string }) {
       </span>
     </div>
   );
+}
+
+function RsiDisplay({ rsi }: { rsi: number | null | undefined }) {
+  if (!rsi) return <span className="text-text-secondary">—</span>;
+  const color =
+    rsi < 35
+      ? "text-profit"
+      : rsi > 70
+      ? "text-loss"
+      : rsi >= 45 && rsi <= 55
+      ? "text-text-secondary"
+      : "text-text-primary";
+  const barWidth = Math.min(100, Math.max(0, rsi));
+  const barColor =
+    rsi < 35 ? "#22c55e" : rsi > 70 ? "#ef4444" : "#3b82f6";
+  return (
+    <div className="flex items-center gap-1.5 justify-end">
+      <div className="w-8 h-1 bg-bg-tertiary rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full"
+          style={{ width: `${barWidth}%`, backgroundColor: barColor }}
+        />
+      </div>
+      <span className={cn("font-mono text-xs tabular-nums", color)}>
+        {rsi.toFixed(1)}
+      </span>
+    </div>
+  );
+}
+
+function VolRatioDisplay({ volRatio }: { volRatio: number | null | undefined }) {
+  if (!volRatio) return <span className="text-text-secondary">—</span>;
+  if (volRatio >= 3.0) {
+    return (
+      <span className="bg-loss/10 text-loss rounded px-1 font-mono text-xs tabular-nums">
+        {volRatio.toFixed(2)}x
+      </span>
+    );
+  }
+  if (volRatio >= 1.5) {
+    return (
+      <span className="bg-neutral/10 text-neutral rounded px-1 font-mono text-xs tabular-nums">
+        {volRatio.toFixed(2)}x
+      </span>
+    );
+  }
+  if (volRatio >= 1.0) {
+    return (
+      <span className="text-text-secondary font-mono text-xs tabular-nums">
+        {volRatio.toFixed(2)}x
+      </span>
+    );
+  }
+  return (
+    <span className="text-text-secondary opacity-60 font-mono text-xs tabular-nums">
+      {volRatio.toFixed(2)}x
+    </span>
+  );
+}
+
+function TrendDisplay({ value }: { value: string | null | undefined }) {
+  if (!value) return <span className="text-text-secondary text-[10px]">—</span>;
+  if (value === "UP" || value === "BULL_STACK") {
+    return <span className="text-profit text-[10px] font-medium">▲ {value === "BULL_STACK" ? "BULL" : "UP"}</span>;
+  }
+  if (value === "DOWN" || value === "BEAR_STACK") {
+    return <span className="text-loss text-[10px] font-medium">▼ {value === "BEAR_STACK" ? "BEAR" : "DN"}</span>;
+  }
+  return <span className="text-text-secondary text-[10px]">— {value}</span>;
 }
 
 export default function SignalsPage() {
@@ -76,7 +146,7 @@ export default function SignalsPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const rows = scan?.rows ?? [];
+  const rows = useMemo(() => scan?.rows ?? [], [scan]);
 
   const filtered = useMemo(() => {
     if (filterStatus === "all") return rows;
@@ -97,6 +167,16 @@ export default function SignalsPage() {
     const map: Record<string, number> = {};
     rows.filter((r) => r.status === "filtered").forEach((r) => {
       const key = r.reason || "unknown";
+      map[key] = (map[key] ?? 0) + 1;
+    });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [rows]);
+
+  // Qualified reason breakdown
+  const qualifiedBreakdown = useMemo(() => {
+    const map: Record<string, number> = {};
+    rows.filter((r) => r.status === "qualified").forEach((r) => {
+      const key = r.reason || "entry_qualified";
       map[key] = (map[key] ?? 0) + 1;
     });
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
@@ -132,16 +212,33 @@ export default function SignalsPage() {
         label: "Dir",
         sortable: true,
         sortValue: (r) => r.direction,
-        render: (r) => (
-          <span
-            className={cn(
-              "text-[10px] font-semibold px-1.5 py-0.5 rounded",
-              DIRECTION_STYLE[r.direction] ?? "bg-bg-tertiary text-text-secondary",
-            )}
-          >
-            {r.direction}
-          </span>
-        ),
+        render: (r) => {
+          if (r.direction === "BUY") {
+            return (
+              <span
+                className="text-[10px] font-semibold px-2 py-1 rounded border bg-profit/20 text-profit border-profit/30 inline-flex items-center gap-0.5"
+                style={{ boxShadow: "0 0 6px rgba(34,197,94,0.2)" }}
+              >
+                ↑ BUY
+              </span>
+            );
+          }
+          if (r.direction === "SELL") {
+            return (
+              <span
+                className="text-[10px] font-semibold px-2 py-1 rounded border bg-loss/20 text-loss border-loss/30 inline-flex items-center gap-0.5"
+                style={{ boxShadow: "0 0 6px rgba(239,68,68,0.2)" }}
+              >
+                ↓ SELL
+              </span>
+            );
+          }
+          return (
+            <span className="text-[10px] font-semibold px-2 py-1 rounded bg-bg-tertiary text-text-secondary">
+              {r.direction}
+            </span>
+          );
+        },
       },
       {
         key: "score",
@@ -176,82 +273,36 @@ export default function SignalsPage() {
         label: "RSI",
         sortable: true,
         sortValue: (r) => r.rsi,
-        className: "text-right font-mono tabular-nums text-xs",
-        render: (r) =>
-          r.rsi ? (
-            <span
-              className={cn(
-                r.rsi < 35 ? "text-loss" : r.rsi > 70 ? "text-profit" : "text-text-primary",
-              )}
-            >
-              {r.rsi.toFixed(1)}
-            </span>
-          ) : (
-            <span className="text-text-secondary">—</span>
-          ),
+        className: "text-right",
+        render: (r) => <RsiDisplay rsi={r.rsi} />,
       },
       {
         key: "ema",
         label: "EMA",
-        render: (r) => (
-          <span
-            className={cn(
-              "text-[10px]",
-              r.emaState === "BULL_STACK" ? "text-profit" :
-              r.emaState === "BEAR_STACK" ? "text-loss" : "text-text-secondary",
-            )}
-          >
-            {r.emaState === "BULL_STACK" ? "BULL" : r.emaState === "BEAR_STACK" ? "BEAR" : r.emaState || "—"}
-          </span>
-        ),
+        render: (r) => <TrendDisplay value={r.emaState} />,
       },
       {
         key: "supertrend",
         label: "ST",
-        render: (r) => (
-          <span
-            className={cn(
-              "text-[10px] font-medium",
-              r.supertrend === "UP" ? "text-profit" :
-              r.supertrend === "DOWN" ? "text-loss" : "text-text-secondary",
-            )}
-          >
-            {r.supertrend === "UP" ? "▲" : r.supertrend === "DOWN" ? "▼" : "—"}
-          </span>
-        ),
+        render: (r) => {
+          if (!r.supertrend) return <span className="text-text-secondary text-[10px]">—</span>;
+          if (r.supertrend === "UP") return <span className="text-profit text-[10px] font-medium">▲</span>;
+          if (r.supertrend === "DOWN") return <span className="text-loss text-[10px] font-medium">▼</span>;
+          return <span className="text-text-secondary text-[10px]">—</span>;
+        },
       },
       {
         key: "dailyTrend",
         label: "D-Trend",
-        render: (r) => {
-          if (!r.daily_trend) return <span className="text-text-secondary text-xs">—</span>;
-          return (
-            <span
-              className={cn(
-                "text-[10px] font-medium",
-                r.daily_trend === "UP" ? "text-profit" :
-                r.daily_trend === "DOWN" ? "text-loss" : "text-text-secondary",
-              )}
-            >
-              {r.daily_trend === "UP" ? "▲ UP" : r.daily_trend === "DOWN" ? "▼ DN" : r.daily_trend}
-            </span>
-          );
-        },
+        render: (r) => <TrendDisplay value={r.daily_trend} />,
       },
       {
         key: "volRatio",
         label: "Vol",
         sortable: true,
         sortValue: (r) => r.volRatio,
-        className: "text-right font-mono text-xs tabular-nums",
-        render: (r) =>
-          r.volRatio ? (
-            <span className={cn(r.volRatio >= 1.5 ? "text-profit" : r.volRatio >= 1.0 ? "text-text-primary" : "text-text-secondary")}>
-              {r.volRatio.toFixed(2)}x
-            </span>
-          ) : (
-            <span className="text-text-secondary">—</span>
-          ),
+        className: "text-right",
+        render: (r) => <VolRatioDisplay volRatio={r.volRatio} />,
       },
       {
         key: "setup",
@@ -317,50 +368,87 @@ export default function SignalsPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
-          <p className="text-xl font-mono font-bold text-text-primary">{counts.all}</p>
-          <p className="text-[10px] text-text-secondary mt-0.5">Scanned</p>
+        {/* Scanned */}
+        <div className="bg-bg-secondary rounded-lg border-t-[3px] border-t-slate-500 border-x border-b border-bg-tertiary p-3 shadow-md shadow-black/20 flex items-start justify-between">
+          <div>
+            <p className="text-xl font-mono font-bold text-text-primary">{counts.all}</p>
+            <p className="text-[10px] text-text-secondary mt-0.5">Scanned</p>
+          </div>
+          <ScanLine className="h-4 w-4 text-slate-500 mt-0.5" />
         </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
-          <p className="text-xl font-mono font-bold text-profit">{counts.qualified}</p>
-          <p className="text-[10px] text-text-secondary mt-0.5">Qualified</p>
+        {/* Qualified */}
+        <div className="bg-bg-secondary rounded-lg border-t-[3px] border-t-[#22c55e] border-x border-b border-bg-tertiary p-3 shadow-md shadow-black/20 flex items-start justify-between">
+          <div>
+            <p className="text-xl font-mono font-bold text-profit">{counts.qualified}</p>
+            <p className="text-[10px] text-text-secondary mt-0.5">Qualified</p>
+          </div>
+          <CheckCircle className="h-4 w-4 text-profit mt-0.5" />
         </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
-          <p className="text-xl font-mono font-bold text-cyan-400">{counts.qualified_intraday}</p>
-          <p className="text-[10px] text-text-secondary mt-0.5">Intraday</p>
+        {/* Intraday */}
+        <div className="bg-bg-secondary rounded-lg border-t-[3px] border-t-cyan-400 border-x border-b border-bg-tertiary p-3 shadow-md shadow-black/20 flex items-start justify-between">
+          <div>
+            <p className="text-xl font-mono font-bold text-cyan-400">{counts.qualified_intraday}</p>
+            <p className="text-[10px] text-text-secondary mt-0.5">Intraday</p>
+          </div>
+          <Zap className="h-4 w-4 text-cyan-400 mt-0.5" />
         </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
-          <p className="text-xl font-mono font-bold text-indigo-400">{counts.qualified_swing}</p>
-          <p className="text-[10px] text-text-secondary mt-0.5">Swing</p>
+        {/* Swing */}
+        <div className="bg-bg-secondary rounded-lg border-t-[3px] border-t-indigo-400 border-x border-b border-bg-tertiary p-3 shadow-md shadow-black/20 flex items-start justify-between">
+          <div>
+            <p className="text-xl font-mono font-bold text-indigo-400">{counts.qualified_swing}</p>
+            <p className="text-[10px] text-text-secondary mt-0.5">Swing</p>
+          </div>
+          <TrendingUp className="h-4 w-4 text-indigo-400 mt-0.5" />
         </div>
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3 text-center">
-          <p className="text-xl font-mono font-bold text-neutral">{counts.filtered}</p>
-          <p className="text-[10px] text-text-secondary mt-0.5">Filtered</p>
+        {/* Filtered */}
+        <div className="bg-bg-secondary rounded-lg border-t-[3px] border-t-neutral border-x border-b border-bg-tertiary p-3 shadow-md shadow-black/20 flex items-start justify-between">
+          <div>
+            <p className="text-xl font-mono font-bold text-neutral">{counts.filtered}</p>
+            <p className="text-[10px] text-text-secondary mt-0.5">Filtered</p>
+          </div>
+          <Filter className="h-4 w-4 text-neutral mt-0.5" />
         </div>
       </div>
 
-      {/* Filter reason breakdown */}
-      {reasonBreakdown.length > 0 && (
+      {/* Reason pill breakdown */}
+      {(qualifiedBreakdown.length > 0 || reasonBreakdown.length > 0) && (
         <div className="flex flex-wrap gap-2">
+          {qualifiedBreakdown.map(([reason, count]) => (
+            <span
+              key={`q-${reason}`}
+              className="text-[11px] bg-profit/10 border border-profit/20 rounded-full px-2.5 py-0.5 text-profit flex items-center gap-1.5"
+            >
+              {REASON_LABEL[reason] ?? reason}
+              <span className="bg-bg-tertiary rounded-full px-2 py-0.5 text-[10px] text-text-primary font-mono">
+                {count}
+              </span>
+            </span>
+          ))}
           {reasonBreakdown.map(([reason, count]) => (
-            <span key={reason} className="text-[11px] bg-bg-tertiary rounded px-2 py-0.5 text-text-secondary">
-              {REASON_LABEL[reason] ?? reason}: <span className="text-text-primary font-mono">{count}</span>
+            <span
+              key={`f-${reason}`}
+              className="text-[11px] bg-loss/10 border border-loss/20 rounded-full px-2.5 py-0.5 text-loss/80 flex items-center gap-1.5"
+            >
+              {REASON_LABEL[reason] ?? reason}
+              <span className="bg-bg-tertiary rounded-full px-2 py-0.5 text-[10px] text-text-primary font-mono">
+                {count}
+              </span>
             </span>
           ))}
         </div>
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1">
+      <div className="inline-flex bg-bg-tertiary/50 rounded-xl p-0.5">
         {(["all", "qualified", "filtered", "skip"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setFilterStatus(t)}
             className={cn(
-              "px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+              "px-3 py-1.5 rounded-[10px] text-xs font-medium transition-all",
               filterStatus === t
-                ? "bg-accent text-white"
-                : "bg-bg-tertiary text-text-secondary hover:text-text-primary",
+                ? "bg-gradient-to-r from-accent to-blue-600 text-white shadow shadow-accent/30"
+                : "text-text-secondary hover:text-text-primary",
             )}
           >
             {t === "all"

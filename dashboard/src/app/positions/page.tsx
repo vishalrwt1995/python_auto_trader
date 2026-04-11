@@ -97,11 +97,17 @@ export default function PositionsPage() {
         render: (r) => (
           <span
             className={cn(
-              "px-1.5 py-0.5 rounded text-xs font-medium",
+              "px-2 py-1 rounded text-xs font-semibold",
               r.side === "BUY"
                 ? "bg-profit/20 text-profit"
                 : "bg-loss/20 text-loss",
             )}
+            style={{
+              boxShadow:
+                r.side === "BUY"
+                  ? "0 0 8px rgba(34,197,94,0.3)"
+                  : "0 0 8px rgba(239,68,68,0.3)",
+            }}
           >
             {r.side}
           </span>
@@ -125,7 +131,21 @@ export default function PositionsPage() {
         className: "text-right font-mono",
         render: (r) => {
           const ltp = ltpCache[r.symbol];
-          return <span>{ltp ? ltp.toFixed(2) : "—"}</span>;
+          if (!ltp) return <span>—</span>;
+          const changePct = ((ltp - r.entry_price) / r.entry_price) * 100;
+          return (
+            <div className="text-right">
+              <div>{ltp.toFixed(2)}</div>
+              <div
+                className={cn(
+                  "text-[10px]",
+                  changePct >= 0 ? "text-profit" : "text-loss",
+                )}
+              >
+                {changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%
+              </div>
+            </div>
+          );
         },
       },
       {
@@ -152,18 +172,26 @@ export default function PositionsPage() {
               ? ((ltp - r.entry_price) / r.entry_price) * 100
               : ((r.entry_price - ltp) / r.entry_price) * 100;
           return (
-            <div>
-              <span className={pnl >= 0 ? "text-profit" : "text-loss"}>
-                {formatCurrency(pnl)}
-              </span>
-              <span
+            <div
+              className="px-1.5 py-0.5 rounded text-right"
+              style={{
+                background:
+                  pnl >= 0
+                    ? "rgba(34,197,94,0.08)"
+                    : "rgba(239,68,68,0.08)",
+              }}
+            >
+              <div className={cn("font-bold text-sm", pnl >= 0 ? "text-profit" : "text-loss")}>
+                {pnl >= 0 ? "↑" : "↓"} {formatCurrency(pnl)}
+              </div>
+              <div
                 className={cn(
-                  "text-[10px] ml-1",
+                  "text-[10px]",
                   pnl >= 0 ? "text-profit/70" : "text-loss/70",
                 )}
               >
                 {formatPercent(pnlPct)}
-              </span>
+              </div>
             </div>
           );
         },
@@ -192,12 +220,27 @@ export default function PositionsPage() {
               ? ((ltp - r.sl_price) / totalRange) * 100
               : ((r.sl_price - ltp) / totalRange) * 100;
           const clamped = Math.max(0, Math.min(100, progress));
+          // Threshold positions for 0.5, 1.0, 1.5 R:R (as % of total range assuming SL=1R, target=2R)
+          // 0.5 RR = 33.3%, 1.0 RR = 66.7% (breakeven at 50%)
           return (
-            <div className="w-20 h-2 bg-bg-tertiary rounded-full overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-loss via-neutral to-profit rounded-full"
-                style={{ width: `${clamped}%` }}
-              />
+            <div
+              className="relative w-20"
+              title={`R:R progress: ${clamped.toFixed(0)}%`}
+            >
+              <div className="w-20 h-2 bg-bg-tertiary rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-loss via-neutral to-profit rounded-full"
+                  style={{ width: `${clamped}%` }}
+                />
+              </div>
+              {/* Threshold markers */}
+              {[33, 50, 67].map((pct) => (
+                <div
+                  key={pct}
+                  className="absolute top-0 w-px h-2 bg-bg-secondary/80"
+                  style={{ left: `${pct}%` }}
+                />
+              ))}
             </div>
           );
         },
@@ -218,14 +261,15 @@ export default function PositionsPage() {
               label: "",
               render: (r: Position) => (
                 <button
-                  className="px-2 py-1 rounded bg-loss/20 text-loss text-xs hover:bg-loss/30 transition-colors disabled:opacity-50"
+                  className="w-7 h-7 rounded-full border border-loss/40 text-loss hover:bg-loss/10 transition-colors disabled:opacity-50 flex items-center justify-center text-xs font-bold"
                   disabled={exitingTag === r.position_tag}
                   onClick={(e) => {
                     e.stopPropagation();
                     setShowExitConfirm(r);
                   }}
+                  title="Exit position"
                 >
-                  {exitingTag === r.position_tag ? "Exiting..." : "Exit"}
+                  {exitingTag === r.position_tag ? "…" : "✕"}
                 </button>
               ),
             } as Column<Position>,
@@ -282,35 +326,45 @@ export default function PositionsPage() {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Positions & Orders</h1>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-text-secondary">
-            {openPositions.length} open
+          <h1 className="text-xl font-semibold">Positions & Orders</h1>
+          <span
+            className={cn(
+              "inline-flex items-center justify-center min-w-[2rem] px-2 py-0.5 rounded-full text-xs font-bold",
+              openPositions.length > 0
+                ? "bg-accent/20 text-accent"
+                : "bg-bg-tertiary text-text-secondary",
+            )}
+          >
+            {openPositions.length}
           </span>
+        </div>
+        <div className="flex items-center gap-3">
           {isAdmin() ? (
             <button
               onClick={() => setShowToggleConfirm(true)}
               disabled={paperLoading}
               className={cn(
-                "px-2.5 py-1 rounded text-xs font-medium transition-colors",
+                "px-4 py-1.5 rounded-full text-xs font-semibold transition-all border",
                 paperMode
-                  ? "bg-profit/20 text-profit hover:bg-profit/30"
-                  : "bg-loss/20 text-loss hover:bg-loss/30",
+                  ? "bg-profit/10 text-profit border-profit/30 hover:bg-profit/20"
+                  : "bg-loss/10 text-loss border-loss/30 hover:bg-loss/20",
               )}
             >
-              {paperMode ? "PAPER" : "LIVE"}
+              {paperMode ? "PAPER MODE" : "LIVE MODE"}
             </button>
           ) : (
             <span
               className={cn(
-                "px-2 py-0.5 rounded text-xs font-medium",
+                "px-4 py-1.5 rounded-full text-xs font-semibold border",
                 paperMode
-                  ? "bg-profit/20 text-profit"
-                  : "bg-loss/20 text-loss",
+                  ? "bg-profit/10 text-profit border-profit/30"
+                  : "bg-loss/10 text-loss border-loss/30",
               )}
             >
-              {paperMode ? "PAPER" : "LIVE"}
+              {paperMode ? "PAPER MODE" : "LIVE MODE"}
             </span>
           )}
         </div>
@@ -364,8 +418,8 @@ export default function PositionsPage() {
 
       {/* Paper/Live Toggle Confirmation Dialog */}
       {showToggleConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="bg-bg-secondary border border-bg-tertiary rounded-lg p-6 max-w-sm w-full mx-4 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-bg-secondary border border-bg-tertiary rounded-2xl shadow-2xl shadow-black/60 p-6 max-w-sm w-full mx-4 space-y-4">
             <h3 className="text-lg font-semibold">
               Switch to {paperMode ? "LIVE" : "PAPER"} Mode?
             </h3>
@@ -375,12 +429,12 @@ export default function PositionsPage() {
                 : "Paper mode will simulate trades without placing real orders. Existing open positions will not be affected."}
             </p>
             {!paperMode && (
-              <div className="flex items-center gap-2 text-xs text-profit bg-profit/10 rounded p-2">
+              <div className="flex items-center gap-2 text-xs text-profit bg-profit/10 rounded-xl p-3">
                 Safe — switching to paper mode does not affect existing positions.
               </div>
             )}
             {paperMode && (
-              <div className="flex items-center gap-2 text-xs text-loss bg-loss/10 rounded p-2">
+              <div className="flex items-center gap-2 text-xs text-loss bg-loss/10 rounded-xl p-3">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 Warning — real money will be at risk in live mode.
               </div>
@@ -388,7 +442,7 @@ export default function PositionsPage() {
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => setShowToggleConfirm(false)}
-                className="px-4 py-2 rounded text-sm text-text-secondary hover:text-text-primary transition-colors"
+                className="px-5 py-2 rounded-xl text-sm text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
               >
                 Cancel
               </button>
@@ -396,7 +450,7 @@ export default function PositionsPage() {
                 onClick={handleTogglePaperMode}
                 disabled={paperLoading}
                 className={cn(
-                  "px-4 py-2 rounded text-sm font-medium transition-colors disabled:opacity-50",
+                  "px-5 py-2 rounded-xl text-sm font-semibold transition-colors disabled:opacity-50",
                   paperMode
                     ? "bg-loss text-white hover:bg-loss/80"
                     : "bg-profit text-white hover:bg-profit/80",
@@ -413,8 +467,8 @@ export default function PositionsPage() {
 
       {/* Exit Position Confirmation Dialog */}
       {showExitConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="bg-bg-secondary border border-bg-tertiary rounded-lg p-6 max-w-sm w-full mx-4 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-bg-secondary border border-bg-tertiary rounded-2xl shadow-2xl shadow-black/60 p-6 max-w-sm w-full mx-4 space-y-4">
             <h3 className="text-lg font-semibold">Exit Position?</h3>
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
@@ -450,14 +504,14 @@ export default function PositionsPage() {
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => setShowExitConfirm(null)}
-                className="px-4 py-2 rounded text-sm text-text-secondary hover:text-text-primary transition-colors"
+                className="px-5 py-2 rounded-xl text-sm text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={() => handleExitPosition(showExitConfirm)}
                 disabled={exitingTag === showExitConfirm.position_tag}
-                className="px-4 py-2 rounded text-sm font-medium bg-loss text-white hover:bg-loss/80 transition-colors disabled:opacity-50"
+                className="px-5 py-2 rounded-xl text-sm font-semibold bg-loss text-white hover:bg-loss/80 transition-colors disabled:opacity-50"
               >
                 {exitingTag === showExitConfirm.position_tag ? "Exiting..." : "Confirm Exit"}
               </button>

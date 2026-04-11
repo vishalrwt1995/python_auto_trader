@@ -5,6 +5,16 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useAuthStore } from "@/stores/authStore";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import {
+  DollarSign,
+  Layers,
+  Target,
+  Activity,
+  TrendingUp,
+  Filter,
+  Volume2,
+  Play,
+} from "lucide-react";
 
 type LiveSettings = Record<string, number | boolean>;
 
@@ -19,6 +29,15 @@ const PCT = (v: number) => `${v}%`;
 const RAW = (v: number | boolean) => String(v);
 
 type Formatter = (v: number) => string;
+
+const GROUP_ICONS: Record<string, React.ReactNode> = {
+  "Capital & Risk": <DollarSign className="h-4 w-4" />,
+  "Position Limits": <Layers className="h-4 w-4" />,
+  "SL & Target": <Target className="h-4 w-4" />,
+  "Indicators": <Activity className="h-4 w-4" />,
+  "Swing Trading": <TrendingUp className="h-4 w-4" />,
+  "Market Filters": <Filter className="h-4 w-4" />,
+};
 
 const CONFIG_GROUPS: {
   group: string;
@@ -80,22 +99,45 @@ const CONFIG_GROUPS: {
   },
 ];
 
+// ── SettingCard value color helper ────────────────────────────────────────────
+
+function getValueColor(value: string, fmt: Formatter): string {
+  // INR values
+  if (value.startsWith("₹")) return "text-profit";
+  // Percentage > 50
+  if (value.endsWith("%")) {
+    const n = parseFloat(value);
+    if (!isNaN(n) && n > 50) return "text-profit";
+    return "text-text-primary";
+  }
+  // Multiplier
+  const n = parseFloat(value);
+  if (!isNaN(n) && !value.startsWith("₹") && !value.endsWith("%")) {
+    if (n > 1.0) return "text-accent";
+    if (n < 1.0 && n > 0) return "text-neutral";
+  }
+  return "text-text-primary";
+}
+
 function SettingCard({
   label,
   value,
   description,
+  fmt,
 }: {
   label: string;
   value: string;
   description?: string;
+  fmt: Formatter;
 }) {
+  const valueColor = getValueColor(value, fmt);
   return (
     <div
-      className="flex flex-col gap-1 px-3 py-2.5 bg-bg-primary rounded-lg"
+      className="flex flex-col gap-1 px-3 py-2.5 bg-bg-primary rounded-lg border border-transparent hover:border-accent/20 transition-colors"
       title={description}
     >
       <span className="font-mono text-[10px] text-text-secondary uppercase tracking-wide">{label}</span>
-      <span className="font-mono text-base font-bold text-text-primary">{value}</span>
+      <span className={cn("font-mono text-base font-bold", valueColor)}>{value}</span>
     </div>
   );
 }
@@ -145,51 +187,72 @@ export default function SettingsPage() {
     return fmt(v as number);
   };
 
+  // Role badge color
+  const role = user?.role ?? "viewer";
+  const roleBadgeClass =
+    role === "admin"
+      ? "bg-loss/15 text-loss border border-loss/30"
+      : "bg-bg-tertiary text-text-secondary border border-bg-tertiary";
+
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-semibold">Settings</h1>
 
-      {/* Paper / Live Toggle */}
+      {/* Paper / Live Toggle — full-width prominent banner */}
       <div
         className={cn(
-          "rounded-xl border p-5 flex items-center justify-between",
+          "rounded-xl border-2 p-5",
           paperMode
-            ? "bg-profit/5 border-profit/30"
-            : "bg-loss/5 border-loss/40",
+            ? "bg-profit/5 border-profit/50"
+            : "bg-loss/5 border-loss/50",
         )}
       >
-        <div>
-          <p className="text-sm font-bold">Trading Mode</p>
-          <p className={cn("text-xs mt-1", paperMode ? "text-profit" : "text-loss")}>
-            {paperMode
-              ? "✓ PAPER mode — positions are simulated, no real orders sent to Upstox"
-              : "⚡ LIVE mode — real bracket orders are being sent to Upstox"}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className={cn("text-xs font-bold", paperMode ? "text-profit" : "text-text-secondary")}>
-            PAPER
-          </span>
-          <button
-            onClick={isAdmin() ? handleTogglePaper : undefined}
-            disabled={paperLoading || !isAdmin()}
-            title={isAdmin() ? "Toggle paper/live mode" : "Admin only"}
-            className={cn(
-              "w-12 h-[26px] rounded-full p-0.5 transition-colors",
-              paperMode ? "bg-profit/30 border border-profit" : "bg-loss/30 border border-loss",
-              !isAdmin() && "opacity-50 cursor-not-allowed",
-            )}
-          >
-            <div
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <p className="text-sm font-bold">Trading Mode</p>
+            <p className={cn("text-xs mt-1", paperMode ? "text-profit" : "text-loss")}>
+              {paperMode
+                ? "PAPER mode — positions are simulated, no real orders sent to Upstox"
+                : "LIVE mode — real bracket orders are being sent to Upstox"}
+            </p>
+          </div>
+
+          {/* Pill-style toggle */}
+          <div className="flex items-center gap-3">
+            <span
               className={cn(
-                "w-[22px] h-[22px] rounded-full transition-transform",
-                paperMode ? "bg-profit translate-x-0" : "bg-loss translate-x-[22px]",
+                "text-xs font-bold px-3 py-1 rounded-full transition-colors",
+                paperMode ? "bg-profit/20 text-profit" : "text-text-secondary",
               )}
-            />
-          </button>
-          <span className={cn("text-xs font-bold", !paperMode ? "text-loss" : "text-text-secondary")}>
-            LIVE
-          </span>
+            >
+              PAPER
+            </span>
+            <button
+              onClick={isAdmin() ? handleTogglePaper : undefined}
+              disabled={paperLoading || !isAdmin()}
+              title={isAdmin() ? "Toggle paper/live mode" : "Admin only"}
+              className={cn(
+                "w-14 h-[30px] rounded-full p-0.5 transition-colors",
+                paperMode ? "bg-profit/30 border-2 border-profit" : "bg-loss/30 border-2 border-loss",
+                !isAdmin() && "opacity-50 cursor-not-allowed",
+              )}
+            >
+              <div
+                className={cn(
+                  "w-[24px] h-[24px] rounded-full transition-transform",
+                  paperMode ? "bg-profit translate-x-0" : "bg-loss translate-x-[26px]",
+                )}
+              />
+            </button>
+            <span
+              className={cn(
+                "text-xs font-bold px-3 py-1 rounded-full transition-colors",
+                !paperMode ? "bg-loss/20 text-loss" : "text-text-secondary",
+              )}
+            >
+              LIVE
+            </span>
+          </div>
         </div>
       </div>
 
@@ -199,16 +262,21 @@ export default function SettingsPage() {
       ) : (
         CONFIG_GROUPS.map((g) => (
           <div key={g.group} className="bg-bg-secondary rounded-xl border border-bg-tertiary p-5">
-            <p className="text-xs text-text-secondary font-semibold uppercase tracking-wider mb-3">
-              {g.group}
-            </p>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5">
+            {/* Group header with icon + divider */}
+            <div className="flex items-center gap-2 mb-1 pb-3 border-b border-bg-tertiary">
+              <span className="text-text-secondary">{GROUP_ICONS[g.group]}</span>
+              <p className="text-xs text-text-secondary font-semibold uppercase tracking-wider">
+                {g.group}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 mt-3">
               {g.items.map((item) => (
                 <SettingCard
                   key={item.key}
                   label={item.label}
                   value={getValue(item.key, item.fmt)}
                   description={item.description}
+                  fmt={item.fmt}
                 />
               ))}
             </div>
@@ -219,58 +287,68 @@ export default function SettingsPage() {
       {/* Voice Alerts */}
       <div className="bg-bg-secondary rounded-xl border border-bg-tertiary p-5">
         <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-bold">Voice Alerts</p>
-            <p className="text-xs text-text-secondary mt-1">
-              Announce regime changes, new positions, exits
-            </p>
+          <div className="flex items-center gap-2">
+            <Volume2 className="h-4 w-4 text-text-secondary" />
+            <div>
+              <p className="text-sm font-bold">Voice Alerts</p>
+              <p className="text-xs text-text-secondary mt-0.5">
+                Announce regime changes, new positions, exits
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-text-secondary">🔊</span>
-            <button
-              onClick={toggleVoice}
+          <button
+            onClick={toggleVoice}
+            className={cn(
+              "w-9 h-5 rounded-full p-0.5 transition-colors",
+              voiceEnabled ? "bg-accent" : "bg-bg-tertiary",
+            )}
+          >
+            <div
               className={cn(
-                "w-9 h-5 rounded-full p-0.5 transition-colors",
-                voiceEnabled ? "bg-accent" : "bg-bg-tertiary",
+                "w-4 h-4 rounded-full bg-white transition-transform",
+                voiceEnabled ? "translate-x-4" : "translate-x-0",
               )}
-            >
-              <div
-                className={cn(
-                  "w-4 h-4 rounded-full bg-white transition-transform",
-                  voiceEnabled ? "translate-x-4" : "translate-x-0",
-                )}
-              />
-            </button>
-          </div>
-        </div>
-        {voiceEnabled && (
-          <div className="mt-4 flex items-center gap-3">
-            <span className="text-xs text-text-secondary">Volume</span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              step={5}
-              value={Math.round(voiceVolume * 100)}
-              onChange={(e) => setVoiceVolume(Number(e.target.value) / 100)}
-              className="flex-1 accent-accent h-1"
             />
-            <span className="font-mono text-xs w-10 text-right">
-              {Math.round(voiceVolume * 100)}%
-            </span>
-            <button
-              onClick={() => {
-                if (typeof window !== "undefined") {
-                  const u = new SpeechSynthesisUtterance("Voice alerts are working.");
-                  u.volume = voiceVolume;
-                  u.rate = 1.1;
-                  window.speechSynthesis.speak(u);
-                }
-              }}
-              className="px-3 py-1 rounded text-xs bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors"
-            >
-              Test
-            </button>
+          </button>
+        </div>
+
+        {voiceEnabled && (
+          <div className="mt-4 space-y-3">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-text-secondary w-14 shrink-0">Volume</span>
+              <div className="flex-1 relative">
+                {/* Gradient track */}
+                <div className="absolute inset-y-0 left-0 rounded-full pointer-events-none h-1.5 top-1/2 -translate-y-1/2 bg-gradient-to-r from-accent/30 to-accent"
+                  style={{ width: `${Math.round(voiceVolume * 100)}%` }}
+                />
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={Math.round(voiceVolume * 100)}
+                  onChange={(e) => setVoiceVolume(Number(e.target.value) / 100)}
+                  className="w-full h-1.5 rounded-full bg-bg-tertiary appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-accent [&::-webkit-slider-thumb]:shadow-md relative"
+                />
+              </div>
+              <span className="font-mono text-xs w-10 text-right text-accent">
+                {Math.round(voiceVolume * 100)}%
+              </span>
+              <button
+                onClick={() => {
+                  if (typeof window !== "undefined") {
+                    const u = new SpeechSynthesisUtterance("Voice alerts are working.");
+                    u.volume = voiceVolume;
+                    u.rate = 1.1;
+                    window.speechSynthesis.speak(u);
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-bg-tertiary text-text-secondary hover:text-text-primary hover:bg-accent/10 hover:text-accent transition-colors border border-transparent hover:border-accent/20"
+              >
+                <Play className="h-3 w-3" />
+                Test
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -278,25 +356,39 @@ export default function SettingsPage() {
       {/* Admin Config Editor */}
       {isAdmin() && (
         <div className="bg-bg-secondary rounded-xl border border-bg-tertiary p-5">
-          <p className="text-xs text-text-secondary font-semibold uppercase tracking-wider mb-3">
-            Admin — Config Editor
-          </p>
-          <AdminConfigPanel />
+          <div className="flex items-center gap-2 mb-1 pb-3 border-b border-bg-tertiary">
+            <p className="text-xs text-text-secondary font-semibold uppercase tracking-wider">
+              Admin — Config Editor
+            </p>
+          </div>
+          <div className="mt-3">
+            <AdminConfigPanel />
+          </div>
         </div>
       )}
 
       {/* Account */}
       <div className="bg-bg-secondary rounded-xl border border-bg-tertiary p-5">
-        <p className="text-xs text-text-secondary font-semibold uppercase tracking-wider mb-3">
+        <p className="text-xs text-text-secondary font-semibold uppercase tracking-wider mb-4 pb-3 border-b border-bg-tertiary">
           Account
         </p>
         <div className="flex items-center gap-4">
-          <div className="w-10 h-10 rounded-full bg-accent/20 flex items-center justify-center text-accent font-bold">
+          {/* Avatar with gradient */}
+          <div
+            className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm shrink-0"
+            style={{
+              background: "linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)",
+            }}
+          >
             {user?.email?.charAt(0).toUpperCase() ?? "?"}
           </div>
           <div>
             <p className="text-sm font-medium">{user?.email ?? "Not logged in"}</p>
-            <p className="text-xs text-text-secondary">Role: {user?.role ?? "viewer"}</p>
+            <div className="flex items-center gap-2 mt-1">
+              <span className={cn("text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase tracking-wide", roleBadgeClass)}>
+                {role}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -337,27 +429,27 @@ function AdminConfigPanel() {
           placeholder="Config key (e.g. min_signal_score)"
           value={configKey}
           onChange={(e) => setConfigKey(e.target.value)}
-          className="px-3 py-2 bg-bg-primary rounded-lg text-xs text-text-primary placeholder:text-text-secondary font-mono"
+          className="font-mono bg-bg-tertiary border border-bg-tertiary focus:border-accent/50 rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none transition-colors"
         />
         <input
           type="text"
           placeholder="Value"
           value={configValue}
           onChange={(e) => setConfigValue(e.target.value)}
-          className="px-3 py-2 bg-bg-primary rounded-lg text-xs text-text-primary placeholder:text-text-secondary font-mono"
+          className="font-mono bg-bg-tertiary border border-bg-tertiary focus:border-accent/50 rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none transition-colors"
         />
       </div>
       <div className="flex items-center gap-3">
         <button
           onClick={handleSave}
           disabled={saving || !configKey.trim()}
-          className="px-4 py-1.5 rounded text-xs bg-accent text-white hover:bg-accent/80 disabled:opacity-50 transition-colors"
+          className="px-4 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-accent/80 disabled:opacity-50 transition-colors"
         >
           {saving ? "Saving…" : "Save"}
         </button>
         <button
           onClick={() => api.forceTokenRefresh().catch(() => {})}
-          className="px-3 py-1.5 rounded text-xs bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors"
+          className="px-3 py-1.5 rounded-lg text-xs bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors border border-transparent hover:border-accent/20"
         >
           Force Token Refresh
         </button>

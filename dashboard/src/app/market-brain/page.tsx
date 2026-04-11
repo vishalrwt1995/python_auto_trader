@@ -42,6 +42,14 @@ const GAUGE_TIPS: Record<string, string> = {
   "Data Qual":"Data quality score — stale or incomplete data lowers this",
 };
 
+/** Return badge color for multiplier values */
+function multBadgeStyle(val: number | null | undefined): { bg: string; color: string; label: string } {
+  if (val == null) return { bg: "#1f2937", color: "#9ca3af", label: "" };
+  if (val >= 1.2) return { bg: "rgba(59,130,246,0.15)", color: "#3b82f6", label: "HIGH" };
+  if (val <= 0.8) return { bg: "rgba(245,158,11,0.15)", color: "#f59e0b", label: "LOW" };
+  return { bg: "rgba(156,163,175,0.1)", color: "#9ca3af", label: "NORM" };
+}
+
 export default function MarketBrainPage() {
   const brain = useDashboardStore((s) => s.marketBrain);
   const brainHistory = useDashboardStore((s) => s.brainHistory);
@@ -68,6 +76,16 @@ export default function MarketBrainPage() {
     brain.swing_permission === "ENABLED"  ? "Swing entries allowed"
     : brain.swing_permission === "REDUCED" ? "Reduced sizing only"
     : "No new swing entries";
+
+  // Long/Short bias balance bar
+  const longBias = Math.min(1, Math.max(0, brain.long_bias ?? 0));
+  const shortBias = Math.min(1, Math.max(0, brain.short_bias ?? 0));
+  const biasTotal = longBias + shortBias || 1;
+  const longPct = (longBias / biasTotal) * 100;
+  const shortPct = (shortBias / biasTotal) * 100;
+
+  const sizeBadge = multBadgeStyle(brain.size_multiplier);
+  const maxPosBadge = multBadgeStyle(brain.max_positions_multiplier);
 
   return (
     <div className="space-y-6">
@@ -104,17 +122,25 @@ export default function MarketBrainPage() {
           )}
         </div>
 
+        {/* Row 1: first 4 fields */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <StateField label="Sub-Regime V2"   value={brain.sub_regime_v2} />
           <StateField label="Structure State" value={brain.structure_state} />
           <StateField label="Recovery State"  value={brain.recovery_state || "NONE"} />
           <StateField label="Event State"     value={brain.event_state || "NONE"} />
+        </div>
+
+        {/* Separator between rows */}
+        <div className="my-3 border-t border-bg-tertiary/60" />
+
+        {/* Row 2: remaining fields */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <StateField label="Intraday State"  value={brain.intraday_state} />
 
           {/* Swing Permission with description */}
           <div>
             <span className="text-text-secondary text-xs">Swing Permission</span>
-            <p className={cn("font-mono text-sm", swingColor)}>
+            <p className={cn("font-semibold font-mono text-sm", swingColor)}>
               {brain.swing_permission}
             </p>
             <p className="text-[10px] text-text-secondary mt-0.5">{swingDesc}</p>
@@ -187,12 +213,17 @@ export default function MarketBrainPage() {
             <span className="text-[10px] text-text-secondary">Vol Calm = 100 − stress</span>
           </div>
           <RadarScore data={radarData} height={320} />
+          <p className="text-[10px] text-text-secondary text-center mt-1 opacity-60">
+            Vol Calm = 100 − stress, higher = calmer
+          </p>
         </div>
 
         {/* C. Confidence Meters */}
         <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-          <h3 className="text-sm font-medium text-text-primary mb-1">Confidence Meters</h3>
-          <p className="text-[10px] text-text-secondary mb-3">Hover for description</p>
+          <h3 className="text-sm font-medium text-text-primary mb-0.5">Confidence Meters</h3>
+          <p className="text-[10px] text-text-secondary mb-3">
+            Hover for description &middot; <span className="text-profit/70">higher = better</span>
+          </p>
           <div className="grid grid-cols-2 gap-4 justify-items-center">
             {([
               [brain.market_confidence,        "Overall",   100],
@@ -215,22 +246,71 @@ export default function MarketBrainPage() {
       {/* D. Policy Biases */}
       <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
         <h3 className="text-sm font-medium text-text-primary mb-3">Policy Biases</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {([
-            ["Long Bias",    brain.long_bias?.toFixed(2) ?? "--",    "#22c55e", "Probability-weighted long entry bias"],
-            ["Short Bias",   brain.short_bias?.toFixed(2) ?? "--",   "#ef4444", "Probability-weighted short entry bias"],
-            ["Size Mult",    brain.size_multiplier != null ? `${brain.size_multiplier.toFixed(2)}x` : "--",               "#f59e0b", "Position size multiplier applied to all trades"],
-            ["Max Pos Mult", brain.max_positions_multiplier != null ? `${brain.max_positions_multiplier.toFixed(2)}x` : "--", "#8b5cf6", "Max concurrent positions multiplier"],
-          ] as const).map(([label, value, color, tip]) => (
-            <div
-              key={label}
-              className="bg-bg-primary rounded-lg p-3 text-center cursor-help"
-              title={tip}
-            >
-              <p className="text-[10px] text-text-secondary uppercase tracking-wider">{label}</p>
-              <p className="text-xl font-mono font-bold mt-1" style={{ color }}>{value}</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Long / Short Bias with balance bar */}
+          <div className="bg-bg-primary rounded-lg p-3" title="Probability-weighted long/short entry bias">
+            <div className="flex justify-between text-[10px] text-text-secondary mb-1.5">
+              <span>Long / Short Bias</span>
+              <span className="font-mono">
+                <span className="text-profit">{brain.long_bias?.toFixed(2) ?? "--"}</span>
+                <span className="text-text-secondary mx-1">/</span>
+                <span className="text-loss">{brain.short_bias?.toFixed(2) ?? "--"}</span>
+              </span>
             </div>
-          ))}
+            {/* Balance bar */}
+            <div className="flex h-2.5 rounded-full overflow-hidden">
+              <div
+                className="h-full transition-all"
+                style={{ width: `${longPct}%`, background: "#22c55e" }}
+              />
+              <div
+                className="h-full transition-all"
+                style={{ width: `${shortPct}%`, background: "#ef4444" }}
+              />
+            </div>
+            <div className="flex justify-between text-[9px] mt-1 opacity-60">
+              <span className="text-profit">Long {longPct.toFixed(0)}%</span>
+              <span className="text-loss">Short {shortPct.toFixed(0)}%</span>
+            </div>
+          </div>
+
+          {/* Size Mult + Max Pos Mult with badges */}
+          <div className="grid grid-cols-2 gap-3">
+            <div
+              className="bg-bg-primary rounded-lg p-3 text-center cursor-help"
+              title="Position size multiplier applied to all trades"
+            >
+              <p className="text-[10px] text-text-secondary uppercase tracking-wider mb-1">Size Mult</p>
+              <p className="text-xl font-mono font-bold" style={{ color: "#f59e0b" }}>
+                {brain.size_multiplier != null ? `${brain.size_multiplier.toFixed(2)}x` : "--"}
+              </p>
+              {brain.size_multiplier != null && (
+                <span
+                  className="mt-1.5 inline-block text-[9px] font-semibold px-1.5 py-0.5 rounded"
+                  style={{ background: sizeBadge.bg, color: sizeBadge.color }}
+                >
+                  {sizeBadge.label}
+                </span>
+              )}
+            </div>
+            <div
+              className="bg-bg-primary rounded-lg p-3 text-center cursor-help"
+              title="Max concurrent positions multiplier"
+            >
+              <p className="text-[10px] text-text-secondary uppercase tracking-wider mb-1">Max Pos Mult</p>
+              <p className="text-xl font-mono font-bold" style={{ color: "#8b5cf6" }}>
+                {brain.max_positions_multiplier != null ? `${brain.max_positions_multiplier.toFixed(2)}x` : "--"}
+              </p>
+              {brain.max_positions_multiplier != null && (
+                <span
+                  className="mt-1.5 inline-block text-[9px] font-semibold px-1.5 py-0.5 rounded"
+                  style={{ background: maxPosBadge.bg, color: maxPosBadge.color }}
+                >
+                  {maxPosBadge.label}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -353,7 +433,7 @@ function StateField({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
       <span className="text-text-secondary text-xs">{label}</span>
-      <p className="font-mono text-sm text-text-primary truncate" title={value || undefined}>
+      <p className="font-semibold font-mono text-sm text-text-primary truncate" title={value || undefined}>
         {value || "—"}
       </p>
     </div>
