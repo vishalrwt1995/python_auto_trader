@@ -7,6 +7,8 @@ import {
   onSnapshot,
   query,
   where,
+  orderBy,
+  limit,
   type DocumentData,
   type Query,
 } from "firebase/firestore";
@@ -41,10 +43,15 @@ export function useFirestoreDoc<T = DocumentData>(
   return { data, loading, error };
 }
 
-/** Subscribe to a Firestore collection (optionally filtered). */
+/** Subscribe to a Firestore collection (optionally filtered, ordered, limited). */
 export function useFirestoreCollection<T = DocumentData>(
   collectionName: string,
-  filters?: { field: string; op: "==" | "!=" | ">" | "<"; value: unknown }[],
+  options?: {
+    filters?: { field: string; op: "==" | "!=" | ">" | "<"; value: unknown }[];
+    orderByField?: string;
+    orderByDir?: "asc" | "desc";
+    limitCount?: number;
+  },
 ) {
   const [data, setData] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,11 +59,20 @@ export function useFirestoreCollection<T = DocumentData>(
 
   useEffect(() => {
     if (!db) return;
-    let q: Query = collection(db, collectionName);
-    if (filters?.length) {
-      const constraints = filters.map((f) => where(f.field, f.op, f.value));
-      q = query(q, ...constraints);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const constraints: any[] = [];
+    if (options?.filters?.length) {
+      constraints.push(...options.filters.map((f) => where(f.field, f.op, f.value)));
     }
+    if (options?.orderByField) {
+      constraints.push(orderBy(options.orderByField, options.orderByDir ?? "asc"));
+    }
+    if (options?.limitCount) {
+      constraints.push(limit(options.limitCount));
+    }
+    const q: Query = constraints.length
+      ? query(collection(db, collectionName), ...constraints)
+      : collection(db, collectionName);
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -70,7 +86,8 @@ export function useFirestoreCollection<T = DocumentData>(
       },
     );
     return unsub;
-  }, [collectionName, filters]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionName]);
 
   return { data, loading, error };
 }

@@ -1,10 +1,12 @@
 import { create } from "zustand";
-import type { MarketBrainState, WatchlistRow, Position } from "@/lib/types";
+import type { MarketBrainState, WatchlistRow, Position, BrainHistoryRow } from "@/lib/types";
 
 interface DashboardState {
   /* Market Brain */
   marketBrain: MarketBrainState | null;
   setMarketBrain: (state: MarketBrainState | null) => void;
+  brainHistory: BrainHistoryRow[];
+  setBrainHistory: (rows: BrainHistoryRow[]) => void;
 
   /* Watchlist */
   watchlist: WatchlistRow[];
@@ -31,6 +33,8 @@ interface DashboardState {
 export const useDashboardStore = create<DashboardState>((set) => ({
   marketBrain: null,
   setMarketBrain: (marketBrain) => set({ marketBrain }),
+  brainHistory: [],
+  setBrainHistory: (brainHistory) => set({ brainHistory }),
 
   watchlist: [],
   setWatchlist: (watchlist) => set({ watchlist }),

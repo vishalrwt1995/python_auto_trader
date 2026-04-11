@@ -40,6 +40,19 @@ export interface MarketBrainState {
   updated_at?: { seconds: number; nanoseconds: number };
 }
 
+export interface BrainHistoryRow {
+  _id?: string;
+  asof_ts: string;
+  regime: Regime;
+  sub_regime_v2: string;
+  risk_mode: RiskMode;
+  participation: Participation;
+  market_confidence: number;
+  trend_score: number;
+  breadth_score: number;
+  volatility_stress_score: number;
+}
+
 /* ── Watchlist ── */
 
 export interface WatchlistRow {

@@ -9,7 +9,7 @@ import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
 import { LiveDot } from "@/components/shared/LiveDot";
 import { cn, formatTime } from "@/lib/utils";
 import type { Regime, RiskMode, Participation } from "@/lib/types";
-import { PARTICIPATION_COLORS } from "@/lib/constants";
+import { PARTICIPATION_COLORS, REGIME_COLORS, RISK_MODE_COLORS } from "@/lib/constants";
 
 /** Classify a reason string by sentiment for border color */
 function reasonSentiment(r: string): "positive" | "negative" | "warning" | "neutral" {
@@ -44,6 +44,7 @@ const GAUGE_TIPS: Record<string, string> = {
 
 export default function MarketBrainPage() {
   const brain = useDashboardStore((s) => s.marketBrain);
+  const brainHistory = useDashboardStore((s) => s.brainHistory);
 
   if (!brain) return <LoadingSkeleton lines={12} className="max-w-4xl" />;
 
@@ -261,12 +262,72 @@ export default function MarketBrainPage() {
         </div>
       )}
 
-      {/* F. Regime History — placeholder */}
+      {/* F. Regime History */}
       <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
         <h3 className="text-sm font-medium text-text-primary mb-3">Regime History</h3>
-        <div className="h-24 flex items-center justify-center text-text-secondary text-xs">
-          Historical regime timeline — coming soon (requires BQ history endpoint)
-        </div>
+        {brainHistory.length === 0 ? (
+          <div className="h-16 flex items-center justify-center text-text-secondary text-xs">
+            No history yet — populates after first brain run
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-text-secondary border-b border-bg-tertiary">
+                  <th className="text-left pb-2 pr-4 font-medium">Time</th>
+                  <th className="text-left pb-2 pr-4 font-medium">Regime</th>
+                  <th className="text-left pb-2 pr-4 font-medium">Sub-Regime</th>
+                  <th className="text-left pb-2 pr-4 font-medium">Risk Mode</th>
+                  <th className="text-right pb-2 pr-4 font-medium">Conf</th>
+                  <th className="text-right pb-2 pr-4 font-medium">Trend</th>
+                  <th className="text-right pb-2 font-medium">Vol Stress</th>
+                </tr>
+              </thead>
+              <tbody>
+                {brainHistory.map((row, i) => (
+                  <tr key={row._id ?? i} className="border-b border-bg-tertiary/50 last:border-0">
+                    <td className="py-1.5 pr-4 font-mono text-text-secondary whitespace-nowrap">
+                      {formatTime(new Date(row.asof_ts))}
+                    </td>
+                    <td className="py-1.5 pr-4">
+                      <span
+                        className="font-semibold"
+                        style={{ color: REGIME_COLORS[row.regime] ?? "#6b7280" }}
+                      >
+                        {row.regime.replace("_", " ")}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-4 text-text-secondary font-mono">
+                      {row.sub_regime_v2 || "—"}
+                    </td>
+                    <td className="py-1.5 pr-4">
+                      <span
+                        className="font-medium"
+                        style={{ color: RISK_MODE_COLORS[row.risk_mode] ?? "#6b7280" }}
+                      >
+                        {row.risk_mode}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-4 text-right font-mono">
+                      {row.market_confidence?.toFixed(0) ?? "—"}
+                    </td>
+                    <td className="py-1.5 pr-4 text-right font-mono">
+                      {row.trend_score?.toFixed(0) ?? "—"}
+                    </td>
+                    <td className={cn(
+                      "py-1.5 text-right font-mono",
+                      row.volatility_stress_score >= 70 ? "text-loss"
+                        : row.volatility_stress_score >= 40 ? "text-neutral"
+                        : "text-profit",
+                    )}>
+                      {row.volatility_stress_score?.toFixed(0) ?? "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <p className="text-xs text-text-secondary text-right">

@@ -2,12 +2,13 @@
 
 import { useEffect, type ReactNode } from "react";
 import { useMarketBrain } from "@/hooks/useMarketBrain";
+import { useMarketBrainHistory } from "@/hooks/useMarketBrainHistory";
 import { useWatchlist } from "@/hooks/useWatchlist";
 import { usePositions } from "@/hooks/usePositions";
 import { useVoiceAlert } from "@/hooks/useVoiceAlert";
 import { useLtpPolling } from "@/hooks/useLtpPolling";
 import { useDashboardStore } from "@/stores/dashboardStore";
-import type { MarketBrainState, WatchlistRow } from "@/lib/types";
+import type { MarketBrainState, WatchlistRow, BrainHistoryRow } from "@/lib/types";
 
 const DEV_BRAIN: MarketBrainState = {
   asof_ts: new Date().toISOString(),
@@ -58,13 +59,25 @@ const DEV_WATCHLIST: WatchlistRow[] = [
   { symbol: "ICICIBANK",exchange: "NSE", enabled: "true", setup: "PULLBACK", sector: "Banking", beta: 0.85, reason: "", score: 71, eligible_swing: false, eligible_intraday: true, wl_type: "intraday", liquidity_bucket: "A", vwap_bias: "ABOVE", phase2_eligible: true },
 ];
 
+const DEV_HISTORY: BrainHistoryRow[] = [
+  { asof_ts: new Date(Date.now() - 0).toISOString(),         regime: "TREND_UP",   sub_regime_v2: "STRONG_TREND",    risk_mode: "NORMAL",    participation: "STRONG",   market_confidence: 74, trend_score: 78, breadth_score: 65, volatility_stress_score: 22 },
+  { asof_ts: new Date(Date.now() - 3600000).toISOString(),   regime: "TREND_UP",   sub_regime_v2: "STRONG_TREND",    risk_mode: "NORMAL",    participation: "STRONG",   market_confidence: 71, trend_score: 75, breadth_score: 62, volatility_stress_score: 25 },
+  { asof_ts: new Date(Date.now() - 86400000).toISOString(),  regime: "RANGE",      sub_regime_v2: "RANGE_BOUND",     risk_mode: "DEFENSIVE", participation: "MODERATE", market_confidence: 52, trend_score: 45, breadth_score: 48, volatility_stress_score: 41 },
+  { asof_ts: new Date(Date.now() - 172800000).toISOString(), regime: "RANGE",      sub_regime_v2: "RANGE_BOUND",     risk_mode: "DEFENSIVE", participation: "WEAK",     market_confidence: 44, trend_score: 38, breadth_score: 41, volatility_stress_score: 55 },
+  { asof_ts: new Date(Date.now() - 259200000).toISOString(), regime: "CHOP",       sub_regime_v2: "CHOP",            risk_mode: "LOCKDOWN",  participation: "WEAK",     market_confidence: 30, trend_score: 22, breadth_score: 30, volatility_stress_score: 72 },
+  { asof_ts: new Date(Date.now() - 345600000).toISOString(), regime: "RECOVERY",   sub_regime_v2: "EARLY_RECOVERY",  risk_mode: "NORMAL",    participation: "MODERATE", market_confidence: 55, trend_score: 50, breadth_score: 52, volatility_stress_score: 35 },
+  { asof_ts: new Date(Date.now() - 432000000).toISOString(), regime: "TREND_UP",   sub_regime_v2: "MODERATE_TREND",  risk_mode: "NORMAL",    participation: "STRONG",   market_confidence: 68, trend_score: 70, breadth_score: 60, volatility_stress_score: 28 },
+];
+
 function DevDataSeeder() {
   const setMarketBrain = useDashboardStore((s) => s.setMarketBrain);
   const setWatchlist = useDashboardStore((s) => s.setWatchlist);
+  const setBrainHistory = useDashboardStore((s) => s.setBrainHistory);
   useEffect(() => {
     setMarketBrain(DEV_BRAIN);
     setWatchlist(DEV_WATCHLIST);
-  }, [setMarketBrain, setWatchlist]);
+    setBrainHistory(DEV_HISTORY);
+  }, [setMarketBrain, setWatchlist, setBrainHistory]);
   return null;
 }
 
@@ -74,6 +87,7 @@ function DevDataSeeder() {
  */
 function LiveFirestoreHooks() {
   useMarketBrain();
+  useMarketBrainHistory();
   useWatchlist();
   usePositions("OPEN");
   useVoiceAlert();

@@ -149,6 +149,19 @@ class MarketBrainService:
             self.bq.insert_market_brain(bq_row)
         if self.pubsub:
             self.pubsub.publish_regime_changed(bq_row)
+        # Write compact snapshot to Firestore history collection for dashboard timeline
+        history_doc = {
+            "asof_ts": state.asof_ts,
+            "regime": state.regime,
+            "sub_regime_v2": state.sub_regime_v2 or "",
+            "risk_mode": state.risk_mode,
+            "participation": state.participation,
+            "market_confidence": round(float(state.market_confidence or 0), 1),
+            "trend_score": round(float(state.trend_score or 0), 1),
+            "breadth_score": round(float(state.breadth_score or 0), 1),
+            "volatility_stress_score": round(float(state.volatility_stress_score or 0), 1),
+        }
+        self.state.set_json("market_brain_history", f"{d}_{t}", history_doc)
 
     def _build_rows(self, expected_lcd: str) -> list[dict[str, Any]]:
         rows = self.universe_service._watchlist_v2_candidates(expected_lcd)
