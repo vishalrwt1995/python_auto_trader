@@ -264,68 +264,80 @@ export default function MarketBrainPage() {
 
       {/* F. Regime History */}
       <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-        <h3 className="text-sm font-medium text-text-primary mb-3">Regime History</h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-text-primary">Regime History</h3>
+          <span className="text-[10px] text-text-secondary">Last {brainHistory.length} snapshots · newest first</span>
+        </div>
         {brainHistory.length === 0 ? (
           <div className="h-16 flex items-center justify-center text-text-secondary text-xs">
             No history yet — populates after first brain run
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-text-secondary border-b border-bg-tertiary">
-                  <th className="text-left pb-2 pr-4 font-medium">Time</th>
-                  <th className="text-left pb-2 pr-4 font-medium">Regime</th>
-                  <th className="text-left pb-2 pr-4 font-medium">Sub-Regime</th>
-                  <th className="text-left pb-2 pr-4 font-medium">Risk Mode</th>
-                  <th className="text-right pb-2 pr-4 font-medium">Conf</th>
-                  <th className="text-right pb-2 pr-4 font-medium">Trend</th>
-                  <th className="text-right pb-2 font-medium">Vol Stress</th>
-                </tr>
-              </thead>
-              <tbody>
-                {brainHistory.map((row, i) => (
-                  <tr key={row._id ?? i} className="border-b border-bg-tertiary/50 last:border-0">
-                    <td className="py-1.5 pr-4 font-mono text-text-secondary whitespace-nowrap">
-                      {formatTime(new Date(row.asof_ts))}
-                    </td>
-                    <td className="py-1.5 pr-4">
-                      <span
-                        className="font-semibold"
-                        style={{ color: REGIME_COLORS[row.regime] ?? "#6b7280" }}
-                      >
-                        {row.regime.replace("_", " ")}
-                      </span>
-                    </td>
-                    <td className="py-1.5 pr-4 text-text-secondary font-mono">
-                      {row.sub_regime_v2 || "—"}
-                    </td>
-                    <td className="py-1.5 pr-4">
-                      <span
-                        className="font-medium"
-                        style={{ color: RISK_MODE_COLORS[row.risk_mode] ?? "#6b7280" }}
-                      >
-                        {row.risk_mode}
-                      </span>
-                    </td>
-                    <td className="py-1.5 pr-4 text-right font-mono">
-                      {row.market_confidence?.toFixed(0) ?? "—"}
-                    </td>
-                    <td className="py-1.5 pr-4 text-right font-mono">
-                      {row.trend_score?.toFixed(0) ?? "—"}
-                    </td>
-                    <td className={cn(
-                      "py-1.5 text-right font-mono",
-                      row.volatility_stress_score >= 70 ? "text-loss"
-                        : row.volatility_stress_score >= 40 ? "text-neutral"
-                        : "text-profit",
-                    )}>
-                      {row.volatility_stress_score?.toFixed(0) ?? "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="space-y-1.5">
+            {brainHistory.map((row, i) => {
+              const regimeColor = REGIME_COLORS[row.regime] ?? "#6b7280";
+              const riskColor = RISK_MODE_COLORS[row.risk_mode] ?? "#6b7280";
+              const confPct = Math.min(100, Math.max(0, row.market_confidence ?? 0));
+              const trendPct = Math.min(100, Math.max(0, row.trend_score ?? 0));
+              const stressPct = Math.min(100, Math.max(0, row.volatility_stress_score ?? 0));
+              const stressColor = stressPct >= 70 ? "#ef4444" : stressPct >= 40 ? "#f59e0b" : "#22c55e";
+              return (
+                <div
+                  key={row._id ?? i}
+                  className="flex items-center gap-3 px-3 py-2 rounded-md bg-bg-primary border-l-2 text-xs"
+                  style={{ borderLeftColor: regimeColor }}
+                >
+                  {/* Time */}
+                  <span className="font-mono text-text-secondary w-10 shrink-0 text-[10px]">
+                    {formatTime(new Date(row.asof_ts))}
+                  </span>
+
+                  {/* Regime + sub */}
+                  <div className="w-28 shrink-0">
+                    <div className="font-semibold truncate" style={{ color: regimeColor }}>
+                      {row.regime.replace(/_/g, " ")}
+                    </div>
+                    <div className="text-[10px] text-text-secondary truncate">{row.sub_regime_v2 || "—"}</div>
+                  </div>
+
+                  {/* Risk mode badge */}
+                  <span
+                    className="text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0"
+                    style={{ color: riskColor, background: `${riskColor}20` }}
+                  >
+                    {row.risk_mode}
+                  </span>
+
+                  {/* Score bars */}
+                  <div className="flex-1 flex flex-col gap-0.5 min-w-0">
+                    {/* Confidence bar */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[9px] text-text-secondary w-7 shrink-0">Conf</span>
+                      <div className="flex-1 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                        <div className="h-full rounded-full" style={{ width: `${confPct}%`, background: regimeColor }} />
+                      </div>
+                      <span className="text-[10px] font-mono text-text-secondary w-5 text-right shrink-0">{confPct.toFixed(0)}</span>
+                    </div>
+                    {/* Trend bar */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[9px] text-text-secondary w-7 shrink-0">Trend</span>
+                      <div className="flex-1 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                        <div className="h-full rounded-full" style={{ width: `${trendPct}%`, background: "#3b82f6" }} />
+                      </div>
+                      <span className="text-[10px] font-mono text-text-secondary w-5 text-right shrink-0">{trendPct.toFixed(0)}</span>
+                    </div>
+                    {/* Vol Stress bar */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[9px] text-text-secondary w-7 shrink-0">Vol</span>
+                      <div className="flex-1 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                        <div className="h-full rounded-full" style={{ width: `${stressPct}%`, background: stressColor }} />
+                      </div>
+                      <span className="text-[10px] font-mono shrink-0 w-5 text-right" style={{ color: stressColor }}>{stressPct.toFixed(0)}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
