@@ -149,8 +149,9 @@ class MarketBrainService:
             self.bq.insert_market_brain(bq_row)
         if self.pubsub:
             self.pubsub.publish_regime_changed(bq_row)
-        # Write compact snapshot to Firestore history collection for dashboard timeline
-        history_doc = {
+        # Append snapshot to market_brain/history doc (rolling last-30 array)
+        # Lives inside the existing market_brain collection so Firestore rules cover it
+        new_snap = {
             "asof_ts": state.asof_ts,
             "regime": state.regime,
             "sub_regime_v2": state.sub_regime_v2 or "",
@@ -161,7 +162,11 @@ class MarketBrainService:
             "breadth_score": round(float(state.breadth_score or 0), 1),
             "volatility_stress_score": round(float(state.volatility_stress_score or 0), 1),
         }
-        self.state.set_json("market_brain_history", f"{d}_{t}", history_doc)
+        existing = self.state.get_json("market_brain", "history") or {}
+        snaps = existing.get("snapshots", [])
+        snaps.append(new_snap)
+        snaps = snaps[-30:]  # keep last 30
+        self.state.set_json("market_brain", "history", {"snapshots": snaps}, merge=False)
 
     def _build_rows(self, expected_lcd: str) -> list[dict[str, Any]]:
         rows = self.universe_service._watchlist_v2_candidates(expected_lcd)
