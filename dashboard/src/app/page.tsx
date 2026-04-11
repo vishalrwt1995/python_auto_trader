@@ -29,6 +29,7 @@ const NEXT_JOBS = [
   { name: "Score Cache 2", cron: "07:40" },
   { name: "Score Refresh", cron: "08:30" },
   { name: "Premarket Watchlist", cron: "09:00" },
+  { name: "Swing Recon", cron: "09:00" },
   { name: "Scanner Start", cron: "09:20" },
   { name: "Watchlist 09:30", cron: "09:30" },
   { name: "Watchlist 10:00", cron: "10:00" },
@@ -62,7 +63,7 @@ export default function CommandCenter() {
   }, [user]);
 
   const openPositions = useMemo(
-    () => positions.filter((p) => p.status === "OPEN"),
+    () => positions.filter((p) => p.status === "OPEN" || p.status === "PENDING_AMO_EXIT"),
     [positions],
   );
 
@@ -76,19 +77,36 @@ export default function CommandCenter() {
     }, 0);
   }, [openPositions, ltpCache]);
 
+  const ltpAvailable = useMemo(() =>
+    openPositions.some((p) => !!ltpCache[p.symbol]),
+  [openPositions, ltpCache]);
+
+  const [nowMins, setNowMins] = useState(() => {
+    const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+    return ist.getHours() * 60 + ist.getMinutes();
+  });
+
+  // Update "next job" every minute
+  useEffect(() => {
+    const id = setInterval(() => {
+      const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      setNowMins(ist.getHours() * 60 + ist.getMinutes());
+    }, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   const nextJob = useMemo(() => {
-    const now = new Date();
-    const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-    const nowMins = ist.getHours() * 60 + ist.getMinutes();
     for (const j of NEXT_JOBS) {
       const [h, m] = j.cron.split(":").map(Number);
       if (h * 60 + m > nowMins) return j;
     }
     return NEXT_JOBS[0];
-  }, []);
+  }, [nowMins]);
 
   const swingCount = watchlist.filter((r) => r.eligible_swing).length;
   const intradayCount = watchlist.filter((r) => r.eligible_intraday).length;
+  const swingPositions = openPositions.filter((p) => p.wl_type === "swing").length;
+  const intradayPositions = openPositions.filter((p) => p.wl_type !== "swing").length;
 
   const watchlistPieData = useMemo(() => {
     if (swingCount === 0 && intradayCount === 0) return [];
@@ -108,21 +126,29 @@ export default function CommandCenter() {
     <div className="space-y-6">
       {/* Regime Banner */}
       {brain && (
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 flex flex-wrap items-center gap-4">
-          <RegimeBadge regime={brain.regime as Regime} size="lg" />
-          <RiskModeBadge mode={brain.risk_mode as RiskMode} />
-          <span className="text-sm text-text-secondary">
-            {brain.participation}
-          </span>
-          <span className="text-sm text-text-secondary">
-            Phase: <strong>{brain.phase}</strong>
-          </span>
-          <div className="ml-auto flex items-center gap-2">
-            <LiveDot status={marketOpen ? "online" : "offline"} />
-            <span className="text-xs text-text-secondary">
-              {marketOpen ? "Market Open" : "Market Closed"}
-            </span>
+        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 space-y-2">
+          <div className="flex flex-wrap items-center gap-4">
+            <RegimeBadge regime={brain.regime as Regime} size="lg" />
+            <RiskModeBadge mode={brain.risk_mode as RiskMode} />
+            <span className="text-sm text-text-secondary">{brain.participation}</span>
+            <span className="text-sm text-text-secondary">Phase: <strong>{brain.phase}</strong></span>
+            <div className="ml-auto flex items-center gap-2">
+              <LiveDot status={marketOpen ? "online" : "offline"} />
+              <span className="text-xs text-text-secondary">
+                {marketOpen ? "Market Open" : "Market Closed"}
+              </span>
+            </div>
           </div>
+          {brain.allowed_strategies && brain.allowed_strategies.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-bg-tertiary">
+              <span className="text-[10px] text-text-secondary mr-1">Strategies:</span>
+              {brain.allowed_strategies.map((s) => (
+                <span key={s} className="px-1.5 py-0.5 bg-bg-tertiary rounded text-[10px] text-text-secondary">
+                  {s}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -131,8 +157,8 @@ export default function CommandCenter() {
         <PnLCard
           label="Today's P&L"
           value={todayPnl}
-          subLabel="Realized"
-          subValue={formatCurrency(summary?.total_pnl ?? 0)}
+          subLabel={openPositions.length > 0 && !ltpAvailable ? "⚠ LTP unavailable" : "Realized"}
+          subValue={openPositions.length > 0 && !ltpAvailable ? "" : formatCurrency(summary?.total_pnl ?? 0)}
         />
 
         <Link href="/positions" className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 hover:border-accent/50 transition-colors">
@@ -140,10 +166,14 @@ export default function CommandCenter() {
           <p className="text-2xl font-mono font-bold text-text-primary">
             {openPositions.length}
           </p>
-          {openPositions.length > 0 && (
-            <p className="text-xs text-text-secondary mt-1 truncate">
-              {openPositions.map((p) => p.symbol).join(", ")}
+          {openPositions.length > 0 ? (
+            <p className="text-xs text-text-secondary mt-1">
+              <span className="text-cyan-400">{intradayPositions} intraday</span>
+              {" · "}
+              <span className="text-indigo-400">{swingPositions} swing</span>
             </p>
+          ) : (
+            <p className="text-xs text-text-secondary mt-1">No open positions</p>
           )}
         </Link>
 
@@ -169,12 +199,16 @@ export default function CommandCenter() {
       </div>
 
       {/* Equity Curve */}
-      {equityData.length > 0 && (
-        <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-          <h3 className="text-sm font-medium mb-2">30-Day Equity Curve</h3>
+      <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
+        <h3 className="text-sm font-medium mb-2">30-Day Equity Curve</h3>
+        {equityData.length > 0 ? (
           <EquityCurve data={equityData} height={180} />
-        </div>
-      )}
+        ) : (
+          <div className="h-[180px] flex items-center justify-center text-sm text-text-secondary">
+            No trades yet — curve will appear after first closed position
+          </div>
+        )}
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Confidence Gauges */}
@@ -206,19 +240,19 @@ export default function CommandCenter() {
               <ResponsiveContainer width={120} height={120}>
                 <PieChart>
                   <Pie data={watchlistPieData} dataKey="value" cx="50%" cy="50%" innerRadius={30} outerRadius={50} strokeWidth={0}>
-                    <Cell fill="#3b82f6" />
-                    <Cell fill="#8b5cf6" />
+                    <Cell fill="#6366f1" />
+                    <Cell fill="#22d3ee" />
                   </Pie>
                 </PieChart>
               </ResponsiveContainer>
               <div className="space-y-2.5">
                 <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded bg-[#3b82f6]" />
-                  <span className="text-xs">Swing <span className="text-text-secondary">— {swingCount}</span></span>
+                  <span className="w-3 h-3 rounded bg-indigo-400" />
+                  <span className="text-xs text-indigo-400">Swing <span className="text-text-secondary">— {swingCount}</span></span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded bg-[#8b5cf6]" />
-                  <span className="text-xs">Intraday <span className="text-text-secondary">— {intradayCount}</span></span>
+                  <span className="w-3 h-3 rounded bg-cyan-400" />
+                  <span className="text-xs text-cyan-400">Intraday <span className="text-text-secondary">— {intradayCount}</span></span>
                 </div>
               </div>
             </div>
@@ -267,10 +301,10 @@ export default function CommandCenter() {
       {summary && summary.total_trades > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <MiniStat label="Win Rate" value={`${summary.win_rate}%`} />
-          <MiniStat label="Avg R:R" value={String(summary.avg_rr)} />
+          <MiniStat label="Avg R:R" value={summary.avg_rr?.toFixed(2) ?? "--"} />
           <MiniStat label="Total Trades" value={String(summary.total_trades)} />
           <MiniStat label="Biggest Win" value={formatCurrency(summary.biggest_win)} positive />
-          <MiniStat label="Biggest Loss" value={formatCurrency(summary.biggest_loss)} />
+          <MiniStat label="Biggest Loss" value={formatCurrency(summary.biggest_loss)} negative />
         </div>
       )}
 
@@ -300,15 +334,17 @@ function MiniStat({
   label,
   value,
   positive,
+  negative,
 }: {
   label: string;
   value: string;
   positive?: boolean;
+  negative?: boolean;
 }) {
   return (
     <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-3">
       <p className="text-[10px] text-text-secondary">{label}</p>
-      <p className={`font-mono text-sm mt-0.5 ${positive ? "text-profit" : ""}`}>
+      <p className={`font-mono text-sm mt-0.5 ${positive ? "text-profit" : negative ? "text-loss" : ""}`}>
         {value}
       </p>
     </div>
