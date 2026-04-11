@@ -1,19 +1,17 @@
 "use client";
 
-import { useState } from "react";
 import { useDashboardStore } from "@/stores/dashboardStore";
 import { RegimeBadge } from "@/components/widgets/RegimeBadge";
 import { RiskModeBadge } from "@/components/widgets/RiskModeBadge";
 import { ConfidenceGauge } from "@/components/widgets/ConfidenceGauge";
 import { RadarScore } from "@/components/charts/RadarScore";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
-import { cn } from "@/lib/utils";
+import { cn, formatTime } from "@/lib/utils";
 import type { Regime, RiskMode, Participation } from "@/lib/types";
 import { PARTICIPATION_COLORS } from "@/lib/constants";
 
 export default function MarketBrainPage() {
   const brain = useDashboardStore((s) => s.marketBrain);
-  const [historyRange, setHistoryRange] = useState<"7d" | "30d" | "90d">("7d");
 
   if (!brain) return <LoadingSkeleton lines={12} className="max-w-4xl" />;
 
@@ -115,10 +113,10 @@ export default function MarketBrainPage() {
         <h3 className="text-sm font-medium text-text-primary mb-3">Policy Biases</h3>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {([
-            ["Long Bias", brain.long_bias?.toFixed(2), "#22c55e"],
-            ["Short Bias", brain.short_bias?.toFixed(2), "#ef4444"],
-            ["Size Mult", `${brain.size_multiplier?.toFixed(2)}x`, "#f59e0b"],
-            ["Max Pos Mult", `${brain.max_positions_multiplier?.toFixed(2)}x`, "#8b5cf6"],
+            ["Long Bias", brain.long_bias?.toFixed(2) ?? "--", "#22c55e"],
+            ["Short Bias", brain.short_bias?.toFixed(2) ?? "--", "#ef4444"],
+            ["Size Mult", brain.size_multiplier != null ? `${brain.size_multiplier.toFixed(2)}x` : "--", "#f59e0b"],
+            ["Max Pos Mult", brain.max_positions_multiplier != null ? `${brain.max_positions_multiplier.toFixed(2)}x` : "--", "#8b5cf6"],
           ] as const).map(([label, value, color]) => (
             <div key={label} className="bg-bg-primary rounded-lg p-3 text-center">
               <p className="text-[10px] text-text-secondary uppercase tracking-wider">{label}</p>
@@ -146,33 +144,17 @@ export default function MarketBrainPage() {
         </div>
       )}
 
-      {/* F. Regime History */}
+      {/* F. Regime History — placeholder until BQ history endpoint is wired */}
       <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium text-text-primary">Regime History</h3>
-          <div className="flex gap-1">
-            {(["7d", "30d", "90d"] as const).map((r) => (
-              <button
-                key={r}
-                onClick={() => setHistoryRange(r)}
-                className={cn(
-                  "px-2 py-0.5 rounded text-xs transition-colors",
-                  historyRange === r
-                    ? "bg-accent text-white"
-                    : "bg-bg-tertiary text-text-secondary hover:text-text-primary",
-                )}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="h-48 flex items-center justify-center text-text-secondary text-xs">
-          Historical regime timeline will load from BigQuery endpoint
+        <h3 className="text-sm font-medium text-text-primary mb-3">Regime History</h3>
+        <div className="h-32 flex items-center justify-center text-text-secondary text-xs">
+          Historical regime timeline — coming soon
         </div>
       </div>
 
-      <p className="text-xs text-text-secondary text-right">As of: {brain.asof_ts ?? "—"}</p>
+      <p className="text-xs text-text-secondary text-right">
+        As of: {brain.asof_ts ? formatTime(new Date(brain.asof_ts)) : "—"}
+      </p>
     </div>
   );
 }
