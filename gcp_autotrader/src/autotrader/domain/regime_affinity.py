@@ -135,3 +135,43 @@ def regime_strategy_multiplier(
         mult = min(mult, 0.6)
 
     return max(_MIN_MULT, min(_MAX_MULT, round(mult, 2)))
+
+
+# Hard blocks: strategies that should never fire in certain regimes, regardless
+# of score. This is a stronger gate than the affinity multiplier — the multiplier
+# can still let a 90-score signal sneak through at 0.3× = 27, but hard-block
+# eliminates the strategy entirely so we don't waste a slot.
+_HARD_BLOCKS: dict[str, set[str]] = {
+    # CHOP: no trading at all — even mean-reversion is too noisy to be reliable.
+    # Better to sit out and preserve capital than force a random entry.
+    "CHOP": {
+        "BREAKOUT", "SHORT_BREAKDOWN", "PULLBACK", "SHORT_PULLBACK",
+        "MEAN_REVERSION", "VWAP_REVERSAL", "VWAP_TREND",
+        "OPEN_DRIVE", "PHASE1_MOMENTUM",
+    },
+    # RANGE: allow only mean-reversion family. Breakouts fake out, trend-follow
+    # strategies chop you up.
+    "RANGE": {
+        "BREAKOUT", "SHORT_BREAKDOWN",
+        "OPEN_DRIVE", "VWAP_TREND", "PHASE1_MOMENTUM",
+    },
+    # PANIC: only allow counter-trend oversold bounces (MR) or short-breakdown
+    # continuation. Everything else gets shredded.
+    "PANIC": {
+        "BREAKOUT", "PULLBACK",
+        "OPEN_DRIVE", "PHASE1_MOMENTUM",
+    },
+}
+
+
+def regime_hard_blocks_strategy(regime: str, strategy: str) -> bool:
+    """Return True if this (regime, strategy) combination should be hard-blocked.
+
+    Unlike the affinity multiplier (which softens scores), this is a binary
+    allow/deny gate applied as a policy block in the scanner.
+    """
+    regime_upper = str(regime or "").strip().upper()
+    strategy_upper = str(strategy or "").strip().upper()
+    if not strategy_upper or strategy_upper in ("AUTO", "DEFAULT"):
+        return False
+    return strategy_upper in _HARD_BLOCKS.get(regime_upper, set())

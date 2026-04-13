@@ -69,6 +69,9 @@ class WsMonitorService:
         self._exiting: set[str] = set()   # tags being exited — prevent double-exit
         self._last_refresh = 0.0
         self._stop_event = asyncio.Event()
+        # Current brain regime — refreshed alongside positions. Used to tighten
+        # stops when the market turns while we hold a trend position.
+        self._current_regime: str = ""
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -133,15 +136,29 @@ class WsMonitorService:
                     "atr": atr,
                     "entry_epoch": entry_epoch,
                     "wl_type": wl_type,
+                    # Entry regime (for regime-change exit logic)
+                    "entry_regime": str(pos.get("regime") or "").strip().upper(),
                     # Carry forward best_price from previous tick tracking
                     "best_price": old.get("best_price", entry_price),
                     "sl_moved": old.get("sl_moved", False),
+                    # Target-trailing flag: once we blow through target, we don't exit —
+                    # we switch to a tighter trail to let the winner run.
+                    "target_passed": old.get("target_passed", False),
+                    "regime_tightened": old.get("regime_tightened", False),
                 }
             self._positions = new_map
             self._last_refresh = time.time()
+            # Refresh current regime from Firestore market_brain state — cheap read,
+            # used by the tick handler to decide whether to tighten stops when the
+            # market turns against a live trend position.
+            try:
+                brain = self.state.get_market_brain()
+                self._current_regime = str(brain.get("regime") or "").strip().upper() if brain else ""
+            except Exception:
+                logger.debug("brain_state_refresh_failed", exc_info=True)
             # Re-subscribe if instrument set changed
             self.ws.set_instruments(list(new_map.keys()))
-            logger.info("positions_refreshed count=%d", len(new_map))
+            logger.info("positions_refreshed count=%d regime=%s", len(new_map), self._current_regime or "?")
         except Exception:
             logger.exception("position_refresh_failed")
 
@@ -156,7 +173,9 @@ class WsMonitorService:
 
     # Time-based exit: close position if it hasn't moved meaningfully after N minutes.
     # "Meaningful" = gained at least 0.3× ATR from entry.  Prevents dead capital.
-    _FLAT_TIMEOUT_SEC = 120 * 60  # 2 hours
+    # Reduced from 120 min → 45 min: stale positions often end up as small losers
+    # at EOD; freeing the slot earlier lets a better setup take over.
+    _FLAT_TIMEOUT_SEC = 45 * 60  # 45 minutes
 
     async def _on_quote(self, instrument_key: str, ltp: float, ts: float) -> None:
         pos = self._positions.get(instrument_key)
@@ -200,9 +219,48 @@ class WsMonitorService:
                 sl = pos["sl_price"]
                 logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
 
-        # ── Trailing stop: once past breakeven, trail SL at N× ATR from best ──
+        # ── Target-passed trailing: when ltp crosses target, don't exit — switch
+        # to a tighter trail (1.2× ATR) from best so a strong winner keeps running.
+        # Only the initial target is abandoned; SL still protects downside.
+        if not pos.get("target_passed") and target > 0:
+            if (side == "BUY" and ltp >= target) or (side == "SELL" and ltp <= target):
+                pos["target_passed"] = True
+                pos["sl_moved"] = True   # activate trailing immediately
+                logger.info("target_passed_trailing tag=%s ltp=%.2f target=%.2f", tag, ltp, target)
+
+        _active_trail_mult = 1.2 if pos.get("target_passed") else _trail_atr_mult
+
+        # ── Regime-change tighten: if we entered in TREND_UP/RECOVERY but the
+        # market has turned to CHOP/PANIC, tighten SL to 0.8× ATR from current
+        # LTP immediately. One-shot: only applied once per position.
+        cur_regime = getattr(self, "_current_regime", "")
+        entry_regime = pos.get("entry_regime", "")
+        if (
+            not pos.get("regime_tightened")
+            and atr > 0
+            and entry_regime in ("TREND_UP", "RECOVERY")
+            and cur_regime in ("CHOP", "PANIC", "TREND_DOWN")
+        ):
+            tighten_dist = atr * 0.8
+            if side == "BUY":
+                new_sl = round(ltp - tighten_dist, 2)
+                if new_sl > sl:
+                    pos["sl_price"] = new_sl
+                    sl = new_sl
+            else:
+                new_sl = round(ltp + tighten_dist, 2)
+                if new_sl < sl or sl == 0:
+                    pos["sl_price"] = new_sl
+                    sl = new_sl
+            pos["regime_tightened"] = True
+            logger.info(
+                "regime_change_tighten tag=%s entry=%s now=%s new_sl=%.2f ltp=%.2f",
+                tag, entry_regime, cur_regime, sl, ltp,
+            )
+
+        # ── Trailing stop: once past breakeven (or target), trail SL at N× ATR from best ──
         if pos.get("sl_moved") and atr > 0:
-            trail_dist = atr * _trail_atr_mult
+            trail_dist = atr * _active_trail_mult
             if side == "BUY":
                 new_sl = round(best - trail_dist, 2)
                 if new_sl > sl:
@@ -214,17 +272,18 @@ class WsMonitorService:
                     pos["sl_price"] = new_sl
                     sl = new_sl
 
-        # ── Standard SL / Target check ────────────────────────────────
+        # ── SL check only — target is absorbed into trailing once passed ──
         exit_reason: str | None = None
         if side == "BUY":
             if sl > 0 and ltp <= sl:
                 exit_reason = "SL_HIT"
-            elif target > 0 and ltp >= target:
+            elif not pos.get("target_passed") and target > 0 and ltp >= target:
+                # Legacy path — should be rare now since target-passed flag fires first.
                 exit_reason = "TARGET_HIT"
         else:  # SELL
             if sl > 0 and ltp >= sl:
                 exit_reason = "SL_HIT"
-            elif target > 0 and ltp <= target:
+            elif not pos.get("target_passed") and target > 0 and ltp <= target:
                 exit_reason = "TARGET_HIT"
 
         # ── Time-based exit: close if flat after 2 hours (intraday only) ──

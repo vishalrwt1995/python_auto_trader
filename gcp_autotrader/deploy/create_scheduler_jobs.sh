@@ -76,9 +76,18 @@ create_job "autotrader-watchlist-v2-15m-1300" "0 13 * * 1-5" "$WATCHLIST_V2_URI"
 create_job "autotrader-watchlist-v2-final-1445" "45 14 * * 1-5" "$WATCHLIST_V2_URI"
 
 # Live scanner loop (strict market hours only: 09:20..15:30 IST, weekdays).
+# Cadence tightened 5-min → 3-min to reduce dead time between scans so fast
+# intraday setups (breakouts, VWAP reclaims) aren't missed. Distributed lock
+# inside the service serialises overlapping runs if a scan takes > 3 min.
 SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=false"
-create_job "autotrader-scan-market-5m" "20-55/5 9-14 * * 1-5" "$SCAN_URI"
-create_job "autotrader-scan-market-1530" "0-30/5 15 * * 1-5" "$SCAN_URI"
+create_job "autotrader-scan-market-3m" "21-57/3 9-14 * * 1-5" "$SCAN_URI"
+create_job "autotrader-scan-market-1530" "0-27/3 15 * * 1-5" "$SCAN_URI"
+
+# Clean up the old 5-min schedule if still present
+gcloud scheduler jobs delete "autotrader-scan-market-5m" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
 
 # Full 1D backfill remains available via the same endpoint for manual/on-demand use.
 

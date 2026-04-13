@@ -13,7 +13,7 @@ from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.daily_bias import compute_daily_bias
-from autotrader.domain.regime_affinity import regime_strategy_multiplier
+from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regime_strategy_multiplier
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
 from autotrader.domain.scoring import check_strategy_entry, check_swing_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
@@ -328,6 +328,11 @@ class TradingService:
                 self.settings.strategy.max_positions,
                 brain_state,
             )
+            # Regime-adaptive cap: on strong trend days 3 positions is too few —
+            # we turn away qualified signals after the 3rd hit. Raise cap to 5
+            # only in clearly-favourable regimes so we don't over-expose in chop.
+            if brain_state and brain_state.regime in ("TREND_UP", "RECOVERY"):
+                max_signals_allowed = max(max_signals_allowed, 5)
 
             # ── Daily PnL circuit breakers ────────────────────────────────
             # Enforce max_daily_loss and daily_profit_target before scanning.
@@ -520,7 +525,7 @@ class TradingService:
                     })
                     continue
                 direction = determine_direction(ind, regime)
-                meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy, daily_bias=_daily_bias)
+                meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy, daily_bias=_daily_bias, setup=w.strategy)
                 # Apply regime-strategy affinity multiplier
                 _affinity_mult = regime_strategy_multiplier(
                     brain_state.regime if brain_state else "RANGE",
@@ -569,6 +574,10 @@ class TradingService:
                     "DEFENSIVE":  58,   # ≈ raw 72 after ×0.82×0.88 adjustment
                     "LOCKDOWN":   45,   # ≈ raw 85 after ×0.60×0.88 adjustment
                 }
+                # Per-regime override: RANGE sessions naturally produce lower scores
+                # (we already penalise trend strategies there). A flat 72 threshold
+                # locks out MEAN_REVERSION that should qualify at 65-70.
+                _REGIME_MIN_SCORE = {"RANGE": 65}
                 if _is_swing:
                     # Swing: higher bar, not risk-mode-adjusted (swing should only fire on strong signals)
                     dynamic_min_score = self.settings.strategy.swing_min_signal_score
@@ -577,6 +586,12 @@ class TradingService:
                         brain_state.risk_mode if brain_state else "NORMAL",
                         self.settings.strategy.min_signal_score,
                     )
+                    # Regime override (takes precedence when lower than risk-mode
+                    # threshold) — e.g. RANGE=65 beats NORMAL=72 so mean-reversion
+                    # can still qualify.
+                    _regime_min = _REGIME_MIN_SCORE.get(_brain_regime)
+                    if _regime_min is not None and _regime_min < dynamic_min_score:
+                        dynamic_min_score = _regime_min
 
                 setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
                 liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
@@ -650,10 +665,20 @@ class TradingService:
                     policy_block_reason = "policy_short_disabled"
                 elif market_policy is not None and not self._strategy_allowed(w.strategy, market_policy.allowed_strategies):
                     policy_block_reason = "policy_strategy_blocked"
+                elif regime_hard_blocks_strategy(_brain_regime, w.strategy):
+                    # Regime playbook: hard-block mismatched strategies (e.g. BREAKOUT in RANGE,
+                    # any entry in CHOP). Stronger than the affinity multiplier — prevents
+                    # wasting a position slot on a setup that can't work in this regime.
+                    policy_block_reason = "regime_strategy_hard_block"
                 elif _is_swing and _open_swing_count >= self.settings.strategy.swing_max_positions:
                     policy_block_reason = "swing_max_positions_reached"
                 elif not _is_swing and qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
+                # Staleness gate: if live LTP has moved > 2% away from the computed
+                # entry price since indicators were calculated, the setup is stale —
+                # we'd be chasing. Better to wait for the next scan cycle.
+                elif _live > 0 and pos.entry_price > 0 and abs(_live - pos.entry_price) / pos.entry_price > 0.02:
+                    policy_block_reason = "stale_signal_price_moved"
                 # Live VWAP guard: if price drifted to wrong side of VWAP since candle close, reject entry.
                 # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
                 elif direction == "BUY" and _live > 0 and ltp < ind.vwap and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):

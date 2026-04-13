@@ -57,6 +57,7 @@ def score_signal(
     cfg: StrategySettings,
     *,
     daily_bias: DailyBias | None = None,
+    setup: str = "",
 ) -> SignalScore:
     bd = ScoreBreakdown()
     if direction == "HOLD" or regime.regime == "AVOID":
@@ -188,9 +189,16 @@ def score_signal(
     score += bd.alignment
 
     # Penalties
-    if regime.vix > 18:
+    # VIX tiering: Indian VIX baseline is 14-16, so >18 triggers too easily.
+    # Graduated penalty preserves signal quality in mildly elevated vol.
+    if regime.vix > 22:
         bd.penalty -= 10
-    if regime.regime == "RANGE":
+    elif regime.vix > 18:
+        bd.penalty -= 5
+    # RANGE penalty exempts MEAN_REVERSION/VWAP_REVERSAL — these strategies
+    # actually THRIVE in range-bound markets, so penalising them is backwards.
+    _setup_upper = str(setup or "").strip().upper()
+    if regime.regime == "RANGE" and _setup_upper not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
         bd.penalty -= 8
     if ind.adx < 15 and regime.regime != "RANGE":
         bd.penalty -= 5
