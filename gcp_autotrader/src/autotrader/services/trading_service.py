@@ -65,7 +65,7 @@ class TradingService:
                         exchange=str(r.get("exchange", "NSE") or "NSE").upper(),
                         segment="CASH",
                         product=product,
-                        strategy=str(r.get("setup", r.get("strategy", "AUTO")) or "AUTO"),
+                        strategy=str(r.get("setuplabel", r.get("setupLabel", r.get("setup", r.get("strategy", "AUTO")))) or "AUTO"),
                         sector=str(r.get("macrosector", r.get("sector", "UNKNOWN")) or "UNKNOWN"),
                         beta=float(r.get("beta", 1.0) or 1.0),
                         enabled=True,
