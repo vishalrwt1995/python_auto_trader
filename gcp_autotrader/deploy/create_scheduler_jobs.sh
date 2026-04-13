@@ -252,10 +252,20 @@ gcloud scheduler jobs delete "autotrader-scan-market-1535" \
   --quiet || true
 
 # EOD position reconciliation — closes all open positions that bracket orders haven't auto-closed.
-# Three passes at 15:10, 15:20, 15:30 to catch any stragglers before market close (15:30 IST).
-create_job "autotrader-eod-recon-1510" "10 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
-create_job "autotrader-eod-recon-1520" "20 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
-create_job "autotrader-eod-recon-1530" "30 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile" "{}" "10m"
+# Three passes near close: 15:25 (soft, retry on quote fail), 15:27 (soft), 15:29 (force_close).
+# Earlier passes preserve real LTP exits; only the final pass falls back to entry price if quote
+# is unavailable. Old jobs at 15:10/15:20/15:30 are deleted below to avoid double-firing.
+create_job "autotrader-eod-recon-1525" "25 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile?force_close=false" "{}" "5m"
+create_job "autotrader-eod-recon-1527" "27 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile?force_close=false" "{}" "3m"
+create_job "autotrader-eod-recon-1529" "29 15 * * 1-5" "$SERVICE_URL/jobs/eod-position-reconcile?force_close=true" "{}" "3m"
+
+# Cleanup previous EOD recon schedule
+for OLD_EOD in autotrader-eod-recon-1510 autotrader-eod-recon-1520 autotrader-eod-recon-1530; do
+  gcloud scheduler jobs delete "$OLD_EOD" \
+    --project "$PROJECT_ID" \
+    --location "$REGION" \
+    --quiet || true
+done
 
 # Swing position reconciliation — re-evaluates open CNC/swing positions premarket.
 # Checks: daily SL breach, target hit, SuperTrend flip, max hold days; ratchets trailing SL.

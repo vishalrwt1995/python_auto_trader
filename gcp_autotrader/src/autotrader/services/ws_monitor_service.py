@@ -10,7 +10,7 @@ Lifecycle:
   4. On each tick:
      - ltp ≤ sl_price  → SL_HIT exit
      - ltp ≥ target    → TARGET_HIT exit
-     - time ≥ 15:10    → EOD_CLOSE exit (force-close remaining)
+     - time ≥ 15:25    → EOD_CLOSE exit (force-close remaining)
   5. On disconnect: reconnect with exponential back-off.
   6. At 15:30: close WebSocket, stop service.
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # IST offset seconds
 _IST_OFFSET = 5 * 3600 + 30 * 60
 
-_EOD_CLOSE_MINUTE = 15 * 60 + 10   # 15:10 IST in minutes-since-midnight
+_EOD_CLOSE_MINUTE = 15 * 60 + 25   # 15:25 IST — let positions run closer to close
 _HARD_STOP_MINUTE = 15 * 60 + 30   # 15:30 IST
 
 

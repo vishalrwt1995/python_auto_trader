@@ -1712,16 +1712,16 @@ def run_scan_once(
 
 @app.post("/jobs/eod-position-reconcile")
 def run_eod_position_reconcile(
+    force_close: bool = False,
     x_job_token: str | None = Header(default=None),
     x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
     x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
 ) -> dict[str, Any]:
     """Close all open positions at EOD via Upstox order status check + forced market exit.
 
-    Called at 15:10, 15:20, 15:30 IST by Cloud Scheduler jobs:
-      autotrader-eod-recon-1510
-      autotrader-eod-recon-1520
-      autotrader-eod-recon-1530
+    Cloud Scheduler runs three passes (15:25, 15:27, 15:29 IST). Only the
+    final pass sets force_close=true so earlier passes can retry on transient
+    quote failures instead of booking ₹0 exits at entry price.
     """
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
@@ -1729,8 +1729,8 @@ def run_eod_position_reconcile(
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:
-        sink.action("OrderService", "eod_position_reconcile", "START", "", sched_ctx)
-        out = c.order_service().reconcile_open_positions()
+        sink.action("OrderService", "eod_position_reconcile", "START", "", {**sched_ctx, "force_close": force_close})
+        out = c.order_service().reconcile_open_positions(force_close=force_close)
         sink.action(
             "OrderService",
             "eod_position_reconcile",

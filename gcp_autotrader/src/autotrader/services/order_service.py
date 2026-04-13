@@ -13,7 +13,7 @@ from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.settings import AppSettings
-from autotrader.time_utils import now_ist_str, now_utc_iso, today_ist
+from autotrader.time_utils import now_ist_str, now_utc_iso, parse_any_ts, today_ist
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,16 @@ class OrderService:
         multiplier = 1 if side == "BUY" else -1
         pnl = round((exit_price - entry_price) * qty * multiplier, 2)
         exit_ts = now_ist_str()
+        # Compute real hold duration from entry_ts → exit_ts (both IST strings).
+        entry_ts_str = str(pos.get("entry_ts") or "")
+        hold_minutes = 0
+        try:
+            entry_dt = parse_any_ts(entry_ts_str)
+            exit_dt = parse_any_ts(exit_ts)
+            if entry_dt and exit_dt:
+                hold_minutes = max(0, int((exit_dt - entry_dt).total_seconds() // 60))
+        except Exception:
+            hold_minutes = 0
         self.state.update_position(
             position_tag,
             {
@@ -200,6 +210,7 @@ class OrderService:
                 "exit_reason": exit_reason,
                 "exit_ts": exit_ts,
                 "pnl": pnl,
+                "hold_minutes": hold_minutes,
             },
         )
         # Publish position_closed event
@@ -223,7 +234,7 @@ class OrderService:
             "strategy": str(pos.get("strategy") or ""),
             "entry_ts": str(pos.get("entry_ts") or ""),
             "exit_ts": exit_ts,
-            "hold_minutes": 0,
+            "hold_minutes": hold_minutes,
             "regime": str(pos.get("regime") or ""),
             "risk_mode": str(pos.get("risk_mode") or ""),
             "market_confidence": 0.0,
@@ -667,11 +678,13 @@ class OrderService:
     # Reconcile open positions at EOD
     # ------------------------------------------------------------------ #
 
-    def reconcile_open_positions(self) -> dict[str, Any]:
+    def reconcile_open_positions(self, force_close: bool = False) -> dict[str, Any]:
         """Check all OPEN positions against Upstox order status and close settled ones.
 
-        Called at 15:10, 15:20, 15:30 IST by the eod-position-reconcile scheduler job.
-        Paper-trade positions are closed at current LTP.
+        Called by the eod-position-reconcile scheduler job. Paper positions
+        close at live LTP. If LTP is unavailable and force_close=False, skip
+        the position and let the next pass try again. The final pass passes
+        force_close=True so we don't leave positions open past the close.
         """
         open_positions = self.state.list_open_positions()
         checked = closed = remaining = 0
@@ -698,15 +711,32 @@ class OrderService:
             paper = not order_id or str(order_id).startswith("AT-")
 
             if paper or self.settings.runtime.paper_trade:
-                # Paper close at LTP
+                # Paper close at LTP — never silently fall back to entry_price
+                # because that would always book ₹0 and corrupt P&L stats.
                 instrument_key = str(pos.get("instrument_key") or symbol)
+                ltp = 0.0
                 try:
-                    ltp = self.upstox.get_quote(instrument_key).ltp if instrument_key else 0.0
+                    if instrument_key:
+                        ltp = float(self.upstox.get_quote(instrument_key).ltp or 0.0)
                 except Exception:
+                    logger.warning("eod_paper_quote_failed tag=%s symbol=%s ik=%s", tag, symbol, instrument_key, exc_info=True)
                     ltp = 0.0
-                exit_price = ltp or float(pos.get("entry_price") or 0)
+                if ltp <= 0:
+                    if not force_close:
+                        # Skip — next recon pass (or final pass) will retry.
+                        logger.warning("eod_paper_skip_no_ltp tag=%s symbol=%s — will retry on next pass", tag, symbol)
+                        remaining += 1
+                        continue
+                    # Final pass: must close. Mark with distinct reason so it's
+                    # excluded from real P&L stats downstream.
+                    exit_price = float(pos.get("entry_price") or 0)
+                    self._close_position_firestore(
+                        position_tag=tag, exit_price=exit_price, exit_reason="EOD_CLOSE_NO_QUOTE"
+                    )
+                    closed += 1
+                    continue
                 self._close_position_firestore(
-                    position_tag=tag, exit_price=exit_price, exit_reason="EOD_CLOSE"
+                    position_tag=tag, exit_price=ltp, exit_reason="EOD_CLOSE"
                 )
                 closed += 1
                 continue
