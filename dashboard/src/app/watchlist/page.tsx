@@ -171,7 +171,8 @@ export default function WatchlistPage() {
       },
       {
         key: "score",
-        label: "Score",
+        label: "Daily Score",
+        tooltip: "Universe quality score from daily candles (EMA stack, RSI, MACD, volume). Ranks candidates before intraday scanning — not the live entry score.",
         sortable: true,
         sortValue: (r) => r.score ?? 0,
         className: "text-right",
@@ -313,7 +314,7 @@ export default function WatchlistPage() {
         <div className="bg-bg-secondary rounded-lg border-t-[3px] border-t-[#22c55e] border-x border-b border-bg-tertiary p-3 shadow-md shadow-black/20 flex items-start justify-between">
           <div>
             <p className="text-xl font-mono font-bold text-profit">{avgScore.toFixed(0)}</p>
-            <p className="text-[10px] text-text-secondary mt-0.5">Avg Score</p>
+            <p className="text-[10px] text-text-secondary mt-0.5">Avg Daily</p>
           </div>
           <Star className="h-4 w-4 text-profit mt-0.5" />
         </div>

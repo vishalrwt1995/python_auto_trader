@@ -328,7 +328,8 @@ export default function SignalsPage() {
       },
       {
         key: "score",
-        label: "Score",
+        label: "Signal Score",
+        tooltip: "Live intraday entry score (0–100). Computed from 5m candles with regime penalties (VIX, RANGE, daily trend alignment). Must exceed threshold (~72 in NORMAL) to qualify. Hover a row for breakdown.",
         sortable: true,
         sortValue: (r) => r.score,
         className: "text-right",
