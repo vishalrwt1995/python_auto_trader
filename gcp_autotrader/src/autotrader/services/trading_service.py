@@ -183,23 +183,35 @@ class TradingService:
         cached = self.gcs.read_candles(path)
         need = 80
 
-        # Daily candle path for swing candidates
+        # Daily candle path for swing candidates.
+        # Use a generous calendar-day lookback so we clear the 80-trading-day
+        # floor even after weekends/holidays. Then merge API with cache and
+        # fall back to cache if the API leg returns short.
         tf = str(timeframe or "").strip().lower()
-        if instrument_key and tf in {"1d", "day", "daily"}:
-            try:
-                end = now_ist()
-                start = end - timedelta(days=lookback_days)
-                api = self.upstox.get_historical_candles_v3_days(
-                    instrument_key,
-                    to_date=end.strftime("%Y-%m-%d"),
-                    from_date=start.strftime("%Y-%m-%d"),
+        if tf in {"1d", "day", "daily"}:
+            # 180 calendar days ≈ 125 trading days — safely above need=80 even
+            # with a long holiday stretch.
+            lookback = max(lookback_days, 180)
+            merged: list[list[Any]] = list(cached)
+            if instrument_key:
+                try:
+                    end = now_ist()
+                    start = end - timedelta(days=lookback)
+                    api = self.upstox.get_historical_candles_v3_days(
+                        instrument_key,
+                        to_date=end.strftime("%Y-%m-%d"),
+                        from_date=start.strftime("%Y-%m-%d"),
+                    )
+                    if api:
+                        merged = self.gcs.merge_candles(path, api)
+                except Exception:
+                    logger.warning("swing_daily_candle_fetch_failed symbol=%s", symbol, exc_info=True)
+            if len(merged) < need:
+                logger.warning(
+                    "swing_daily_candles_insufficient symbol=%s cached=%d merged=%d ik=%s",
+                    symbol, len(cached), len(merged), bool(instrument_key),
                 )
-                if api:
-                    merged = self.gcs.merge_candles(path, api)
-                    return merged[-max(need, 120):]
-            except Exception:
-                logger.warning("swing_daily_candle_fetch_failed symbol=%s", symbol, exc_info=True)
-            return cached[-max(need, 120):]
+            return merged[-max(need, 120):]
 
         # Upstox-first path for scanner runtime candles (current intraday session).
         # We always attempt this first to keep scanner aligned with the active data provider.
@@ -252,8 +264,21 @@ class TradingService:
             return merged[-max(need, 120):]
         return cached[-max(need, 120):]
 
-    def run_scan_once(self, allow_live_orders: bool = False, force: bool = False) -> dict[str, Any]:
-        self.log_sink.action("TradingService", "run_scan_once", "START")
+    def run_scan_once(
+        self,
+        allow_live_orders: bool = False,
+        force: bool = False,
+        wl_type_filter: str = "all",
+    ) -> dict[str, Any]:
+        # wl_type_filter: "intraday" | "swing" | "all". When set to "intraday" or
+        # "swing" the scanner only evaluates watchlist rows of that type. This
+        # mirrors the production split — the 3-min cron runs with
+        # wl_type=intraday, while the daily 09:20 cron runs with wl_type=swing.
+        # "all" preserves legacy behaviour for manual invocations.
+        wl_filter = str(wl_type_filter or "all").strip().lower()
+        if wl_filter not in {"intraday", "swing", "all"}:
+            wl_filter = "all"
+        self.log_sink.action("TradingService", "run_scan_once", "START", "", {"wlFilter": wl_filter})
         lease = self.state.try_acquire_lock("run_scan_once", ttl_seconds=90)
         if lease is None:
             self.log_sink.action("TradingService", "run_scan_once", "SKIP", "lock busy")
@@ -373,6 +398,10 @@ class TradingService:
 
             # Read watchlist: Firestore is primary, Sheets is fallback
             watchlist = self._read_watchlist_with_fallback()
+            if wl_filter in {"intraday", "swing"}:
+                before = len(watchlist)
+                watchlist = [w for w in watchlist if getattr(w, "wl_type", "intraday") == wl_filter]
+                logger.info("watchlist_filter wl_type=%s before=%d after=%d", wl_filter, before, len(watchlist))
             subset, scan_meta = self._slice_watchlist_for_scan(watchlist)
             if not subset:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")

@@ -1675,6 +1675,7 @@ def run_scan_once(
     x_job_token: str | None = Header(default=None),
     force: bool = False,
     allow_live_orders: bool = False,
+    wl_type: str = "all",
     x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
     x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
 ) -> dict[str, Any]:
@@ -1684,8 +1685,12 @@ def run_scan_once(
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
     started_perf = time.perf_counter()
     try:
-        sink.action("Trading", "scan_once", "START", "", {**sched_ctx, "force": force, "allowLiveOrders": allow_live_orders})
-        out = c.trading_service().run_scan_once(allow_live_orders=allow_live_orders, force=force)
+        sink.action("Trading", "scan_once", "START", "", {**sched_ctx, "force": force, "allowLiveOrders": allow_live_orders, "wlType": wl_type})
+        out = c.trading_service().run_scan_once(
+            allow_live_orders=allow_live_orders,
+            force=force,
+            wl_type_filter=wl_type,
+        )
         sink.action("Trading", "scan_once", "DONE", "scan completed", {**sched_ctx, **_duration_ctx(started_perf), **(out if isinstance(out, dict) else {"result": str(out)})})
         sink.flush_all()
         return out
@@ -1695,7 +1700,7 @@ def run_scan_once(
             "scan_once",
             "ERROR",
             f"{type(e).__name__}: {e}",
-            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "force": force, "allowLiveOrders": allow_live_orders},
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__, "force": force, "allowLiveOrders": allow_live_orders, "wlType": wl_type},
         )
         sink.flush_all()
         raise

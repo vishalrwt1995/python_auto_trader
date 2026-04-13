@@ -75,19 +75,28 @@ create_job "autotrader-watchlist-v2-15m-11to12" "0,15,30,45 11-12 * * 1-5" "$WAT
 create_job "autotrader-watchlist-v2-15m-1300" "0 13 * * 1-5" "$WATCHLIST_V2_URI"
 create_job "autotrader-watchlist-v2-final-1445" "45 14 * * 1-5" "$WATCHLIST_V2_URI"
 
-# Live scanner loop (strict market hours only: 09:20..15:30 IST, weekdays).
-# Cadence tightened 5-min → 3-min to reduce dead time between scans so fast
-# intraday setups (breakouts, VWAP reclaims) aren't missed. Distributed lock
-# inside the service serialises overlapping runs if a scan takes > 3 min.
-SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=false"
-create_job "autotrader-scan-market-3m" "21-57/3 9-14 * * 1-5" "$SCAN_URI"
-create_job "autotrader-scan-market-1530" "0-27/3 15 * * 1-5" "$SCAN_URI"
+# Live scanner loops — SPLIT by wl_type so swing (CNC) and intraday (MIS) use
+# the correct cadence and timeframe. Intraday setups turn over every few
+# minutes; swing setups only matter once/day after the 09:20 watchlist refresh.
+# Distributed lock inside the service serialises overlapping runs.
+INTRADAY_SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=false&wl_type=intraday"
+SWING_SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=false&wl_type=swing"
 
-# Clean up the old 5-min schedule if still present
-gcloud scheduler jobs delete "autotrader-scan-market-5m" \
-  --project "$PROJECT_ID" \
-  --location "$REGION" \
-  --quiet || true
+# Intraday scanner — every 3 min during market hours (09:21–15:27 IST).
+create_job "autotrader-scan-intraday-3m" "21-57/3 9-14 * * 1-5" "$INTRADAY_SCAN_URI"
+create_job "autotrader-scan-intraday-1530" "0-27/3 15 * * 1-5" "$INTRADAY_SCAN_URI"
+
+# Swing scanner — fires once at 09:22 IST after watchlist v2 refresh lands.
+# No need to re-scan during the day: swing setups are based on daily candles.
+create_job "autotrader-scan-swing-0922" "22 9 * * 1-5" "$SWING_SCAN_URI" "{}" "10m"
+
+# Clean up the old combined schedule if still present
+for OLD_JOB in autotrader-scan-market-5m autotrader-scan-market-3m autotrader-scan-market-1530; do
+  gcloud scheduler jobs delete "$OLD_JOB" \
+    --project "$PROJECT_ID" \
+    --location "$REGION" \
+    --quiet || true
+done
 
 # Full 1D backfill remains available via the same endpoint for manual/on-demand use.
 

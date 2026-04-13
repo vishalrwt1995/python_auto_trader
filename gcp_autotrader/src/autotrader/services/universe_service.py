@@ -4745,7 +4745,26 @@ class UniverseService:
                 final_score = (0.45 * mean_rev) + (0.30 * breakout) + (0.25 * pullback)
 
             setup_scores = {"BREAKOUT": breakout, "PULLBACK": pullback, "MEAN_REVERSION": mean_rev}
-            setup_label = max(setup_scores.items(), key=lambda kv: kv[1])[0]
+            # Regime-aware tie-break. When the top two scores are within 10%,
+            # prefer the regime-aligned label so the setup actually matches the
+            # market posture. Prior behaviour used dict insertion order, which
+            # silently biased towards BREAKOUT in RISK_OFF/RANGE.
+            _regime_preference = {
+                "TREND": ("BREAKOUT", "PULLBACK"),
+                "RANGE": ("MEAN_REVERSION", "PULLBACK"),
+                "RISK_OFF": ("MEAN_REVERSION", "PULLBACK"),
+            }.get(regime_v2["regimeDaily"], ("MEAN_REVERSION", "BREAKOUT"))
+            _sorted = sorted(setup_scores.items(), key=lambda kv: kv[1], reverse=True)
+            _top_label, _top_score = _sorted[0]
+            _second_label, _second_score = _sorted[1]
+            if _top_score > 0 and (_top_score - _second_score) / _top_score < 0.10:
+                # Within 10% — apply regime tie-break.
+                if _top_label not in _regime_preference and _second_label in _regime_preference:
+                    setup_label = _second_label
+                else:
+                    setup_label = _top_label
+            else:
+                setup_label = _top_label
             trade_direction = "BUY"
 
             # Fix 3: short-side scoring in bearish regimes (PANIC / TREND_DOWN)
