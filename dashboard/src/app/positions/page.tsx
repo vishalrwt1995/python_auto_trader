@@ -131,7 +131,7 @@ export default function PositionsPage() {
         className: "text-right font-mono",
         render: (r) => {
           const ltp = ltpCache[r.symbol];
-          if (!ltp) return <span>—</span>;
+          if (!ltp || !r.entry_price) return <span>—</span>;
           const changePct = ((ltp - r.entry_price) / r.entry_price) * 100;
           return (
             <div className="text-right">
@@ -213,6 +213,7 @@ export default function PositionsPage() {
         label: "R:R",
         render: (r) => {
           const ltp = ltpCache[r.symbol] ?? r.entry_price;
+          if (r.target == null || r.sl_price == null) return <span>—</span>;
           const totalRange = Math.abs(r.target - r.sl_price);
           if (totalRange === 0) return <span>—</span>;
           const progress =

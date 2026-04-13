@@ -120,10 +120,10 @@ export default function WatchlistPage() {
   const swingCount = watchlist.filter((r) => r.eligible_swing).length;
   const intradayCount = watchlist.filter((r) => r.eligible_intraday).length;
   const phase2Count = watchlist.filter((r) => r.phase2_eligible).length;
-  const avgScore =
-    watchlist.length > 0
-      ? watchlist.reduce((s, r) => s + (r.score ?? 0), 0) / watchlist.length
-      : 0;
+  const avgScore = (() => {
+    const scores = watchlist.map((r) => r.score).filter((s): s is number => s != null);
+    return scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+  })();
 
   const columns: Column<WatchlistRow>[] = useMemo(
     () => [

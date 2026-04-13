@@ -88,7 +88,7 @@ export default function JournalPage() {
     return Object.entries(map).map(([name, v]) => ({
       name,
       ...v,
-      winRate: v.trades > 0 ? Math.round((v.wins / v.trades) * 100) : 0,
+      winRate: v.trades > 0 ? Math.round((v.wins / v.trades) * 1000) / 10 : 0,
     }));
   }, [trades]);
 
@@ -104,7 +104,7 @@ export default function JournalPage() {
     return Object.entries(map).map(([name, v]) => ({
       name,
       ...v,
-      winRate: v.trades > 0 ? Math.round((v.wins / v.trades) * 100) : 0,
+      winRate: v.trades > 0 ? Math.round((v.wins / v.trades) * 1000) / 10 : 0,
     }));
   }, [trades]);
 
@@ -112,8 +112,11 @@ export default function JournalPage() {
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const map = days.map((d) => ({ name: d, pnl: 0, count: 0 }));
     trades.forEach((t) => {
+      if (!t.trade_date) return;
       // trade_date is YYYY-MM-DD in IST; anchor to +05:30 so day-of-week is correct in any browser TZ
-      const day = new Date(t.trade_date + "T00:00:00+05:30").getDay();
+      const d = new Date(t.trade_date + "T00:00:00+05:30");
+      if (isNaN(d.getTime())) return;
+      const day = d.getDay();
       map[day].pnl += t.pnl;
       map[day].count++;
     });
