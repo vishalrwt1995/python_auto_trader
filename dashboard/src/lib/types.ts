@@ -177,6 +177,11 @@ export interface ScanRow {
   daily_trend?: string; // UP | DOWN | NEUTRAL
   affinity_mult?: number;
   score_alignment?: number;
+  // Score breakdown fields (written by trading_service)
+  minScore?: number;
+  affinityMult?: number;
+  atrMult?: number;
+  dailyStrength?: number;
 }
 
 export interface ScanLatest {

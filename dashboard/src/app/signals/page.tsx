@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
@@ -29,36 +29,122 @@ const REASON_LABEL: Record<string, string> = {
   insufficient_candles:         "No candles",
 };
 
-function ScoreBar({ score, status }: { score: number; status: string }) {
+function ScoreBar({ row }: { row: ScanRow }) {
+  const { score, status, minScore, affinityMult, dailyStrength, daily_trend, reason } = row;
+  const [show, setShow] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
   if (status === "skip" || score === 0) {
     return <span className="text-text-secondary font-mono text-xs">—</span>;
   }
+
+  const threshold = minScore ?? 72;
+  const gap = threshold - score;
+  const affinity = affinityMult ?? 1.0;
+
+  // Estimate layer contributions from available data
+  const alignmentPenalty = daily_trend === "DOWN" && row.direction === "BUY" ? -10
+    : daily_trend === "UP" && row.direction === "SELL" ? -10
+    : daily_trend === "NEUTRAL" ? 5 : 0;
+
   return (
-    <div
-      className="flex items-center gap-2 justify-end px-1 py-0.5 rounded"
-      style={{
-        background:
-          score >= 80
-            ? "rgba(34,197,94,0.08)"
-            : score >= 60
-            ? "rgba(59,130,246,0.05)"
+    <div className="relative" ref={ref}>
+      <div
+        className="flex items-center gap-2 justify-end px-1 py-0.5 rounded cursor-pointer"
+        style={{
+          background:
+            score >= 80 ? "rgba(34,197,94,0.08)"
+            : score >= 60 ? "rgba(59,130,246,0.05)"
             : "transparent",
-      }}
-    >
-      <div className="w-12 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full bg-gradient-to-r from-accent/50 to-accent"
-          style={{ width: `${Math.min(100, score)}%` }}
-        />
-      </div>
-      <span
-        className={cn(
-          "font-mono text-xs w-6 text-right tabular-nums",
-          score >= 72 ? "text-profit" : score >= 45 ? "text-neutral" : "text-loss",
-        )}
+        }}
+        onMouseEnter={() => setShow(true)}
+        onMouseLeave={() => setShow(false)}
       >
-        {score}
-      </span>
+        <div className="w-12 h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-accent/50 to-accent"
+            style={{ width: `${Math.min(100, score)}%` }}
+          />
+        </div>
+        <span
+          className={cn(
+            "font-mono text-xs w-6 text-right tabular-nums",
+            score >= threshold ? "text-profit" : score >= 45 ? "text-neutral" : "text-loss",
+          )}
+        >
+          {score}
+        </span>
+      </div>
+
+      {show && (
+        <div
+          className="absolute z-50 right-0 top-6 w-56 rounded-xl border border-bg-tertiary shadow-2xl p-3 text-[11px] space-y-1.5"
+          style={{ background: "#0f1623", backdropFilter: "blur(12px)" }}
+        >
+          {/* Header */}
+          <div className="flex justify-between items-center pb-1 border-b border-bg-tertiary/60">
+            <span className="text-text-secondary font-medium">Score Breakdown</span>
+            <span className={cn("font-mono font-bold", score >= threshold ? "text-profit" : "text-loss")}>
+              {score} / {threshold}
+            </span>
+          </div>
+
+          {/* Regime conditions */}
+          <div className="space-y-1">
+            <div className="flex justify-between">
+              <span className="text-text-secondary">Daily Trend</span>
+              <span className={cn("font-mono", daily_trend === "UP" ? "text-profit" : daily_trend === "DOWN" ? "text-loss" : "text-neutral")}>
+                {daily_trend ?? "—"} {dailyStrength != null ? `(${dailyStrength.toFixed(0)}%)` : ""}
+              </span>
+            </div>
+            {alignmentPenalty !== 0 && (
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Alignment</span>
+                <span className={cn("font-mono", alignmentPenalty > 0 ? "text-profit" : "text-loss")}>
+                  {alignmentPenalty > 0 ? "+" : ""}{alignmentPenalty}
+                </span>
+              </div>
+            )}
+            <div className="flex justify-between">
+              <span className="text-text-secondary">Affinity Mult</span>
+              <span className={cn("font-mono", affinity >= 1 ? "text-profit" : affinity >= 0.9 ? "text-neutral" : "text-loss")}>
+                {affinity.toFixed(2)}×
+              </span>
+            </div>
+          </div>
+
+          {/* Gap to qualify */}
+          <div className="pt-1 border-t border-bg-tertiary/60">
+            {gap > 0 ? (
+              <>
+                <div className="flex justify-between mb-1">
+                  <span className="text-text-secondary">Gap to qualify</span>
+                  <span className="font-mono text-loss">+{gap} needed</span>
+                </div>
+                <div className="w-full h-1 bg-bg-tertiary rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-loss/60 to-accent"
+                    style={{ width: `${Math.min(100, (score / threshold) * 100)}%` }}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Status</span>
+                <span className="font-mono text-profit">✓ Qualified</span>
+              </div>
+            )}
+          </div>
+
+          {/* Block reason */}
+          {reason && reason !== "entry_qualified" && (
+            <div className="pt-1 border-t border-bg-tertiary/60">
+              <span className="text-text-secondary">Blocked: </span>
+              <span className="text-neutral">{reason.replace(/_/g, " ")}</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -246,7 +332,7 @@ export default function SignalsPage() {
         sortable: true,
         sortValue: (r) => r.score,
         className: "text-right",
-        render: (r) => <ScoreBar score={r.score} status={r.status} />,
+        render: (r) => <ScoreBar row={r} />,
       },
       {
         key: "ltp",
