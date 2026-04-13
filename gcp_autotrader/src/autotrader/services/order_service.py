@@ -592,9 +592,21 @@ class OrderService:
         else:
             # Fallback: get LTP as approximate exit
             try:
-                fill_price = self.upstox.get_quote(instrument_key).ltp
+                fill_price = float(self.upstox.get_quote(instrument_key).ltp or 0)
             except Exception:
+                logger.warning("live_exit_quote_failed tag=%s ik=%s", position_tag, instrument_key, exc_info=True)
                 fill_price = 0.0
+
+        # Last-resort: never write exit_price=0 to BQ (corrupts P&L). Use entry_price
+        # so the trade books as ₹0 P&L instead of (entry - 0) × qty disaster.
+        if fill_price <= 0:
+            entry_fallback = float(pos.get("entry_price") or 0)
+            logger.error(
+                "live_exit_no_fill_price tag=%s order_id=%s — falling back to entry_price=%.2f",
+                position_tag, order_id, entry_fallback,
+            )
+            fill_price = entry_fallback
+            exit_reason = f"{exit_reason}_NO_FILL_PRICE"
 
         self._close_position_firestore(
             position_tag=position_tag,

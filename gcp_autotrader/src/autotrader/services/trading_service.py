@@ -703,10 +703,11 @@ class TradingService:
                     policy_block_reason = "swing_max_positions_reached"
                 elif not _is_swing and qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
-                # Staleness gate: if live LTP has moved > 2% away from the computed
-                # entry price since indicators were calculated, the setup is stale —
-                # we'd be chasing. Better to wait for the next scan cycle.
-                elif _live > 0 and pos.entry_price > 0 and abs(_live - pos.entry_price) / pos.entry_price > 0.02:
+                # Staleness gate: if live LTP has moved > 2% away from the candle
+                # close (which is what indicators were computed from), the setup is
+                # stale — we'd be chasing. Compare against ind.close, NOT pos.entry_price
+                # (which is set FROM _live and would always read 0% diff).
+                elif _live > 0 and ind.close > 0 and abs(_live - ind.close) / ind.close > 0.02:
                     policy_block_reason = "stale_signal_price_moved"
                 # Live VWAP guard: if price drifted to wrong side of VWAP since candle close, reject entry.
                 # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
