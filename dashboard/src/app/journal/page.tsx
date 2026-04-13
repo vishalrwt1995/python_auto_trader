@@ -112,8 +112,8 @@ export default function JournalPage() {
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const map = days.map((d) => ({ name: d, pnl: 0, count: 0 }));
     trades.forEach((t) => {
-      // trade_date is YYYY-MM-DD in IST; append T00:00:00 to avoid UTC date shift
-      const day = new Date(t.trade_date + "T00:00:00").getDay();
+      // trade_date is YYYY-MM-DD in IST; anchor to +05:30 so day-of-week is correct in any browser TZ
+      const day = new Date(t.trade_date + "T00:00:00+05:30").getDay();
       map[day].pnl += t.pnl;
       map[day].count++;
     });

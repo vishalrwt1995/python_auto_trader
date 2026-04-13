@@ -163,8 +163,8 @@ export default function AnalyticsPage() {
   const weeklyPnl = useMemo(() => {
     const map: Record<string, number> = {};
     trades.forEach((t) => {
-      // trade_date is already YYYY-MM-DD in IST from backend
-      const d = new Date(t.trade_date + "T00:00:00");
+      // trade_date is already YYYY-MM-DD in IST from backend — anchor to IST midnight
+      const d = new Date(t.trade_date + "T00:00:00+05:30");
       const day = d.getDay(); // 0=Sun … 6=Sat
       const diff = day === 0 ? -6 : 1 - day; // shift to Monday
       const weekStart = new Date(d);
