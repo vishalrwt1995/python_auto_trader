@@ -671,9 +671,12 @@ class TradingService:
                     "setup": w.strategy or "",
                     "wlType": getattr(w, "wl_type", "intraday"),
                     "vwap": round(ind.vwap, 2) if ind.vwap else 0.0,
-                    "sl": 0.0,
-                    "target": 0.0,
-                    "qty": 0,
+                    # sl/target/qty are computed in calc_position_size above — populate
+                    # them for every scanned row, not just qualified ones, so the dashboard
+                    # signals table can show "would have been" SL/target for blocked rows too.
+                    "sl": round(pos.sl_price, 2) if pos.sl_price else 0.0,
+                    "target": round(pos.target, 2) if pos.target else 0.0,
+                    "qty": int(pos.qty or 0),
                     "status": "scanned",
                     "reason": "",
                     # Item 2: expose threshold used so dashboard can show gap-to-qualify
@@ -681,8 +684,12 @@ class TradingService:
                     "minScore": int(dynamic_min_score),
                     "atrMult": round(_atr_mult, 3),
                     "affinityMult": round(_affinity_mult, 2),
+                    # Dashboard reads these as snake_case (daily_trend, daily_strength).
+                    # Keep both keys so older dashboard builds still see something.
                     "dailyTrend": _daily_bias.trend if _daily_bias else "",
                     "dailyStrength": round(_daily_bias.strength, 1) if _daily_bias else 0.0,
+                    "daily_trend": _daily_bias.trend if _daily_bias else "",
+                    "daily_strength": round(_daily_bias.strength, 1) if _daily_bias else 0.0,
                 }
 
                 policy_block_reason = ""
