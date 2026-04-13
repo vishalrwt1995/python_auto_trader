@@ -223,6 +223,7 @@ export default function SignalsPage() {
   const [scan, setScan] = useState<ScanLatest | null>(null);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<"all" | "qualified" | "filtered" | "skip">("all");
+  const [filterType, setFilterType] = useState<"all" | "intraday" | "swing">("all");
 
   useEffect(() => {
     api
@@ -235,9 +236,18 @@ export default function SignalsPage() {
   const rows = useMemo(() => scan?.rows ?? [], [scan]);
 
   const filtered = useMemo(() => {
-    if (filterStatus === "all") return rows;
-    return rows.filter((r) => r.status === filterStatus);
-  }, [rows, filterStatus]);
+    let out = rows;
+    if (filterStatus !== "all") out = out.filter((r) => r.status === filterStatus);
+    if (filterType === "intraday") out = out.filter((r) => (r.wl_type ?? "intraday") !== "swing");
+    else if (filterType === "swing") out = out.filter((r) => r.wl_type === "swing");
+    return out;
+  }, [rows, filterStatus, filterType]);
+
+  const typeCounts = useMemo(() => ({
+    all: rows.length,
+    intraday: rows.filter((r) => (r.wl_type ?? "intraday") !== "swing").length,
+    swing: rows.filter((r) => r.wl_type === "swing").length,
+  }), [rows]);
 
   const counts = useMemo(() => ({
     all:               rows.length,
@@ -525,7 +535,26 @@ export default function SignalsPage() {
         </div>
       )}
 
-      {/* Tabs */}
+      {/* Scanner type tabs */}
+      <div className="inline-flex bg-bg-tertiary/50 rounded-xl p-0.5 mr-2">
+        {(["all", "intraday", "swing"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setFilterType(t)}
+            className={cn(
+              "px-3 py-1.5 rounded-[10px] text-xs font-medium transition-all",
+              filterType === t
+                ? "bg-gradient-to-r from-accent to-blue-600 text-white shadow shadow-accent/30"
+                : "text-text-secondary hover:text-text-primary",
+            )}
+            title={t === "intraday" ? "Intraday scanner (MIS, every 3 min)" : t === "swing" ? "Swing scanner (CNC, daily 09:22)" : "All rows"}
+          >
+            {t === "all" ? `All (${typeCounts.all})` : t === "intraday" ? `ID (${typeCounts.intraday})` : `SW (${typeCounts.swing})`}
+          </button>
+        ))}
+      </div>
+
+      {/* Status tabs */}
       <div className="inline-flex bg-bg-tertiary/50 rounded-xl p-0.5">
         {(["all", "qualified", "filtered", "skip"] as const).map((t) => (
           <button
