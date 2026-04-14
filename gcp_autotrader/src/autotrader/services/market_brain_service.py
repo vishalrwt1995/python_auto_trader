@@ -353,18 +353,13 @@ class MarketBrainService:
         writer_age_min: dict[str, float | None] = {"watchlist": None, "scanner": None, "signals": None}
 
         if is_live_window:
-            if intraday_bars < 6.0:
-                intraday_phase2_penalty += 7.0
+            # Phase 2 eligibility reflects MARKET conditions, not pipeline health.
+            # Only penalize DQ when the pipeline itself failed to run the Phase 2 branch
+            # (branch_entered=False despite window being open and policy enabled).
             expected_zero_phase2 = (phase2_global_skip_reason in {"PHASE2_WINDOW_CLOSED", "MARKET_POLICY_BLOCKED"}) or (not phase2_window_open) or (not phase2_policy_enabled)
-            if phase2_eligible_count <= 0:
-                if expected_zero_phase2:
-                    # Policy/window expected zero contribution should not be heavily penalized.
-                    intraday_phase2_penalty += 1.5 if intraday_bars >= 6.0 else 0.5
-                else:
-                    intraday_phase2_penalty += 16.0 if (phase2_branch_entered or intraday_bars >= 6.0) else 9.0
-            elif phase2_used_count <= 0 and not expected_zero_phase2:
-                # Phase2 was available but contributed nothing: degraded operational usability.
-                intraday_phase2_penalty += 9.0
+            if not expected_zero_phase2 and not phase2_branch_entered and intraday_bars >= 6.0:
+                # Pipeline bug: Phase 2 should have run but didn't — genuine DQ issue.
+                intraday_phase2_penalty += 8.0
 
             writer_ts = [("watchlist", watchlist_ts), ("scanner", scanner_ts), ("signals", signals_ts)]
             observed: list[datetime] = []
@@ -616,6 +611,13 @@ class MarketBrainService:
         slope = float(intraday.get("vwapSlope") or 0.0)
         expansion = float(intraday.get("rangeExpansion30m") or 0.0)
         if bars < 4:
+            # Distinguish market holidays (zero bars expected) from genuine event risk.
+            try:
+                lcd_ctx = self.universe_service._expected_lcd_context()
+                if lcd_ctx.get("marketClosedToday"):
+                    return "HOLIDAY"
+            except Exception:
+                pass
             return "EVENT_RISK"
         if abs(slope) >= 0.0015 and expansion >= 1.3:
             return "OPEN_DRIVE" if phase == "POST_OPEN" else "TREND_DAY"

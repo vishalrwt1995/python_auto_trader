@@ -505,6 +505,13 @@ def run_watchlist_refresh(
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
     sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    # Skip intra-day watchlist refresh on market holidays to avoid overwriting premarket data.
+    if not premarket:
+        lcd_ctx = c.universe_service()._expected_lcd_context()
+        if lcd_ctx.get("marketClosedToday"):
+            sink.action("Universe", "watchlist_refresh", "SKIP", "market holiday", {**sched_ctx, "expectedLcdCtx": lcd_ctx})
+            sink.flush_all()
+            return {"skipped": "market_holiday", "expectedLcdCtx": lcd_ctx}
     lease = c.state.try_acquire_lock("watchlist_refresh", ttl_seconds=1800)
     if lease is None:
         sink.action(
@@ -1683,6 +1690,13 @@ def run_scan_once(
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
     sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    # Skip scans on market holidays — no live data, avoids stale signals.
+    if not force:
+        lcd_ctx = c.universe_service()._expected_lcd_context()
+        if lcd_ctx.get("marketClosedToday"):
+            sink.action("Trading", "scan_once", "SKIP", "market holiday", {**sched_ctx, "expectedLcdCtx": lcd_ctx})
+            sink.flush_all()
+            return {"skipped": "market_holiday", "expectedLcdCtx": lcd_ctx}
     started_perf = time.perf_counter()
     try:
         sink.action("Trading", "scan_once", "START", "", {**sched_ctx, "force": force, "allowLiveOrders": allow_live_orders, "wlType": wl_type})
@@ -1727,6 +1741,12 @@ def run_eod_position_reconcile(
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
     sink = LogSink()
     sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    # Skip EOD recon on market holidays — no positions to close.
+    lcd_ctx = c.universe_service()._expected_lcd_context()
+    if lcd_ctx.get("marketClosedToday"):
+        sink.action("OrderService", "eod_position_reconcile", "SKIP", "market holiday", {**sched_ctx, "expectedLcdCtx": lcd_ctx})
+        sink.flush_all()
+        return {"skipped": "market_holiday", "expectedLcdCtx": lcd_ctx}
     started_perf = time.perf_counter()
     try:
         sink.action("OrderService", "eod_position_reconcile", "START", "", {**sched_ctx, "force_close": force_close})
