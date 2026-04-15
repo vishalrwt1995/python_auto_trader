@@ -670,6 +670,7 @@ class TradingService:
                     "supertrend": "UP" if ind.supertrend.dir == 1 else "DOWN",
                     "setup": w.strategy or "",
                     "wlType": getattr(w, "wl_type", "intraday"),
+                    "wl_type": getattr(w, "wl_type", "intraday"),  # dual-write; dashboard reads snake_case
                     "vwap": round(ind.vwap, 2) if ind.vwap else 0.0,
                     # sl/target/qty are computed in calc_position_size above — populate
                     # them for every scanned row, not just qualified ones, so the dashboard

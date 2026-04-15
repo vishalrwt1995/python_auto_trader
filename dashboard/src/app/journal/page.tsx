@@ -20,9 +20,10 @@ import {
 type DateRange = "7d" | "30d" | "90d" | "all";
 
 function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().split("T")[0];
+  // Use IST date so "7 days ago" means 7 IST calendar days, not UTC days
+  const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  ist.setDate(ist.getDate() - n);
+  return `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, "0")}-${String(ist.getDate()).padStart(2, "0")}`;
 }
 
 const REGIME_COLORS: Record<string, string> = {

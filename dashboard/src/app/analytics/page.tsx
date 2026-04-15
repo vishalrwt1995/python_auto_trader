@@ -229,7 +229,7 @@ export default function AnalyticsPage() {
       pnlHour: h,
       count: hours[h]?.count ?? 0,
       pnl: hours[h]?.pnl ?? 0,
-    })).filter((d) => d.count > 0);
+    })); // keep all 24 hours so x-axis is continuous and ReferenceArea bands render correctly
   }, [trades]);
 
   // P&L distribution (bucket histogram)
@@ -369,7 +369,7 @@ export default function AnalyticsPage() {
                   stroke="#ef4444"
                   strokeDasharray="4 2"
                   strokeOpacity={0.7}
-                  label={{ value: `Max DD: ${maxDrawdown.toFixed(1)}%`, fill: "#ef4444", fontSize: 10, position: "insideBottomRight" }}
+                  label={{ value: `Max DD: ${maxDrawdown.toFixed(1)}%`, fill: "#ef4444", fontSize: 10, position: "insideTopLeft" }}
                 />
               )}
             </AreaChart>
