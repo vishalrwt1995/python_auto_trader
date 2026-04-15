@@ -224,6 +224,7 @@ def check_strategy_entry(
     strategy: str,
     direction: str,
     ind: IndicatorSnapshot,
+    regime: str = "",
 ) -> tuple[bool, str]:
     """Validate strategy-specific entry conditions beyond the generic direction vote.
 
@@ -267,11 +268,17 @@ def check_strategy_entry(
         return True, ""
 
     if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
-        # Must be stretched: RSI oversold/overbought AND price meaningfully away from VWAP
+        # RSI threshold depends on regime:
+        # - RANGE/CHOP: stock oscillates around ~50; bottom of range = RSI 45-55 → allow ≤ 55
+        # - Other regimes (TREND_DOWN/PANIC/etc.): need true oversold bounce → keep ≤ 45
         rsi = ind.rsi.curr
-        if is_buy and rsi > 45:
+        _regime_upper = str(regime or "").strip().upper()
+        _is_range_like = _regime_upper in ("RANGE", "CHOP")
+        mr_buy_rsi_limit = 55 if _is_range_like else 45
+        mr_sell_rsi_floor = 45 if _is_range_like else 55
+        if is_buy and rsi > mr_buy_rsi_limit:
             return False, "strategy_mr_rsi_not_oversold"
-        if not is_buy and rsi < 55:
+        if not is_buy and rsi < mr_sell_rsi_floor:
             return False, "strategy_mr_rsi_not_overbought"
         if ind.vwap > 0:
             vwap_dev = abs(ind.close - ind.vwap) / ind.vwap * 100
@@ -299,6 +306,7 @@ def check_swing_entry(
     direction: str,
     ind: IndicatorSnapshot,
     daily_bias: DailyBias | None,
+    regime: str = "",
 ) -> tuple[bool, str]:
     """Swing-specific entry gates — tighter than intraday because positions are held for days.
 
@@ -337,10 +345,15 @@ def check_swing_entry(
         return True, ""
 
     if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
-        # Swing mean-reversion: daily RSI must be stretched
-        if is_buy and daily_bias.rsi_daily > 35:
+        # Swing mean-reversion: daily RSI threshold depends on regime
+        # RANGE: stock pulled back to lower portion of range → RSI ≤ 45 is good enough
+        # Other regimes: need truly stretched daily RSI (≤ 35) for multi-day bounce
+        _regime_upper = str(regime or "").strip().upper()
+        swing_mr_buy_limit = 45 if _regime_upper in ("RANGE", "CHOP") else 35
+        swing_mr_sell_floor = 55 if _regime_upper in ("RANGE", "CHOP") else 65
+        if is_buy and daily_bias.rsi_daily > swing_mr_buy_limit:
             return False, "swing_mr_daily_rsi_not_oversold"
-        if not is_buy and daily_bias.rsi_daily < 65:
+        if not is_buy and daily_bias.rsi_daily < swing_mr_sell_floor:
             return False, "swing_mr_daily_rsi_not_overbought"
         # Price should be near daily BB band (use support/resistance as proxy)
         if is_buy and daily_bias.support > 0 and ind.close > daily_bias.support * 1.03:

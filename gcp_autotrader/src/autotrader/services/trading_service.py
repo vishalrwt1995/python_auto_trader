@@ -725,10 +725,11 @@ class TradingService:
                 else:
                     # Strategy-specific hard gates: validate that the current market
                     # structure actually matches the setup assigned at watchlist build time.
+                    _brain_regime = brain_state.regime if brain_state else ""
                     if _is_swing:
-                        _strategy_ok, _strategy_fail = check_swing_entry(w.strategy, direction, ind, _daily_bias)
+                        _strategy_ok, _strategy_fail = check_swing_entry(w.strategy, direction, ind, _daily_bias, regime=_brain_regime)
                     else:
-                        _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind)
+                        _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind, regime=_brain_regime)
                     if not _strategy_ok:
                         policy_block_reason = _strategy_fail
                     # Portfolio sector concentration: don't pile into the same sector
