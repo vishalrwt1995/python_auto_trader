@@ -246,7 +246,7 @@ export interface TradeSummary {
   avg_rr: number;
   biggest_win: number;
   biggest_loss: number;
-  profit_factor: number;
+  profit_factor: number | null;  // null = no losing trades (render as ∞)
   max_drawdown: number;
   max_drawdown_pct: number;
   expectancy: number;

@@ -424,7 +424,7 @@ export default function SignalsPage() {
         label: "SL / Target",
         className: "text-right font-mono text-xs tabular-nums",
         render: (r) =>
-          r.sl != null && r.target != null ? (
+          r.sl != null && r.target != null && r.sl !== 0 && r.target !== 0 ? (
             <span>
               <span className="text-loss">{r.sl.toFixed(2)}</span>
               <span className="text-text-secondary mx-1">/</span>

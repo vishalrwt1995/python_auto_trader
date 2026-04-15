@@ -146,7 +146,7 @@ def get_trades_summary(
 
     q = f"""
         SELECT
-            COUNT(*) as total_trades,
+            COUNTIF(pnl != 0) as total_trades,
             COUNTIF(pnl > 0) as wins,
             COUNTIF(pnl < 0) as losses,
             COALESCE(SUM(pnl), 0) as total_pnl,
@@ -155,7 +155,7 @@ def get_trades_summary(
             COALESCE(MAX(pnl), 0) as biggest_win,
             COALESCE(MIN(pnl), 0) as biggest_loss,
             COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as gross_profit,
-            COALESCE(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 1) as gross_loss
+            COALESCE(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0) as gross_loss
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
         WHERE trade_date BETWEEN '{fd}' AND '{td}'
     """
@@ -166,8 +166,9 @@ def get_trades_summary(
         wins = r.get("wins", 0)
         win_rate = (wins / total * 100) if total else 0
         gross_profit = r.get("gross_profit", 0)
-        gross_loss = r.get("gross_loss", 1)
-        profit_factor = gross_profit / gross_loss if gross_loss else 0
+        gross_loss = r.get("gross_loss", 0)
+        # None signals "no losing trades" — frontend renders as ∞
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (None if gross_profit > 0 else 0.0)
         avg_win = r.get("avg_win", 0)
         avg_loss = abs(r.get("avg_loss", 0))
         expectancy = (win_rate / 100 * avg_win) - ((1 - win_rate / 100) * avg_loss) if total else 0
@@ -178,7 +179,7 @@ def get_trades_summary(
             "win_rate": round(win_rate, 1),
             "biggest_win": r.get("biggest_win", 0),
             "biggest_loss": r.get("biggest_loss", 0),
-            "profit_factor": round(profit_factor, 2),
+            "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
             "expectancy": round(expectancy, 2),
             "avg_rr": round(avg_win / avg_loss, 2) if avg_loss else 0,
         }

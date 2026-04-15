@@ -301,8 +301,8 @@ export default function JournalPage() {
           />
           <SummaryCard
             label="Profit Factor"
-            value={String(summary.profit_factor)}
-            positive={summary.profit_factor >= 1.5}
+            value={summary.profit_factor == null ? "∞" : String(summary.profit_factor)}
+            positive={summary.profit_factor == null || summary.profit_factor >= 1.5}
             borderColor="#3b82f6"
           />
           <SummaryCard

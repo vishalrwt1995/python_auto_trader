@@ -24,9 +24,10 @@ import {
 type DateRange = "30d" | "90d" | "180d" | "all";
 
 function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().split("T")[0];
+  // Anchor to IST calendar date so "30d ago" means 30 IST days, not UTC days
+  const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  ist.setDate(ist.getDate() - n);
+  return `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, "0")}-${String(ist.getDate()).padStart(2, "0")}`;
 }
 
 // Icons as inline SVGs
@@ -238,7 +239,9 @@ export default function AnalyticsPage() {
     const pnls = trades.map((t) => t.pnl);
     const min = Math.min(...pnls);
     const max = Math.max(...pnls);
-    const range = max - min || 1;
+    // All trades at identical P&L — collapse to single bar to avoid 14 empty buckets
+    if (min === max) return [{ range: `${min.toFixed(0)}`, count: pnls.length, mid: min }];
+    const range = max - min;
     const bucketSize = range / 15;
     const buckets = Array.from({ length: 15 }, (_, i) => ({
       range: `${(min + i * bucketSize).toFixed(0)}`,
@@ -307,8 +310,8 @@ export default function AnalyticsPage() {
           />
           <MetricCard
             label="Profit Factor"
-            value={summary.profit_factor?.toFixed(2) ?? "--"}
-            positive={summary.profit_factor >= 1.5}
+            value={summary.profit_factor == null ? "∞" : summary.profit_factor.toFixed(2)}
+            positive={summary.profit_factor == null || summary.profit_factor >= 1.5}
             borderColor="#6366f1"
             icon={<IconBarChart2 className="w-3.5 h-3.5" />}
           />
@@ -444,8 +447,8 @@ export default function AnalyticsPage() {
           </div>
         )}
 
-        {/* Hourly Distribution */}
-        {hourlyDist.length > 0 && (
+        {/* Hourly Distribution — only render when at least one hour has trades */}
+        {hourlyDist.some((d) => d.count > 0) && (
           <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4 shadow-md shadow-black/20">
             <h3 className="text-sm font-medium mb-2 flex items-center gap-1.5">
               <IconClock className="w-4 h-4 text-accent" />
