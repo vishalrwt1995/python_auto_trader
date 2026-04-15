@@ -121,7 +121,10 @@ export default function WatchlistPage() {
   const intradayCount = watchlist.filter((r) => r.eligible_intraday).length;
   const phase2Count = watchlist.filter((r) => r.phase2_eligible).length;
   const avgScore = (() => {
-    const scores = watchlist.map((r) => r.score).filter((s): s is number => s != null);
+    const tabRows = tab === "swing" ? watchlist.filter((r) => r.eligible_swing)
+      : tab === "intraday" ? watchlist.filter((r) => r.eligible_intraday)
+      : watchlist;
+    const scores = tabRows.map((r) => r.score).filter((s): s is number => s != null);
     return scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
   })();
 
@@ -314,7 +317,9 @@ export default function WatchlistPage() {
         <div className="bg-bg-secondary rounded-lg border-t-[3px] border-t-[#22c55e] border-x border-b border-bg-tertiary p-3 shadow-md shadow-black/20 flex items-start justify-between">
           <div>
             <p className="text-xl font-mono font-bold text-profit">{avgScore.toFixed(0)}</p>
-            <p className="text-[10px] text-text-secondary mt-0.5">Avg Daily</p>
+            <p className="text-[10px] text-text-secondary mt-0.5">
+              Avg {tab === "swing" ? "Swing" : tab === "intraday" ? "Intraday" : "Daily"}
+            </p>
           </div>
           <Star className="h-4 w-4 text-profit mt-0.5" />
         </div>

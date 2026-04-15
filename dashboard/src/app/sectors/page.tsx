@@ -123,7 +123,7 @@ function LiqBar({ row }: { row: SectorRow }) {
 // ── Sector Card ───────────────────────────────────────────────────────────────
 
 function SectorCard({ row, onClick }: { row: SectorRow; onClick: () => void }) {
-  const eligible = row.eligible_swing + row.eligible_intraday - (row.both ?? 0);
+  const eligible = Math.max(row.eligible_swing, row.eligible_intraday);
   const borderColor = eligibleColor(row.eligible_pct);
 
   return (
@@ -284,7 +284,7 @@ function SectorDetailDrawer({ sector, onClose }: { sector: string; onClose: () =
         render: (r) => {
           const v = r.atr_pct_14d;
           if (!v) return <span className="text-text-secondary">—</span>;
-          return <span className={v > 0.08 ? "text-amber-400" : ""}>{(v * 100).toFixed(1)}%</span>;
+          return <span className={cn(v > 0.09 ? "text-loss" : v > 0.05 ? "text-amber-400" : "")}>{(v * 100).toFixed(1)}%</span>;
         },
       },
       {

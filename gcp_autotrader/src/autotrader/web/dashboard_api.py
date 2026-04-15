@@ -684,20 +684,20 @@ def get_history_summary(user: dict[str, Any] = Depends(verify_firebase_token)) -
     try:
         rows = c.state.list_universe(limit=3000)
         total = len(rows)
-        d1: dict[str, int] = {"fresh": 0, "stale": 0, "missing": 0, "invalid": 0, "other": 0}
-        d5: dict[str, int] = {"fresh": 0, "stale": 0, "missing": 0, "invalid": 0, "no_data": 0, "other": 0}
+        d1: dict[str, int] = {"FRESH": 0, "STALE": 0, "MISSING": 0, "INVALID": 0, "OTHER": 0}
+        d5: dict[str, int] = {"FRESH": 0, "STALE": 0, "MISSING": 0, "INVALID": 0, "NO_DATA": 0, "OTHER": 0}
         last_1d_dates: list[str] = []
         last_5m_dates: list[str] = []
 
         for row in rows:
             # normalize returns uppercase ("FRESH", "STALE"…); store as lowercase to match frontend keys
-            s1d = _normalize_status_1d(row.get("data_quality_flag", "")).lower()
+            s1d = _normalize_status_1d(row.get("data_quality_flag", ""))  # returns uppercase
             d1[s1d] = d1.get(s1d, 0) + 1
-            s5m = _normalize_status_5m(row.get("status_5m", "")).lower()
+            s5m = _normalize_status_5m(row.get("status_5m", ""))  # returns uppercase
             d5[s5m] = d5.get(s5m, 0) + 1
             d = _fmt_date(row.get("last_1d_date"))
             if d: last_1d_dates.append(d)
-            d5m = str(row.get("last_5m_date") or "")[:10]
+            d5m = str(row.get("last_5m_date") or "")
             if d5m: last_5m_dates.append(d5m)
 
         # Use system-computed expected LCD (holiday-aware) — don't derive from stale Firestore dates
@@ -712,10 +712,10 @@ def get_history_summary(user: dict[str, Any] = Depends(verify_firebase_token)) -
             "last_5m_run": last_5m_run,
             "status_1d": d1,
             "status_5m": d5,
-            "fresh_pct_1d": round(d1["fresh"] / total * 100, 1) if total else 0,
-            "fresh_pct_5m": round(d5["fresh"] / total * 100, 1) if total else 0,
-            "issues_1d": d1["stale"] + d1["missing"] + d1["invalid"],
-            "issues_5m": d5["stale"] + d5["missing"] + d5["invalid"] + d5.get("no_data", 0),
+            "fresh_pct_1d": round(d1["FRESH"] / total * 100, 1) if total else 0,
+            "fresh_pct_5m": round(d5["FRESH"] / total * 100, 1) if total else 0,
+            "issues_1d": d1["STALE"] + d1["MISSING"] + d1["INVALID"],
+            "issues_5m": d5["STALE"] + d5["MISSING"] + d5["INVALID"] + d5.get("NO_DATA", 0),
         }
     except Exception as exc:
         logger.error("history/summary failed: %s", exc)
@@ -758,7 +758,7 @@ def get_history_symbols(
                 "bars_1d": row.get("bars_1d"),
                 "status_1d": s1d,
                 "stale_days": row.get("stale_days"),
-                "last_5m_date": str(row.get("last_5m_date") or "")[:10],
+                "last_5m_date": str(row.get("last_5m_date") or ""),
                 "bars_5m": row.get("bars_5m"),
                 "status_5m": s5m,
             })

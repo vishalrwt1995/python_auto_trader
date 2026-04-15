@@ -153,6 +153,7 @@ export default function HistoryPage() {
   const [summary, setSummary] = useState<HistorySummary | null>(null);
   const [symbols, setSymbols] = useState<HistorySymbol[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [tab, setTab] = useState<FilterTab>("all");
   const [search, setSearch] = useState("");
   const [filter1d, setFilter1d] = useState("");
@@ -167,7 +168,7 @@ export default function HistoryPage() {
         setSummary(s as HistorySummary);
         setSymbols((d.symbols ?? []) as HistorySymbol[]);
       })
-      .catch(() => {})
+      .catch((err) => setFetchError(err?.message ?? "Failed to load data"))
       .finally(() => setLoading(false));
   }, []);
 
@@ -418,7 +419,7 @@ export default function HistoryPage() {
         <DataTable
           columns={columns}
           data={filtered}
-          emptyMessage="No symbols match the current filters"
+          emptyMessage={fetchError ? `Error: ${fetchError}` : "No symbols match the current filters"}
           maxHeight="calc(100vh - 420px)"
         />
       </div>

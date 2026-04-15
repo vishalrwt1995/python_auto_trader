@@ -48,7 +48,7 @@ export default function PipelinePage() {
       api.getPipelineStatus().then((d: any) => setEntries(d.entries ?? [])),
       api.getUpstoxHealth().then((d: any) => setUpstoxHealth(d)),
     ])
-      .catch(() => {})
+      .catch((err) => console.error("[Pipeline] fetch failed:", err))
       .finally(() => {
         setLoading(false);
         setRefreshing(false);
@@ -73,21 +73,21 @@ export default function PipelinePage() {
   }, [entries]);
 
   const statusIcon = (status: string) => {
-    if (status === "ok" || status === "success") return "checkmark" as const;
+    if (status === "success") return "checkmark" as const;
     if (status === "running") return "running" as const;
     if (status === "error" || status === "failed") return "error" as const;
     return "pending" as const;
   };
 
   const statusColor = (status: string) => {
-    if (status === "ok" || status === "success") return "#22c55e";
+    if (status === "success") return "#22c55e";
     if (status === "running") return "#f59e0b";
     if (status === "error" || status === "failed") return "#ef4444";
     if (status === "skipped") return "#6366f1";
     return "#374151";
   };
 
-  const passedCount = jobStatuses.filter((j) => j.status === "ok" || j.status === "success" || j.status === "skipped").length;
+  const passedCount = jobStatuses.filter((j) => j.status === "success" || j.status === "skipped").length;
   const runningCount = jobStatuses.filter((j) => j.status === "running").length;
 
   const columns: Column<AuditLogEntry>[] = useMemo(
@@ -122,7 +122,7 @@ export default function PipelinePage() {
           <span
             className={cn(
               "px-1.5 py-0.5 rounded text-xs font-medium",
-              r.status === "ok" || r.status === "success"
+              r.status === "success"
                 ? "bg-profit/20 text-profit"
                 : r.status === "error" || r.status === "failed"
                   ? "bg-loss/20 text-loss"
@@ -163,7 +163,7 @@ export default function PipelinePage() {
 
   // Dot classes per status
   const dotClass = (status: string) => {
-    if (status === "ok" || status === "success")
+    if (status === "success")
       return "bg-profit/20 border-2 border-profit text-profit";
     if (status === "running")
       return "bg-neutral/20 border-2 border-neutral text-neutral";
@@ -316,7 +316,7 @@ export default function PipelinePage() {
                   className="text-[10px] px-2 py-0.5 rounded font-semibold uppercase shrink-0"
                   style={{ background: `${color}15`, color }}
                 >
-                  {job.status === "ok" ? "success" : job.status}
+                  {job.status}
                 </span>
               </div>
             );
@@ -400,7 +400,7 @@ export default function PipelinePage() {
           <div>
             <p className="text-sm font-medium">Upstox Token Expired</p>
             {upstoxHealth.token_expires_at && (
-              <p className="text-xs text-text-secondary">Was: {upstoxHealth.token_expires_at}</p>
+              <p className="text-xs text-text-secondary">Was: {formatTime(new Date(upstoxHealth.token_expires_at))}</p>
             )}
           </div>
           <button
@@ -422,7 +422,7 @@ export default function PipelinePage() {
           rowClassName={(r) =>
             cn(
               "border-l-2",
-              r.status === "ok" || r.status === "success"
+              r.status === "success"
                 ? "border-l-profit"
                 : r.status === "error" || r.status === "failed"
                 ? "border-l-loss"

@@ -5300,7 +5300,7 @@ class UniverseService:
                         "symbol": str(r.get("symbol", "")),
                         "exchange": str(r.get("exchange", "NSE")),
                         "setuplabel": str(r.get("setupLabel", "")),
-                        "confidence": float(round(float(r.get("confidence") or r.get("score") or 0.0), 2)),
+                        "confidence": float(round(float(r.get("score") or 0.0), 2)),  # unified: always use score as source of truth
                         "score": float(round(float(r.get("score") or 0.0), 2)),
                         "source": str(r.get("source", "")),
                         "sector": str(r.get("sector", "")),
@@ -5323,7 +5323,12 @@ class UniverseService:
                         "sector": str(r.get("sector", "")),
                         "macroSector": str(r.get("macroSector", "")),
                         "phase2eligibility": "N",
+                        "vwapBias": str(r.get("vwapBias", "N/A")),
+                        "liquidityBucket": str(r.get("liquidityBucket", "")),
+                        "turnoverRank60D": r.get("turnoverRank60D"),
+                        "atrPct14D": float(round(float(r.get("atrPct14D") or 0.0), 6)),
                         "wlType": "swing",
+                        "wl_type": "swing",  # dual-write snake_case for hook compatibility
                     })
                 intraday_syms = [str(r.get("symbol", "")) for r in intraday_selected if r.get("symbol")]
                 swing_syms = [str(r.get("symbol", "")) for r in swing_selected if r.get("symbol")]
