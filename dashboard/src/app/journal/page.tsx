@@ -47,18 +47,23 @@ export default function JournalPage() {
   const [tab, setTab] = useState<"trades" | "by-strategy" | "by-regime" | "by-day">("trades");
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const fromDate = range === "all" ? "2020-01-01" : daysAgo(range === "7d" ? 7 : range === "30d" ? 30 : 90);
 
   useEffect(() => {
     setLoading(true);
+    setFetchError(null);
     Promise.all([
-      api.getTradeSummary(fromDate).then((d) => setSummary(d as unknown as TradeSummary)),
+      api.getTradeSummary(fromDate).then((d: any) => {
+        if (d?.error) setFetchError(`API error: ${d.error}`);
+        setSummary(d as unknown as TradeSummary);
+      }),
       api.getEquityCurve(fromDate).then((d: any) => setEquityData(d.series ?? [])),
       api.getTrades({ from: fromDate, ...(strategyFilter ? { strategy: strategyFilter } : {}) })
         .then((d: any) => setTrades(d.trades ?? [])),
     ])
-      .catch(() => {})
+      .catch((err) => setFetchError(String(err)))
       .finally(() => setLoading(false));
   }, [range, fromDate, strategyFilter]);
 
@@ -272,6 +277,24 @@ export default function JournalPage() {
           ))}
         </div>
       </div>
+
+      {/* Error / empty state banners */}
+      {fetchError && (
+        <div className="flex items-start gap-3 rounded-lg border border-loss/30 bg-loss/10 px-4 py-3 text-sm text-loss">
+          <svg className="mt-0.5 h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+          </svg>
+          <span className="break-all">{fetchError}</span>
+        </div>
+      )}
+      {!fetchError && !loading && summary?.total_trades === 0 && trades.length === 0 && (
+        <div className="flex items-center gap-2 rounded-lg border border-bg-tertiary bg-bg-secondary px-4 py-3 text-sm text-text-secondary">
+          <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          No closed trades found for this date range ({fromDate} → today). Trades appear here once a position is exited.
+        </div>
+      )}
 
       {/* Summary Cards */}
       {summary && (

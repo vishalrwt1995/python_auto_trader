@@ -134,17 +134,22 @@ export default function AnalyticsPage() {
   const [summary, setSummary] = useState<TradeSummary | null>(null);
   const [equityData, setEquityData] = useState<{ date: string; pnl: number }[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const fromDate = range === "all" ? "2020-01-01" : daysAgo(range === "30d" ? 30 : range === "90d" ? 90 : 180);
 
   useEffect(() => {
     setLoading(true);
+    setFetchError(null);
     Promise.all([
-      api.getTradeSummary(fromDate).then((d) => setSummary(d as unknown as TradeSummary)),
+      api.getTradeSummary(fromDate).then((d: any) => {
+        if (d?.error) setFetchError(`API error: ${d.error}`);
+        setSummary(d as unknown as TradeSummary);
+      }),
       api.getEquityCurve(fromDate).then((d: any) => setEquityData(d.series ?? [])),
       api.getTrades({ from: fromDate, limit: "500" }).then((d: any) => setTrades(d.trades ?? [])),
     ])
-      .catch(() => {})
+      .catch((err) => setFetchError(String(err)))
       .finally(() => setLoading(false));
   }, [range, fromDate]);
 
@@ -290,6 +295,20 @@ export default function AnalyticsPage() {
           ))}
         </div>
       </div>
+
+      {/* Error / empty state banners */}
+      {fetchError && (
+        <div className="flex items-start gap-3 rounded-lg border border-loss/30 bg-loss/10 px-4 py-3 text-sm text-loss">
+          <IconAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span className="break-all">{fetchError}</span>
+        </div>
+      )}
+      {!fetchError && !loading && summary?.total_trades === 0 && trades.length === 0 && (
+        <div className="flex items-center gap-2 rounded-lg border border-bg-tertiary bg-bg-secondary px-4 py-3 text-sm text-text-secondary">
+          <IconActivity className="h-4 w-4 shrink-0" />
+          No closed trades found for this date range ({fromDate} → today). Trades appear here once a position is exited.
+        </div>
+      )}
 
       {/* Key Metrics */}
       {summary && (
