@@ -488,7 +488,7 @@ export default function PositionsPage() {
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-text-secondary">Entry</span>
-                <span className="font-mono">{showExitConfirm.entry_price.toFixed(2)}</span>
+                <span className="font-mono">{(showExitConfirm.entry_price ?? 0).toFixed(2)}</span>
               </div>
               {ltpCache[showExitConfirm.symbol] && (
                 <div className="flex justify-between text-sm">

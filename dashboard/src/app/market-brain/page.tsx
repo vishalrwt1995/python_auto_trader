@@ -20,7 +20,7 @@ function reasonSentiment(r: string): "positive" | "negative" | "warning" | "neut
   // "BELOW" is only negative when paired with "THRESHOLD" or "MIN" (e.g. "score below threshold"), NOT "below safe"
   if (/BELOW\s+(THRESHOLD|MIN|MINIMUM|LIMIT)\b/.test(u)) return "negative";
   if (/\bWARNING\b|\bCAUTION\b|\bREDUCED\b|\bTIGHT\b|\bELEVATED\b|\bWEAK\b|\bDELAYED\b/.test(u)) return "warning";
-  if (/\bENABLED\b|\bPASSED\b|\bHEALTHY\b|\bSTRONG\b|\bVALID\b|\b\bOK\b|\bABOVE\b|\bACTIVE\b|\bCLEAR\b|\bCONFIRMED\b|\bBELOW SAFE\b/.test(u)) return "positive";
+  if (/\bENABLED\b|\bPASSED\b|\bHEALTHY\b|\bSTRONG\b|\bVALID\b|\bOK\b|\bABOVE\b|\bACTIVE\b|\bCLEAR\b|\bCONFIRMED\b|\bBELOW SAFE\b/.test(u)) return "positive";
   return "neutral";
 }
 

@@ -105,7 +105,7 @@ export default function CommandCenter() {
   const unrealizedPnl = useMemo(() => {
     return openPositions.reduce((sum, p) => {
       const ltp = ltpCache[p.symbol];
-      if (!ltp) return sum;
+      if (!ltp || p.entry_price == null) return sum;
       return sum + (p.side === "BUY"
         ? (ltp - p.entry_price) * p.qty
         : (p.entry_price - ltp) * p.qty);
