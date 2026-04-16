@@ -207,6 +207,7 @@ def get_trades_equity_curve(
         SELECT trade_date, SUM(pnl) as daily_pnl
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
         WHERE trade_date BETWEEN '{fd}' AND '{td}'
+          AND exit_reason != 'EOD_CLOSE_NO_QUOTE'
         GROUP BY trade_date
         ORDER BY trade_date
     """

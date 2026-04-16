@@ -67,11 +67,19 @@ export default function JournalPage() {
       .finally(() => setLoading(false));
   }, [range, fromDate, strategyFilter]);
 
-  const strategies = useMemo(() => [...new Set(trades.map((t) => t.strategy).filter(Boolean))], [trades]);
-  const regimes = useMemo(() => [...new Set(trades.map((t) => t.regime).filter(Boolean))], [trades]);
+  // Exclude EOD_CLOSE_NO_QUOTE trades from breakdown tabs and stats.
+  // These have pnl=0 due to quote failure at close — not real breakevens.
+  // They still appear in the main Trades table for full transparency.
+  const validTrades = useMemo(
+    () => trades.filter((t) => t.exit_reason !== "EOD_CLOSE_NO_QUOTE"),
+    [trades],
+  );
+
+  const strategies = useMemo(() => [...new Set(validTrades.map((t) => t.strategy).filter(Boolean))], [validTrades]);
+  const regimes = useMemo(() => [...new Set(validTrades.map((t) => t.regime).filter(Boolean))], [validTrades]);
 
   const filteredTrades = useMemo(() => {
-    let t = trades;
+    let t = trades; // keep all trades in main table
     if (regimeFilter) t = t.filter((r) => r.regime === regimeFilter);
     if (sideFilter) t = t.filter((r) => r.side === sideFilter);
     return t;
@@ -84,7 +92,7 @@ export default function JournalPage() {
 
   const byStrategy = useMemo(() => {
     const map: Record<string, { trades: number; wins: number; pnl: number }> = {};
-    trades.forEach((t) => {
+    validTrades.forEach((t) => {
       const s = t.strategy || "Unknown";
       if (!map[s]) map[s] = { trades: 0, wins: 0, pnl: 0 };
       map[s].trades++;
@@ -96,11 +104,11 @@ export default function JournalPage() {
       ...v,
       winRate: v.trades > 0 ? Math.round((v.wins / v.trades) * 1000) / 10 : 0,
     }));
-  }, [trades]);
+  }, [validTrades]);
 
   const byRegime = useMemo(() => {
     const map: Record<string, { trades: number; wins: number; pnl: number }> = {};
-    trades.forEach((t) => {
+    validTrades.forEach((t) => {
       const r = t.regime || "Unknown";
       if (!map[r]) map[r] = { trades: 0, wins: 0, pnl: 0 };
       map[r].trades++;
@@ -112,12 +120,12 @@ export default function JournalPage() {
       ...v,
       winRate: v.trades > 0 ? Math.round((v.wins / v.trades) * 1000) / 10 : 0,
     }));
-  }, [trades]);
+  }, [validTrades]);
 
   const byDay = useMemo(() => {
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const map = days.map((d) => ({ name: d, pnl: 0, count: 0 }));
-    trades.forEach((t) => {
+    validTrades.forEach((t) => {
       if (!t.trade_date) return;
       // trade_date is YYYY-MM-DD in IST; anchor to +05:30 so day-of-week is correct in any browser TZ
       const d = new Date(t.trade_date + "T00:00:00+05:30");
@@ -127,7 +135,7 @@ export default function JournalPage() {
       map[day].count++;
     });
     return map.filter((d) => d.count > 0);
-  }, [trades]);
+  }, [validTrades]);
 
   type TradeCol = {
     key: string;

@@ -153,10 +153,19 @@ export default function AnalyticsPage() {
       .finally(() => setLoading(false));
   }, [range, fromDate]);
 
+  // Exclude EOD_CLOSE_NO_QUOTE trades from all chart/stat computations.
+  // These entries have exit_price=entry_price (quote unavailable at close) so
+  // their pnl=0 is corrupted, not a real breakeven. They still show in the
+  // table but should not distort charts or streak counts.
+  const validTrades = useMemo(
+    () => trades.filter((t) => t.exit_reason !== "EOD_CLOSE_NO_QUOTE"),
+    [trades],
+  );
+
   // Monthly P&L heatmap data
   const monthlyPnl = useMemo(() => {
     const map: Record<string, number> = {};
-    trades.forEach((t) => {
+    validTrades.forEach((t) => {
       const month = t.trade_date.slice(0, 7); // YYYY-MM
       map[month] = (map[month] ?? 0) + t.pnl;
     });
@@ -168,7 +177,7 @@ export default function AnalyticsPage() {
   // Weekly P&L — use IST date and Monday-based week
   const weeklyPnl = useMemo(() => {
     const map: Record<string, number> = {};
-    trades.forEach((t) => {
+    validTrades.forEach((t) => {
       // trade_date is already YYYY-MM-DD in IST from backend — anchor to IST midnight
       const d = new Date(t.trade_date + "T00:00:00+05:30");
       const day = d.getDay(); // 0=Sun … 6=Sat
@@ -203,7 +212,7 @@ export default function AnalyticsPage() {
   // Win/Loss streak analysis
   const streaks = useMemo(() => {
     let maxWin = 0, maxLoss = 0, curWin = 0, curLoss = 0;
-    trades.forEach((t) => {
+    validTrades.forEach((t) => {
       if (t.pnl > 0) {
         curWin++;
         curLoss = 0;
@@ -220,7 +229,7 @@ export default function AnalyticsPage() {
   // Hourly distribution — convert entry_ts to IST before extracting hour
   const hourlyDist = useMemo(() => {
     const hours: Record<number, { count: number; pnl: number }> = {};
-    trades.forEach((t) => {
+    validTrades.forEach((t) => {
       if (!t.entry_ts) return;
       const istDate = new Date(
         new Date(t.entry_ts).toLocaleString("en-US", { timeZone: "Asia/Kolkata" }),
@@ -240,8 +249,8 @@ export default function AnalyticsPage() {
 
   // P&L distribution (bucket histogram)
   const pnlDist = useMemo(() => {
-    if (trades.length === 0) return [];
-    const pnls = trades.map((t) => t.pnl);
+    if (validTrades.length === 0) return [];
+    const pnls = validTrades.map((t) => t.pnl);
     const min = Math.min(...pnls);
     const max = Math.max(...pnls);
     // All trades at identical P&L — collapse to single bar to avoid 14 empty buckets
@@ -268,8 +277,8 @@ export default function AnalyticsPage() {
 
   if (loading) return <LoadingSkeleton lines={12} />;
 
-  const avgTradesPerDay = trades.length > 0
-    ? (trades.length / Math.max(1, new Set(trades.map((t) => t.trade_date)).size)).toFixed(1)
+  const avgTradesPerDay = validTrades.length > 0
+    ? (validTrades.length / Math.max(1, new Set(validTrades.map((t) => t.trade_date)).size)).toFixed(1)
     : "0";
 
   return (
