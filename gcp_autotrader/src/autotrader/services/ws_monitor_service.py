@@ -55,6 +55,7 @@ class WsMonitorService:
         project_id: str,
         access_token: str,
         firestore_database: str = "(default)",
+        access_token_secret_name: str = "",
     ) -> None:
         from autotrader.adapters.firestore_state import FirestoreStateStore
         from autotrader.adapters.upstox_ws_client import UpstoxWsClient
@@ -63,6 +64,10 @@ class WsMonitorService:
         self.ws = UpstoxWsClient(access_token)
         self.ws.on_quote = self._on_quote  # type: ignore[assignment]
         self.ws.on_disconnect = self._on_disconnect  # type: ignore[assignment]
+
+        # Keep Secret Manager details so we can re-fetch the token on 401/disconnect
+        self._project_id = project_id
+        self._access_token_secret_name = access_token_secret_name
 
         # key → {"position_tag", "sl_price", "target", "side", "instrument_key"}
         self._positions: dict[str, dict] = {}
@@ -385,6 +390,25 @@ class WsMonitorService:
 
     async def _on_disconnect(self) -> None:
         logger.warning("ws_disconnected — will reconnect")
+        # Re-fetch the access token from Secret Manager on every disconnect so
+        # that a daily token rotation (Upstox tokens expire at 03:30 IST) or a
+        # manual token refresh is automatically picked up without a service restart.
+        if self._project_id and self._access_token_secret_name:
+            try:
+                from google.cloud import secretmanager  # type: ignore[import-untyped]
+                sm = secretmanager.SecretManagerServiceClient()
+                secret_path = (
+                    f"projects/{self._project_id}/secrets/"
+                    f"{self._access_token_secret_name}/versions/latest"
+                )
+                new_token = sm.access_secret_version(
+                    request={"name": secret_path}
+                ).payload.data.decode("utf-8").strip()
+                if new_token and new_token != self.ws._token:
+                    self.ws._token = new_token
+                    logger.info("ws_token_refreshed_from_secret_manager")
+            except Exception:
+                logger.warning("ws_token_refresh_failed — will retry with existing token", exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Lazy OrderService builder
@@ -442,6 +466,7 @@ async def _main() -> None:
         project_id=project_id,
         access_token=access_token,
         firestore_database=firestore_db,
+        access_token_secret_name=access_token_secret,
     )
 
     # Graceful shutdown on SIGTERM/SIGINT
