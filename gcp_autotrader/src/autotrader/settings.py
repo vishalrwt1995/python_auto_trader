@@ -51,7 +51,7 @@ class StrategySettings:
     rsi_sell_max: float = 55.0
     vol_mult: float = 1.5
     atr_sl_mult: float = 1.5
-    rr_intraday: float = 1.5
+    rr_intraday: float = 2.0   # raised from 1.5 → 2.0: mean-reversion hit rate ~35%; need 2:1 R:R to be profitable
     vix_safe_max: float = 20.0
     vix_trend_max: float = 15.0
     pcr_bull_min: float = 0.8

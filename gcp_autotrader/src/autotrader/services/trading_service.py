@@ -567,21 +567,33 @@ class TradingService:
                 _live = live_ltp_map.get(instrument_key, 0.0)
                 ltp = _live if _live > 0 else ind.close
 
-                # ── Volatility-scaled ATR multiplier (Item 4) ────────────────
-                # In PANIC/LOCKDOWN the ATR is already 3-4x its normal value.
-                # Applying the base 1.5× multiplier would produce gigantic SLs
-                # that (a) allow huge drawdowns and (b) force qty → 1 always.
-                # We shrink the multiplier so the *effective* SL distance stays
-                # sensible for mean-reversion entries.  In strong TREND_UP we
-                # give momentum trades more room so they aren't stopped on noise.
+                # ── Volatility-scaled ATR multiplier ─────────────────────────
+                # Base multiplier is regime- and strategy-aware:
+                #
+                # Mean-reversion (VWAP_REVERSAL / MEAN_REVERSION) in RANGE:
+                #   Use 2.0× ATR — you are fading a move that may continue briefly
+                #   before reversing. A 1.5× SL sits right in the noise band and
+                #   gets stopped before the reversal materialises. Today: 9/15 SLs
+                #   blown by 130–382% of their distance, confirming 1.5× is too tight.
+                #
+                # Panic/Lockdown: ATR already inflated 3-4×; shrink multiplier so
+                #   effective SL stays sensible and qty doesn't collapse to 1.
+                #
+                # Trend regimes: keep or slightly widen for momentum room.
                 _brain_regime = brain_state.regime if brain_state else "RANGE"
                 _brain_risk   = brain_state.risk_mode if brain_state else "NORMAL"
+                _is_reversal  = str(w.strategy or "").strip().upper() in ("MEAN_REVERSION", "VWAP_REVERSAL")
+
                 if _brain_risk == "LOCKDOWN" or _brain_regime == "PANIC":
                     _atr_mult = round(self.settings.strategy.atr_sl_mult * 0.75, 3)
                 elif _brain_risk == "DEFENSIVE" or _brain_regime in ("TREND_DOWN", "CHOP"):
                     _atr_mult = round(self.settings.strategy.atr_sl_mult * 0.87, 3)
                 elif _brain_risk == "AGGRESSIVE" and _brain_regime == "TREND_UP":
                     _atr_mult = round(self.settings.strategy.atr_sl_mult * 1.20, 3)
+                elif _is_reversal and _brain_regime in ("RANGE", "RECOVERY"):
+                    # Wider SL for mean-reversion: fade trades need breathing room.
+                    # 2.0× gives the reversal time to develop without being stopped on noise.
+                    _atr_mult = round(self.settings.strategy.atr_sl_mult * 1.33, 3)  # 1.5 × 1.33 ≈ 2.0
                 else:
                     _atr_mult = self.settings.strategy.atr_sl_mult
 
@@ -603,10 +615,14 @@ class TradingService:
                     "DEFENSIVE":  58,   # ≈ raw 72 after ×0.82×0.88 adjustment
                     "LOCKDOWN":   45,   # ≈ raw 85 after ×0.60×0.88 adjustment
                 }
-                # Per-regime override: RANGE sessions naturally produce lower scores
-                # (we already penalise trend strategies there). A flat 72 threshold
-                # locks out MEAN_REVERSION that should qualify at 65-70.
-                _REGIME_MIN_SCORE = {"RANGE": 65}
+                # RANGE regime: do NOT lower the bar.
+                # Previously we dropped min score to 65 for RANGE to allow MEAN_REVERSION
+                # through. In practice this let in marginal 66-69 score signals that all
+                # lost. VWAP_REVERSAL already gets a 1.3× affinity boost in RANGE, so
+                # a genuine overbought/oversold setup will naturally score ≥ 72 without
+                # needing a lowered threshold. If it can't score 72 with a 1.3× boost,
+                # the signal is not strong enough — skip it.
+                _REGIME_MIN_SCORE: dict[str, int] = {}  # no per-regime discount
                 if _is_swing:
                     # Swing: higher bar, not risk-mode-adjusted (swing should only fire on strong signals)
                     dynamic_min_score = self.settings.strategy.swing_min_signal_score
@@ -700,6 +716,17 @@ class TradingService:
                     policy_block_reason = "policy_long_disabled"
                 elif direction == "SELL" and market_policy is not None and not bool(market_policy.short_enabled):
                     policy_block_reason = "policy_short_disabled"
+                elif (
+                    direction == "SELL"
+                    and _brain_regime in ("RANGE", "CHOP", "RECOVERY")
+                    and brain_state is not None
+                    and brain_state.breadth_score >= 60
+                ):
+                    # Broad market is clearly bullish (>60% of stocks above their EMAs).
+                    # Shorting into a rising tide in a ranging/recovering market is the
+                    # #1 cause of SL blowouts — the market lifts all boats and reversal
+                    # setups never materialise. Block SELL signals until breadth weakens.
+                    policy_block_reason = "nifty_breadth_too_bullish_for_shorts"
                 elif market_policy is not None and not self._strategy_allowed(w.strategy, market_policy.allowed_strategies):
                     policy_block_reason = "policy_strategy_blocked"
                 elif regime_hard_blocks_strategy(_brain_regime, w.strategy):

@@ -268,21 +268,41 @@ def check_strategy_entry(
         return True, ""
 
     if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
-        # RSI threshold depends on regime:
-        # - RANGE/CHOP: stock oscillates around ~50; bottom of range = RSI 45-55 → allow ≤ 55
-        # - Other regimes (TREND_DOWN/PANIC/etc.): need true oversold bounce → keep ≤ 45
+        # VWAP Reversal / Mean Reversion — proper institutional entry gates:
+        #
+        # BUY (fade the selloff):
+        #   - Price must be BELOW VWAP (stretched down, expecting bounce back to VWAP)
+        #   - RSI must be oversold: ≤ 40 in RANGE, ≤ 35 in trending regimes
+        #
+        # SELL (fade the rally):
+        #   - Price must be ABOVE VWAP (stretched up, expecting reversion back to VWAP)
+        #   - RSI must be overbought: ≥ 65 in RANGE, ≥ 60 in trending regimes
+        #
+        # Extension: price must be ≥ 1.5% from VWAP (was 0.5% — too close to noise)
+        # A 0.5% deviation is inside normal intraday bid/ask noise and produces
+        # false signals. Real reversions need at least 1.5% stretch.
         rsi = ind.rsi.curr
         _regime_upper = str(regime or "").strip().upper()
         _is_range_like = _regime_upper in ("RANGE", "CHOP")
-        mr_buy_rsi_limit = 55 if _is_range_like else 45
-        mr_sell_rsi_floor = 45 if _is_range_like else 55
-        if is_buy and rsi > mr_buy_rsi_limit:
-            return False, "strategy_mr_rsi_not_oversold"
-        if not is_buy and rsi < mr_sell_rsi_floor:
-            return False, "strategy_mr_rsi_not_overbought"
+
+        if is_buy:
+            # BUY reversal: price must be below VWAP (oversold stretch)
+            if ind.vwap > 0 and ind.close >= ind.vwap:
+                return False, "strategy_mr_buy_price_not_below_vwap"
+            rsi_limit = 40 if _is_range_like else 35
+            if rsi > rsi_limit:
+                return False, "strategy_mr_rsi_not_oversold"
+        else:
+            # SELL reversal: price must be above VWAP (overbought stretch)
+            if ind.vwap > 0 and ind.close <= ind.vwap:
+                return False, "strategy_mr_sell_price_not_above_vwap"
+            rsi_floor = 65 if _is_range_like else 60
+            if rsi < rsi_floor:
+                return False, "strategy_mr_rsi_not_overbought"
+
         if ind.vwap > 0:
             vwap_dev = abs(ind.close - ind.vwap) / ind.vwap * 100
-            if vwap_dev < 0.5:
+            if vwap_dev < 1.5:
                 return False, "strategy_mr_insufficient_vwap_extension"
         return True, ""
 
