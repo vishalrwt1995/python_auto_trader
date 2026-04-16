@@ -146,18 +146,21 @@ def get_trades_summary(
 
     q = f"""
         SELECT
-            COUNTIF(pnl != 0) as total_trades,
-            COUNTIF(pnl > 0) as wins,
-            COUNTIF(pnl < 0) as losses,
+            COUNT(*) as total_trades,
+            -- Use exit_reason as primary win/loss signal; fall back to pnl sign
+            -- so EOD_CLOSE_NO_QUOTE (pnl=0) rows don't silently inflate win_rate.
+            COUNTIF(exit_reason = 'TARGET_HIT' OR (exit_reason NOT IN ('SL_HIT','EOD_CLOSE_NO_QUOTE') AND pnl > 0)) as wins,
+            COUNTIF(exit_reason = 'SL_HIT' OR (exit_reason NOT IN ('TARGET_HIT','EOD_CLOSE_NO_QUOTE') AND pnl < 0)) as losses,
             COALESCE(SUM(pnl), 0) as total_pnl,
-            COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
-            COALESCE(AVG(CASE WHEN pnl < 0 THEN pnl END), 0) as avg_loss,
+            COALESCE(AVG(CASE WHEN exit_reason = 'TARGET_HIT' OR pnl > 0 THEN pnl END), 0) as avg_win,
+            COALESCE(AVG(CASE WHEN exit_reason = 'SL_HIT' OR pnl < 0 THEN pnl END), 0) as avg_loss,
             COALESCE(MAX(pnl), 0) as biggest_win,
             COALESCE(MIN(pnl), 0) as biggest_loss,
             COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as gross_profit,
             COALESCE(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0) as gross_loss
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
         WHERE trade_date BETWEEN '{fd}' AND '{td}'
+          AND exit_reason != 'EOD_CLOSE_NO_QUOTE'
     """
     try:
         rows = c.bq.query(q)

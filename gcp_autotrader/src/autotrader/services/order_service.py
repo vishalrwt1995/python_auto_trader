@@ -725,7 +725,16 @@ class OrderService:
             if paper or self.settings.runtime.paper_trade:
                 # Paper close at LTP — never silently fall back to entry_price
                 # because that would always book ₹0 and corrupt P&L stats.
-                instrument_key = str(pos.get("instrument_key") or symbol)
+                # instrument_key is not stored on paper positions — look it up
+                # from the universe collection so Upstox quote succeeds.
+                instrument_key = str(pos.get("instrument_key") or "")
+                if not instrument_key and symbol:
+                    try:
+                        uni_row = self.state.get_json("universe", symbol)
+                        instrument_key = str(uni_row.get("instrument_key") or "") if uni_row else ""
+                    except Exception:
+                        pass
+                instrument_key = instrument_key or symbol
                 ltp = 0.0
                 try:
                     if instrument_key:
