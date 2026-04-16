@@ -353,6 +353,15 @@ class OrderService:
         if self.state.already_fired_today(symbol, side):
             return {"skipped": "duplicate_idempotency"}
 
+        if not instrument_key:
+            # Log prominently — ws-monitor needs a valid Upstox instrument_key
+            # to subscribe on WebSocket; without it no intraday SL/target exits fire.
+            logger.warning(
+                "place_entry_order: instrument_key missing for symbol=%s — "
+                "ws-monitor will attempt universe fallback; check universe coverage",
+                symbol,
+            )
+
         ref_id = make_ref_id()
         paper = self.settings.runtime.paper_trade or not allow_live_orders
 

@@ -104,14 +104,45 @@ class WsMonitorService:
     # Position management
     # ------------------------------------------------------------------ #
 
+    def _resolve_instrument_key(self, pos: dict) -> str:
+        """Return a valid Upstox instrument_key for this position.
+
+        Tries pos['instrument_key'] first (saved since fix d89c008).
+        Falls back to a Firestore universe lookup for older positions
+        that were created before instrument_key was persisted.
+        Never falls back to raw symbol — that format is not accepted
+        by the Upstox WebSocket subscription API.
+        """
+        ikey = str(pos.get("instrument_key") or "").strip()
+        if ikey:
+            return ikey
+        symbol = str(pos.get("symbol") or "").strip().upper()
+        if not symbol:
+            return ""
+        try:
+            uni_row = self.state.get_json("universe", symbol)
+            ikey = str(uni_row.get("instrument_key") or "") if uni_row else ""
+            if ikey:
+                logger.info(
+                    "instrument_key_resolved_from_universe symbol=%s ikey=%s",
+                    symbol, ikey,
+                )
+        except Exception:
+            logger.debug("universe_instrument_key_lookup_failed symbol=%s", symbol, exc_info=True)
+        return ikey
+
     async def _refresh_positions(self) -> None:
         try:
             open_positions = self.state.list_open_positions()
             new_map: dict[str, dict] = {}
             for pos in open_positions:
                 tag = str(pos.get("position_tag") or pos.get("_id") or "")
-                ikey = str(pos.get("instrument_key") or pos.get("symbol") or "")
+                ikey = self._resolve_instrument_key(pos)
                 if not tag or not ikey:
+                    logger.warning(
+                        "skip_ws_subscribe: missing instrument_key tag=%s symbol=%s",
+                        tag, pos.get("symbol", ""),
+                    )
                     continue
                 entry_price = float(pos.get("entry_price") or 0)
                 atr = float(pos.get("atr") or 0)
