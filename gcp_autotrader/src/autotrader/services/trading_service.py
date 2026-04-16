@@ -796,6 +796,7 @@ class TradingService:
                         product=w.product,
                         score=adjusted_score,
                         reason=reason,
+                        instrument_key=instrument_key,
                         strategy=str(w.strategy or ""),
                         regime=brain_state.regime,
                         risk_mode=brain_state.risk_mode,

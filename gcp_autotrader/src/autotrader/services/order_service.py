@@ -145,6 +145,7 @@ class OrderService:
         signal_score: int = 0,
         product: str = "MIS",
         wl_type: str = "intraday",
+        instrument_key: str = "",
     ) -> None:
         doc = {
             "position_tag": position_tag,
@@ -170,6 +171,7 @@ class OrderService:
             "signal_score": signal_score,
             "product": product,
             "wl_type": wl_type,
+            "instrument_key": instrument_key,
         }
         self.state.save_position(position_tag, doc)
         if self.pubsub:
@@ -376,6 +378,7 @@ class OrderService:
                 strategy=strategy, order_id=ref_id,
                 regime=regime, risk_mode=risk_mode, signal_score=score,
                 product=product, wl_type=wl_type,
+                instrument_key=instrument_key,
             )
             # Keep Sheets copy for human visibility
             self._append_position_sheets([
@@ -442,6 +445,7 @@ class OrderService:
                 strategy=strategy, order_id=order_id,
                 regime=regime, risk_mode=risk_mode, signal_score=score,
                 product=product, wl_type=wl_type,
+                instrument_key=token,
             )
             self._append_position_sheets([
                 now_ist_str(), symbol, exchange, segment, side,
@@ -660,6 +664,7 @@ class OrderService:
                     regime=str(item.get("regime") or ""),
                     risk_mode=str(item.get("risk_mode") or ""),
                     signal_score=int(item.get("score") or 0),
+                    instrument_key=str(item.get("instrument_key") or ""),
                 )
                 self._append_position_sheets([
                     now_ist_str(), symbol,
