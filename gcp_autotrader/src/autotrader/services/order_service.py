@@ -674,6 +674,7 @@ class OrderService:
                     risk_mode=str(item.get("risk_mode") or ""),
                     signal_score=int(item.get("score") or 0),
                     instrument_key=str(item.get("instrument_key") or ""),
+                    wl_type=str(item.get("wl_type") or "intraday"),
                 )
                 self._append_position_sheets([
                     now_ist_str(), symbol,

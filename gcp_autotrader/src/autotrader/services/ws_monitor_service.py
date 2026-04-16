@@ -347,9 +347,10 @@ class WsMonitorService:
             logger.info("exit_completed tag=%s result=%s", tag, result)
             # Remove from position map so it doesn't trigger again
             self._positions = {k: v for k, v in self._positions.items() if v["position_tag"] != tag}
+            self._exiting.discard(tag)   # clean up so set doesn't grow unbounded
         except Exception:
             logger.exception("exit_failed tag=%s", tag)
-            self._exiting.discard(tag)
+            self._exiting.discard(tag)   # allow retry on next tick
 
     # ------------------------------------------------------------------ #
     # EOD watchdog

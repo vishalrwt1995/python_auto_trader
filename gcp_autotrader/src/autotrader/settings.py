@@ -37,7 +37,7 @@ class StrategySettings:
     capital: float = 50_000.0
     risk_per_trade: float = 125.0
     max_daily_loss: float = 300.0
-    daily_profit_target: float = 200.0
+    daily_profit_target: float = 375.0
     max_trades_day: int = 5
     max_positions: int = 3
     min_signal_score: int = 72
@@ -122,7 +122,7 @@ class AppSettings:
             capital=_env_float("CAPITAL", 50000),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
             max_daily_loss=_env_float("MAX_DAILY_LOSS", 300),
-            daily_profit_target=_env_float("DAILY_PROFIT_TARGET", 200),
+            daily_profit_target=_env_float("DAILY_PROFIT_TARGET", 375),
             max_trades_day=_env_int("MAX_TRADES_DAY", 5),
             max_positions=_env_int("MAX_POSITIONS", 3),
             min_signal_score=_env_int("MIN_SIGNAL_SCORE", 72),
@@ -136,7 +136,7 @@ class AppSettings:
             rsi_sell_max=_env_float("RSI_SELL_MAX", 55),
             vol_mult=_env_float("VOL_MULT", 1.5),
             atr_sl_mult=_env_float("ATR_SL_MULT", 1.5),
-            rr_intraday=_env_float("RR_INTRADAY", 1.5),
+            rr_intraday=_env_float("RR_INTRADAY", 2.0),
             vix_safe_max=_env_float("VIX_SAFE_MAX", 20),
             vix_trend_max=_env_float("VIX_TREND_MAX", 15),
             pcr_bull_min=_env_float("PCR_BULL_MIN", 0.8),

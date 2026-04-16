@@ -18,11 +18,11 @@ def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot) -> Direc
     bull += 3 if ind.supertrend.dir == 1 else 0
     bear += 3 if ind.supertrend.dir != 1 else 0
     bull += 2 if ind.close > ind.vwap else 0
-    bear += 2 if ind.close <= ind.vwap else 0
+    bear += 2 if ind.close < ind.vwap else 0   # equal = neutral: no vote for either side
     bull += 2 if ind.ema_fast.curr > ind.ema_med.curr else 0
-    bear += 2 if ind.ema_fast.curr <= ind.ema_med.curr else 0
+    bear += 2 if ind.ema_fast.curr < ind.ema_med.curr else 0   # equal = neutral
     bull += 1 if ind.ema_med.curr > ind.ema_slow.curr else 0
-    bear += 1 if ind.ema_med.curr <= ind.ema_slow.curr else 0
+    bear += 1 if ind.ema_med.curr < ind.ema_slow.curr else 0   # equal = neutral
     if ind.rsi.curr > 55:
         bull += 1
     elif ind.rsi.curr < 45:
@@ -190,11 +190,14 @@ def score_signal(
 
     # Penalties
     # VIX tiering: Indian VIX baseline is 14-16, so >18 triggers too easily.
-    # Graduated penalty preserves signal quality in mildly elevated vol.
-    if regime.vix > 22:
-        bd.penalty -= 10
-    elif regime.vix > 18:
-        bd.penalty -= 5
+    # Penalty only applies to BUY signals — high VIX actually FAVOURS short
+    # setups (volatility expansion to downside), so penalising SELL in high-VIX
+    # would incorrectly suppress the most correct trades in a fear spike.
+    if is_buy:
+        if regime.vix > 22:
+            bd.penalty -= 10
+        elif regime.vix > 18:
+            bd.penalty -= 5
     # RANGE penalty exempts MEAN_REVERSION/VWAP_REVERSAL — these strategies
     # actually THRIVE in range-bound markets, so penalising them is backwards.
     _setup_upper = str(setup or "").strip().upper()

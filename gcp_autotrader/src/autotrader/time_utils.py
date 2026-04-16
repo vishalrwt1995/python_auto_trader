@@ -43,10 +43,10 @@ def is_market_open_ist() -> bool:
 
 
 def is_entry_window_open_ist() -> bool:
-    # Extended to 15:20 (from 15:15) to capture late-session breakouts
-    # before EOD close at 15:30. The extra 5 min covers the most active
-    # final-push period.
-    return is_market_open_ist() and ist_minutes() <= 920
+    # Cut-off at 15:00 (900 min): new positions need at least 25 min to reach
+    # 2:1 R:R target before the EOD force-close at 15:25. Entries at 15:19
+    # gave only 6 minutes — almost always closed at EOD for a net loss.
+    return is_market_open_ist() and ist_minutes() <= 900
 
 
 def parse_any_ts(value: str | int | float | None) -> datetime | None:
