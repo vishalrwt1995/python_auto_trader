@@ -163,7 +163,13 @@ class MarketRegimeService:
         out = base or RegimeSnapshot()
         if state.regime in {"TREND_UP", "RECOVERY"}:
             out.regime = "TREND"
-        elif state.regime in {"TREND_DOWN", "PANIC"}:
+        elif state.regime == "TREND_DOWN":
+            # Allow SELL signals in downtrend — SHORT_BREAKDOWN/SHORT_PULLBACK are
+            # the primary edge here. Map to TREND so direction vote runs; BEARISH
+            # bias (set below) dampens BUY votes. Affinity matrix handles the rest.
+            out.regime = "TREND"
+        elif state.regime == "PANIC":
+            # Full block — panic is too volatile even for shorts; spreads blow out
             out.regime = "AVOID"
         else:
             out.regime = "RANGE"

@@ -264,8 +264,11 @@ def check_strategy_entry(
         # Pullback needs the higher-TF trend intact (EMA stack) and RSI in reload zone
         if is_buy and not ind.ema_stack:
             return False, "strategy_pullback_no_bull_ema_stack"
-        if not is_buy and not ind.ema_flip:
-            return False, "strategy_pullback_no_bear_ema_stack"
+        # SHORT_PULLBACK: require at minimum fast EMA < med EMA (first downtrend signal).
+        # ema_flip (fast<med<slow) was too strict — EMAs lag, so full flip only appears
+        # well into a downtrend after the best short entry has passed.
+        if not is_buy and ind.ema_fast.curr >= ind.ema_med.curr:
+            return False, "strategy_pullback_no_bear_ema_signal"
         rsi = ind.rsi.curr
         if is_buy and not (38 <= rsi <= 65):
             return False, "strategy_pullback_rsi_outside_reload_zone"
@@ -323,7 +326,14 @@ def check_strategy_entry(
             return False, "strategy_vwap_trend_adx_too_low"
         return True, ""
 
-    # OPEN_DRIVE, AUTO, DEFAULT, PHASE1_MOMENTUM, etc. — no extra gate
+    if s == "PHASE1_MOMENTUM":
+        # Require at least average volume — a stale Phase1 pick with no participation
+        # should not enter. 0.8× (below average) is the minimum bar.
+        if ind.volume.ratio < 0.8:
+            return False, "strategy_phase1_insufficient_volume"
+        return True, ""
+
+    # OPEN_DRIVE, AUTO, DEFAULT, etc. — no extra gate
     return True, ""
 
 
@@ -364,7 +374,7 @@ def check_swing_entry(
             return False, "swing_pullback_daily_ema_not_stacked"
         if not is_buy and not daily_bias.ema_flip:
             return False, "swing_pullback_daily_ema_not_flipped"
-        if is_buy and not (40 <= daily_bias.rsi_daily <= 55):
+        if is_buy and not (40 <= daily_bias.rsi_daily <= 60):
             return False, "swing_pullback_daily_rsi_outside_zone"
         if not is_buy and not (45 <= daily_bias.rsi_daily <= 60):
             return False, "swing_pullback_daily_rsi_outside_zone"
