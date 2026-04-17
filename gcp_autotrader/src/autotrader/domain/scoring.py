@@ -9,16 +9,30 @@ if TYPE_CHECKING:
     from autotrader.domain.daily_bias import DailyBias
 
 
-def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot) -> Direction:
+def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: str = "") -> Direction:
     if regime.regime == "AVOID":
         return "HOLD"
     bull = 0
     bear = 0
 
+    _setup_upper = str(setup or "").strip().upper()
+    _is_mr = _setup_upper in ("MEAN_REVERSION", "VWAP_REVERSAL")
+
     bull += 3 if ind.supertrend.dir == 1 else 0
     bear += 3 if ind.supertrend.dir != 1 else 0
-    bull += 2 if ind.close > ind.vwap else 0
-    bear += 2 if ind.close < ind.vwap else 0   # equal = neutral: no vote for either side
+
+    if _is_mr:
+        # Mean-reversion strategies fade the VWAP deviation — a stock below VWAP
+        # is OVERSOLD (we want to BUY), not bearish. Suppress the VWAP position
+        # vote and replace it with an RSI-based reversal vote so direction aligns
+        # with the entry gate (BUY when oversold, SELL when overbought).
+        if ind.rsi.curr < 40:
+            bull += 3   # oversold → expect bounce → BUY
+        elif ind.rsi.curr > 60:
+            bear += 3   # overbought → expect fade → SELL
+    else:
+        bull += 2 if ind.close > ind.vwap else 0
+        bear += 2 if ind.close < ind.vwap else 0   # equal = neutral: no vote for either side
     bull += 2 if ind.ema_fast.curr > ind.ema_med.curr else 0
     bear += 2 if ind.ema_fast.curr < ind.ema_med.curr else 0   # equal = neutral
     bull += 1 if ind.ema_med.curr > ind.ema_slow.curr else 0
@@ -253,8 +267,10 @@ def check_strategy_entry(
             return False, "strategy_breakout_adx_too_low"
         if is_buy and ind.dist_from_52w_high > 5.0:
             return False, "strategy_breakout_too_far_from_high"
-        if not is_buy and ind.dist_from_52w_high < 20.0:
-            # Short breakdown: stock should already be well off its highs
+        if not is_buy and ind.dist_from_52w_high < 5.0:
+            # Short breakdown: block only if stock is at/near all-time high
+            # (< 5% off). Early breakdown entries (5-20% off highs) are the
+            # highest-quality shorts — don't block them.
             return False, "strategy_breakdown_price_too_high"
         if ind.volume.ratio < 1.2:
             return False, "strategy_breakout_no_volume_surge"
@@ -266,8 +282,9 @@ def check_strategy_entry(
             return False, "strategy_pullback_no_bull_ema_stack"
         # SHORT_PULLBACK: require at minimum fast EMA < med EMA (first downtrend signal).
         # ema_flip (fast<med<slow) was too strict — EMAs lag, so full flip only appears
-        # well into a downtrend after the best short entry has passed.
-        if not is_buy and ind.ema_fast.curr >= ind.ema_med.curr:
+        # well into a downtrend after the best short entry has passed. We block only if
+        # stock is in a full BULL stack (wrong direction entirely).
+        if not is_buy and ind.ema_stack:
             return False, "strategy_pullback_no_bear_ema_signal"
         rsi = ind.rsi.curr
         if is_buy and not (38 <= rsi <= 65):
@@ -327,8 +344,12 @@ def check_strategy_entry(
         return True, ""
 
     if s == "PHASE1_MOMENTUM":
-        # Require at least average volume — a stale Phase1 pick with no participation
-        # should not enter. 0.8× (below average) is the minimum bar.
+        # Long-only setup — PHASE1 stocks are selected for upside momentum; shorting
+        # them on a bad day is the opposite of the intended edge.
+        if not is_buy:
+            return False, "strategy_phase1_long_only"
+        # Require at least near-average volume — a stale Phase1 pick with no
+        # participation should not enter.
         if ind.volume.ratio < 0.8:
             return False, "strategy_phase1_insufficient_volume"
         return True, ""
@@ -372,11 +393,14 @@ def check_swing_entry(
         # Swing pullback: daily EMA stack intact, daily RSI in reload zone
         if is_buy and not daily_bias.ema_stack:
             return False, "swing_pullback_daily_ema_not_stacked"
-        if not is_buy and not daily_bias.ema_flip:
+        # Swing SHORT_PULLBACK: block only if daily EMA stack is fully bullish
+        # (ema_flip required full bear stack — too strict, misses early downtrend entries)
+        if not is_buy and daily_bias.ema_stack:
             return False, "swing_pullback_daily_ema_not_flipped"
         if is_buy and not (40 <= daily_bias.rsi_daily <= 60):
             return False, "swing_pullback_daily_rsi_outside_zone"
-        if not is_buy and not (45 <= daily_bias.rsi_daily <= 60):
+        # SHORT_PULLBACK RSI: 38–62 (was 45–60, blocking best early-downtrend entries)
+        if not is_buy and not (38 <= daily_bias.rsi_daily <= 62):
             return False, "swing_pullback_daily_rsi_outside_zone"
         return True, ""
 
@@ -392,7 +416,9 @@ def check_swing_entry(
         if not is_buy and daily_bias.rsi_daily < swing_mr_sell_floor:
             return False, "swing_mr_daily_rsi_not_overbought"
         # Price should be near daily BB band (use support/resistance as proxy)
-        if is_buy and daily_bias.support > 0 and ind.close > daily_bias.support * 1.03:
+        # Support proximity: 10% band (was 3% — too tight, rejected stocks in the
+        # bottom 30% of their range that are still 5-10% above the absolute 20-day low)
+        if is_buy and daily_bias.support > 0 and ind.close > daily_bias.support * 1.10:
             return False, "swing_mr_price_not_near_support"
         if not is_buy and daily_bias.resistance > 0 and ind.close < daily_bias.resistance * 0.97:
             return False, "swing_mr_price_not_near_resistance"

@@ -33,7 +33,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "SHORT_PULLBACK": 1.2,
         "MEAN_REVERSION": 0.6,
         "VWAP_REVERSAL": 0.6,
-        "VWAP_TREND": 1.1,
+        "VWAP_TREND": 0.7,        # SELL path structurally unreachable (label=above-VWAP); BUY in downtrend is low-quality
         "OPEN_DRIVE": 0.8,
         "PHASE1_MOMENTUM": 0.8,
         "AUTO": 0.9,

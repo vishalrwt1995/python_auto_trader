@@ -169,8 +169,11 @@ class MarketRegimeService:
             # bias (set below) dampens BUY votes. Affinity matrix handles the rest.
             out.regime = "TREND"
         elif state.regime == "PANIC":
-            # Full block — panic is too volatile even for shorts; spreads blow out
-            out.regime = "AVOID"
+            # Map to RANGE so direction vote runs. PANIC _HARD_BLOCKS already block
+            # BREAKOUT/PULLBACK/OPEN_DRIVE/PHASE1. Affinity penalties (0.2–0.3×) and
+            # the LOCKDOWN dynamic_min_score=45 ensure only very strong SHORT_BREAKDOWN
+            # or capitulation VWAP_REVERSAL signals qualify.
+            out.regime = "RANGE"
         else:
             out.regime = "RANGE"
         if state.long_bias >= state.short_bias + 0.12:

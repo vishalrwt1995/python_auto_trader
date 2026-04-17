@@ -105,7 +105,9 @@ class TradingService:
         if s in allow:
             return True
         # Preserve backward compatibility with existing strategy labels.
-        if "BREAKOUT" in s and "BREAKOUT" in allow:
+        # Use exact match for BREAKOUT to prevent SHORT_BREAKDOWN inheriting
+        # BREAKOUT permissions (substring "BREAKOUT" in "SHORT_BREAKDOWN" = True).
+        if s == "BREAKOUT" and "BREAKOUT" in allow:
             return True
         if "OPEN" in s and ("OPEN_DRIVE" in allow or "VWAP_TREND" in allow):
             return True
@@ -553,7 +555,7 @@ class TradingService:
                         "risk_mode": brain_state.risk_mode if brain_state else "",
                     })
                     continue
-                direction = determine_direction(ind, regime)
+                direction = determine_direction(ind, regime, setup=w.strategy)
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy, daily_bias=_daily_bias, setup=w.strategy)
                 # Apply regime-strategy affinity multiplier
                 _affinity_mult = regime_strategy_multiplier(

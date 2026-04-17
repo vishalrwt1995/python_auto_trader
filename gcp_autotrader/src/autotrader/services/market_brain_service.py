@@ -902,7 +902,9 @@ class MarketBrainService:
 
         allowed_strategies = [
             "BREAKOUT",
+            "SHORT_BREAKDOWN",   # explicit — was only reachable via fragile substring alias
             "PULLBACK",
+            "SHORT_PULLBACK",    # explicit — was only reachable via fragile substring alias
             "MEAN_REVERSION",
             "VWAP_TREND",
             "VWAP_REVERSAL",
