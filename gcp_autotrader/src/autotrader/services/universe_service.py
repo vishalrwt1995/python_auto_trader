@@ -4997,7 +4997,18 @@ class UniverseService:
                 if phase2_final_block:
                     # Final-block phase2 is allowed but requires stricter completed-bar confidence.
                     phase2_score = float(phase2_score * 0.92)
-                setup_label = "VWAP_TREND" if trend_score >= reversal_score else "VWAP_REVERSAL"
+                # VWAP position is the primary label determinant — a stock above VWAP
+                # needs a trend entry (VWAP_TREND), not a reversal (which requires
+                # price BELOW VWAP to fire). On choppy days the score comparison alone
+                # was assigning VWAP_REVERSAL to above-VWAP stocks, then blocking them
+                # all at check_strategy_entry. Use scores as tiebreaker only when the
+                # stock is on the reversal side (below VWAP).
+                if close_now > vwap_now:
+                    setup_label = "VWAP_TREND"
+                elif close_now < vwap_now:
+                    setup_label = "VWAP_REVERSAL"
+                else:
+                    setup_label = "VWAP_TREND" if trend_score >= reversal_score else "VWAP_REVERSAL"
                 phase2_min_score = float(min_score_eff + (6 if phase2_final_block else 0))
                 if float(phase2_score) < phase2_min_score:
                     _record_phase2_rejection(
