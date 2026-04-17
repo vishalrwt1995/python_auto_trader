@@ -722,12 +722,13 @@ class TradingService:
                     direction == "SELL"
                     and _brain_regime in ("RANGE", "CHOP", "RECOVERY")
                     and brain_state is not None
-                    and brain_state.breadth_score >= 60
+                    and brain_state.breadth_score >= 75
                 ):
-                    # Broad market is clearly bullish (>60% of stocks above their EMAs).
-                    # Shorting into a rising tide in a ranging/recovering market is the
-                    # #1 cause of SL blowouts — the market lifts all boats and reversal
-                    # setups never materialise. Block SELL signals until breadth weakens.
+                    # Broad market is clearly bullish (>75% of stocks above their EMAs).
+                    # Shorting into a strong rising tide is the #1 cause of SL blowouts.
+                    # Threshold raised from 60→75: at 60-74% breadth roughly 25-40% of
+                    # stocks are already weak, making relative-weakness shorts valid.
+                    # At 75%+ the tide is strong enough to lift even weak stocks.
                     policy_block_reason = "nifty_breadth_too_bullish_for_shorts"
                 elif market_policy is not None and not self._strategy_allowed(w.strategy, market_policy.allowed_strategies):
                     policy_block_reason = "policy_strategy_blocked"
