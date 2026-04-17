@@ -4751,7 +4751,7 @@ class UniverseService:
             # silently biased towards BREAKOUT in RISK_OFF/RANGE.
             _regime_preference = {
                 "TREND": ("BREAKOUT", "PULLBACK"),
-                "RANGE": ("MEAN_REVERSION", "PULLBACK"),
+                "RANGE": ("VWAP_TREND", "MEAN_REVERSION", "PULLBACK"),
                 "RISK_OFF": ("MEAN_REVERSION", "PULLBACK"),
             }.get(regime_v2["regimeDaily"], ("MEAN_REVERSION", "BREAKOUT"))
             _sorted = sorted(setup_scores.items(), key=lambda kv: kv[1], reverse=True)

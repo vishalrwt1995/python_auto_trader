@@ -198,10 +198,13 @@ def score_signal(
             bd.penalty -= 10
         elif regime.vix > 18:
             bd.penalty -= 5
-    # RANGE penalty exempts MEAN_REVERSION/VWAP_REVERSAL — these strategies
-    # actually THRIVE in range-bound markets, so penalising them is backwards.
+    # RANGE penalty only applies to strategies that genuinely struggle in range
+    # markets. MEAN_REVERSION, VWAP_REVERSAL, and VWAP_TREND all work in RANGE
+    # (individual stocks trend even when the index ranges). PULLBACK also works
+    # when a stock pulls back to EMA support within its own mini-trend.
     _setup_upper = str(setup or "").strip().upper()
-    if regime.regime == "RANGE" and _setup_upper not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
+    _range_ok = {"MEAN_REVERSION", "VWAP_REVERSAL", "VWAP_TREND", "PULLBACK", "SHORT_PULLBACK"}
+    if regime.regime == "RANGE" and _setup_upper not in _range_ok:
         bd.penalty -= 8
     if ind.adx < 15 and regime.regime != "RANGE":
         bd.penalty -= 5
@@ -264,7 +267,7 @@ def check_strategy_entry(
         if not is_buy and not ind.ema_flip:
             return False, "strategy_pullback_no_bear_ema_stack"
         rsi = ind.rsi.curr
-        if is_buy and not (38 <= rsi <= 60):
+        if is_buy and not (38 <= rsi <= 65):
             return False, "strategy_pullback_rsi_outside_reload_zone"
         if not is_buy and not (40 <= rsi <= 62):
             return False, "strategy_pullback_rsi_outside_reload_zone"

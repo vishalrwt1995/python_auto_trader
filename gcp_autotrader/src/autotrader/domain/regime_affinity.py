@@ -142,18 +142,20 @@ def regime_strategy_multiplier(
 # can still let a 90-score signal sneak through at 0.3× = 27, but hard-block
 # eliminates the strategy entirely so we don't waste a slot.
 _HARD_BLOCKS: dict[str, set[str]] = {
-    # CHOP: no trading at all — even mean-reversion is too noisy to be reliable.
-    # Better to sit out and preserve capital than force a random entry.
+    # CHOP: block high-risk momentum strategies. Keep VWAP_REVERSAL and
+    # VWAP_TREND — individual stocks can still trend/reverse even on choppy
+    # index days, and these provide the best edge in low-conviction markets.
     "CHOP": {
         "BREAKOUT", "SHORT_BREAKDOWN", "PULLBACK", "SHORT_PULLBACK",
-        "MEAN_REVERSION", "VWAP_REVERSAL", "VWAP_TREND",
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
     },
-    # RANGE: allow only mean-reversion family. Breakouts fake out, trend-follow
-    # strategies chop you up.
+    # RANGE: block pure-breakout strategies (fakeouts common) and OPEN_DRIVE
+    # (needs gap/momentum at open). Allow VWAP_TREND — individual stocks trend
+    # within a ranging index all the time, and blocking it leaves the system
+    # unable to trade on broadly bullish range days (breadth=100%).
     "RANGE": {
         "BREAKOUT", "SHORT_BREAKDOWN",
-        "OPEN_DRIVE", "VWAP_TREND", "PHASE1_MOMENTUM",
+        "OPEN_DRIVE", "PHASE1_MOMENTUM",
     },
     # PANIC: only allow counter-trend oversold bounces (MR) or short-breakdown
     # continuation. Everything else gets shredded.
