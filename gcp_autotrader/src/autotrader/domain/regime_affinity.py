@@ -23,6 +23,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "VWAP_TREND": 1.1,
         "OPEN_DRIVE": 1.0,
         "PHASE1_MOMENTUM": 1.2,
+        "PHASE1_REVERSAL": 0.6,   # oversold-bounce picks are wrong in a bull market
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -36,6 +37,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "VWAP_TREND": 0.7,        # SELL path structurally unreachable (label=above-VWAP); BUY in downtrend is low-quality
         "OPEN_DRIVE": 0.8,
         "PHASE1_MOMENTUM": 0.8,
+        "PHASE1_REVERSAL": 1.2,   # oversold bounces are the primary edge in a downtrend
         "AUTO": 0.9,
         "DEFAULT": 0.9,
     },
@@ -49,6 +51,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "VWAP_TREND": 0.7,
         "OPEN_DRIVE": 0.8,
         "PHASE1_MOMENTUM": 0.7,
+        "PHASE1_REVERSAL": 1.0,   # decent — individual oversold stocks can bounce in a range
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -62,6 +65,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "VWAP_TREND": 0.4,
         "OPEN_DRIVE": 0.5,
         "PHASE1_MOMENTUM": 0.4,
+        "PHASE1_REVERSAL": 0.9,   # choppy index can still produce oversold individual-stock bounces
         "AUTO": 0.7,
         "DEFAULT": 0.7,
     },
@@ -75,6 +79,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "VWAP_TREND": 0.2,
         "OPEN_DRIVE": 0.3,
         "PHASE1_MOMENTUM": 0.3,
+        "PHASE1_REVERSAL": 0.9,   # capitulation + oversold = strong reversal candidate
         "AUTO": 0.5,
         "DEFAULT": 0.5,
     },
@@ -88,6 +93,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "VWAP_TREND": 1.0,
         "OPEN_DRIVE": 1.2,
         "PHASE1_MOMENTUM": 1.1,
+        "PHASE1_REVERSAL": 1.1,   # recovery is the ideal environment for oversold-stock bounces
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -129,10 +135,16 @@ def regime_strategy_multiplier(
     # Direction alignment bonus/penalty for directional regimes
     # In TREND_UP, BUY gets the full multiplier; SELL gets a dampening
     # In TREND_DOWN, SELL gets the full multiplier; BUY gets dampening
+    # Exception: PHASE1_REVERSAL and MEAN_REVERSION/VWAP_REVERSAL are
+    # explicitly counter-trend — their BUY scores in TREND_DOWN should
+    # NOT be penalised because buying oversold bounces IS the edge here.
+    _counter_trend_strategies = {"PHASE1_REVERSAL", "MEAN_REVERSION", "VWAP_REVERSAL"}
     if regime_upper == "TREND_UP" and direction == "SELL":
-        mult = min(mult, 0.6)
+        if strategy_upper not in _counter_trend_strategies:
+            mult = min(mult, 0.6)
     elif regime_upper == "TREND_DOWN" and direction == "BUY":
-        mult = min(mult, 0.6)
+        if strategy_upper not in _counter_trend_strategies:
+            mult = min(mult, 0.6)
 
     return max(_MIN_MULT, min(_MAX_MULT, round(mult, 2)))
 

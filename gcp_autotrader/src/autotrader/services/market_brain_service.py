@@ -646,6 +646,12 @@ class MarketBrainService:
             regime = "PANIC"
         elif trend_score >= 70.0 and breadth_score >= 62.0 and leadership_score >= 56.0 and volatility_stress_score <= 48.0:
             regime = "TREND_UP"
+        # High-breadth alternative: even when Nifty daily structure (trend_score) is
+        # weak (e.g. Nifty below EMA50), broad-market participation can still produce
+        # a legitimate trending day. If ≥80% of stocks are above VWAP AND leadership
+        # is solid AND stress is low, call it TREND_UP regardless of index structure.
+        elif breadth_score >= 80.0 and leadership_score >= 60.0 and volatility_stress_score <= 48.0:
+            regime = "TREND_UP"
         elif trend_score <= 36.0 and breadth_score <= 40.0 and leadership_score <= 45.0:
             regime = "TREND_DOWN"
         elif volatility_stress_score >= 62.0 and leadership_score <= 46.0 and risk_appetite <= 46.0:
@@ -671,7 +677,12 @@ class MarketBrainService:
             if trend_score >= 60.0 and breadth_score >= 55.0 and leadership_score >= 50.0:
                 return "TREND_UP"
         if prev.regime not in {"TREND_UP"} and regime == "TREND_UP":
-            if not (trend_score >= 74.0 and breadth_score >= 66.0 and leadership_score >= 58.0):
+            # Allow two qualifying paths into TREND_UP:
+            # 1) Standard: Nifty trend structure is confirmed (trend_score high)
+            # 2) High-breadth: broad participation overrides weak index structure
+            _standard_entry = trend_score >= 74.0 and breadth_score >= 66.0 and leadership_score >= 58.0
+            _highbreadth_entry = breadth_score >= 82.0 and leadership_score >= 62.0 and volatility_stress_score <= 45.0
+            if not (_standard_entry or _highbreadth_entry):
                 return prev.regime
         if prev.regime != regime and regime != "PANIC":
             prev_ts = parse_any_ts(prev.asof_ts)

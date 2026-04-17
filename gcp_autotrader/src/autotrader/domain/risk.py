@@ -20,8 +20,8 @@ def calc_swing_position_size(
 
     raw_qty = int(cfg.swing_risk_per_trade // sl_dist) if sl_dist > 0 else 0
     qty = min(raw_qty, int((cfg.capital * 0.20) // max(entry_price, 1)))  # 20% max capital per swing
-    # Skip trade if even 1 share exceeds 2× risk budget (SL too wide for this stock/ATR)
-    if qty < 1 and sl_dist > cfg.swing_risk_per_trade * 2:
+    # Skip swing trade only if even 1 share exceeds 1.5× risk budget.
+    if qty < 1 and sl_dist > cfg.swing_risk_per_trade * 1.5:
         qty = 0
     else:
         qty = max(1, qty)
@@ -73,8 +73,10 @@ def calc_position_size(
 
     raw_qty = int(cfg.risk_per_trade // sl_dist) if sl_dist > 0 else 0
     qty = min(raw_qty, int((cfg.capital * 0.15) // max(entry_price, 1)))
-    # Skip trade if even 1 share exceeds 2× risk budget (SL too wide for this stock/ATR)
-    if qty < 1 and sl_dist > cfg.risk_per_trade * 2:
+    # Skip trade only if even 1 share would exceed 1.5× risk budget (SL too wide).
+    # Previously this was 2× which forced qty=1 for stocks with SL between 1-2× risk
+    # budget, turning them into trades that risked ₹2,000–4,000 for a ₹2,000 budget.
+    if qty < 1 and sl_dist > cfg.risk_per_trade * 1.5:
         qty = 0
     else:
         qty = max(1, qty)

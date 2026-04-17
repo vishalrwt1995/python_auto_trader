@@ -74,6 +74,10 @@ class WsMonitorService:
         self._exiting: set[str] = set()   # tags being exited — prevent double-exit
         self._last_refresh = 0.0
         self._stop_event = asyncio.Event()
+        # Throttle Firestore SL persistence: track last-persist time per tag.
+        # Breakeven / regime-tighten events persist immediately; trailing updates
+        # are throttled to at most once per 30 seconds to avoid excessive writes.
+        self._sl_last_persist: dict[str, float] = {}
         # Current brain regime — refreshed alongside positions. Used to tighten
         # stops when the market turns while we hold a trend position.
         self._current_regime: str = ""
@@ -249,11 +253,22 @@ class WsMonitorService:
                 pos["sl_moved"] = True
                 sl = pos["sl_price"]
                 logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
+                # Persist immediately — critical: restart must not regress to original SL
+                try:
+                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True})
+                    self._sl_last_persist[tag] = time.time()
+                except Exception as _e:
+                    logger.warning("sl_persist_failed tag=%s err=%s", tag, _e)
             elif side == "SELL" and best <= entry_price - atr * _breakeven_atr_mult:
                 pos["sl_price"] = entry_price - (atr * _breakeven_buffer)
                 pos["sl_moved"] = True
                 sl = pos["sl_price"]
                 logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
+                try:
+                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True})
+                    self._sl_last_persist[tag] = time.time()
+                except Exception as _e:
+                    logger.warning("sl_persist_failed tag=%s err=%s", tag, _e)
 
         # ── Target-passed trailing: when ltp crosses target, don't exit — switch
         # to a tighter trail (1.2× ATR) from best so a strong winner keeps running.
@@ -293,8 +308,15 @@ class WsMonitorService:
                 "regime_change_tighten tag=%s entry=%s now=%s new_sl=%.2f ltp=%.2f",
                 tag, entry_regime, cur_regime, sl, ltp,
             )
+            # Persist immediately — regime tighten is a one-shot risk-reduction event
+            try:
+                self.state.update_position(tag, {"sl_price": sl, "regime_tightened": True})
+                self._sl_last_persist[tag] = time.time()
+            except Exception as _e:
+                logger.warning("sl_persist_failed tag=%s err=%s", tag, _e)
 
         # ── Trailing stop: once past breakeven (or target), trail SL at N× ATR from best ──
+        _sl_changed = False
         if pos.get("sl_moved") and atr > 0:
             trail_dist = atr * _active_trail_mult
             if side == "BUY":
@@ -302,11 +324,21 @@ class WsMonitorService:
                 if new_sl > sl:
                     pos["sl_price"] = new_sl
                     sl = new_sl
+                    _sl_changed = True
             elif side == "SELL":
                 new_sl = round(best + trail_dist, 2)
                 if new_sl < sl:
                     pos["sl_price"] = new_sl
                     sl = new_sl
+                    _sl_changed = True
+        # Persist trailing SL updates throttled to at most once per 30s to avoid
+        # excessive Firestore writes while still surviving a restart.
+        if _sl_changed and time.time() - self._sl_last_persist.get(tag, 0) >= 30:
+            try:
+                self.state.update_position(tag, {"sl_price": sl})
+                self._sl_last_persist[tag] = time.time()
+            except Exception as _e:
+                logger.warning("sl_persist_failed tag=%s err=%s", tag, _e)
 
         # ── SL check only — target is absorbed into trailing once passed ──
         exit_reason: str | None = None

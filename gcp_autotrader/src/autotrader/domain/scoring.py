@@ -100,15 +100,32 @@ def score_signal(
 
     # Layer 2: Options (15)
     if (is_buy and regime.pcr.pcr >= cfg.pcr_bull_min) or ((not is_buy) and regime.pcr.pcr <= cfg.pcr_bear_max):
-        bd.options += 8
+        bd.options += 5
     else:
-        bd.options += 2
-    if regime.pcr.max_pain > 0:
-        mp = regime.pcr.max_pain
-        if (is_buy and ind.close > mp * 0.998) or ((not is_buy) and ind.close < mp * 1.002):
-            bd.options += 7
+        bd.options += 1
+    # OI change PCR: real-time options flow (put OI additions vs call OI additions).
+    # Rising oi_change_pcr = put protection being added = smart money hedging = bearish.
+    # This is more actionable than static PCR snapshot.
+    oi_pcr = regime.pcr.oi_change_pcr  # default 1.0 = neutral
+    if is_buy and oi_pcr < 0.75:
+        bd.options += 3   # call buying dominant → bullish flow confirms BUY
+    elif not is_buy and oi_pcr > 1.35:
+        bd.options += 3   # put buying dominant → bearish flow confirms SELL
+    elif is_buy and oi_pcr > 1.35:
+        bd.options -= 2   # bearish options flow contradicts BUY signal
+    elif not is_buy and oi_pcr < 0.75:
+        bd.options -= 2   # bullish options flow contradicts SELL signal
+    # Max-pain proximity: use the pre-computed % distance from Nifty max-pain
+    # (max_pain_dist_pct = abs(nifty_ltp - max_pain) / max_pain × 100).
+    # The old code compared stock price to Nifty max-pain strike — meaningless.
+    if regime.pcr.max_pain_dist_pct > 0 or regime.pcr.max_pain > 0:
+        mp_dist = regime.pcr.max_pain_dist_pct  # % distance of Nifty from max pain
+        if mp_dist <= 1.0:
+            bd.options += 7   # Nifty pinned near max pain — strong mean-reversion force
+        elif mp_dist <= 2.5:
+            bd.options += 4   # moderately close to max pain
         else:
-            bd.options += 3
+            bd.options += 2   # far from max pain — max-pain gravity weak
     else:
         bd.options += 4
     bd.options = min(15, bd.options)
@@ -354,6 +371,20 @@ def check_strategy_entry(
             return False, "strategy_phase1_insufficient_volume"
         return True, ""
 
+    if s == "PHASE1_REVERSAL":
+        # Oversold-bounce setup selected in bearish markets — long-only (we're
+        # looking for beaten-down stocks to bounce, not fresh shorts).
+        if not is_buy:
+            return False, "strategy_phase1_reversal_long_only"
+        # Must be in oversold territory — if RSI is already above 55, the
+        # "reversal" has already played out and the edge is gone.
+        if ind.rsi.curr > 55:
+            return False, "strategy_phase1_reversal_rsi_too_high"
+        # Require at least near-average volume
+        if ind.volume.ratio < 0.8:
+            return False, "strategy_phase1_reversal_insufficient_volume"
+        return True, ""
+
     # OPEN_DRIVE, AUTO, DEFAULT, etc. — no extra gate
     return True, ""
 
@@ -371,7 +402,7 @@ def check_swing_entry(
     the intraday IndicatorSnapshot for basic checks.
     """
     if daily_bias is None:
-        return True, ""  # No daily data — pass through, let score handle it
+        return False, "swing_no_daily_data"  # Swing trades need daily context — skip without it
 
     s = str(strategy or "").strip().upper()
     is_buy = direction == "BUY"

@@ -281,7 +281,7 @@ class TradingService:
         if wl_filter not in {"intraday", "swing", "all"}:
             wl_filter = "all"
         self.log_sink.action("TradingService", "run_scan_once", "START", "", {"wlFilter": wl_filter})
-        lease = self.state.try_acquire_lock("run_scan_once", ttl_seconds=90)
+        lease = self.state.try_acquire_lock("run_scan_once", ttl_seconds=180)
         if lease is None:
             self.log_sink.action("TradingService", "run_scan_once", "SKIP", "lock busy")
             self.log_sink.flush_all()
@@ -615,7 +615,7 @@ class TradingService:
                     "AGGRESSIVE": 75,   # bar raised: only the best in bull runs
                     "NORMAL":     72,   # unchanged
                     "DEFENSIVE":  58,   # ≈ raw 72 after ×0.82×0.88 adjustment
-                    "LOCKDOWN":   45,   # ≈ raw 85 after ×0.60×0.88 adjustment
+                    "LOCKDOWN":   52,   # ≈ raw 98 after ×0.60×0.88 adjustment — only the very best survive
                 }
                 # RANGE regime: do NOT lower the bar.
                 # Previously we dropped min score to 65 for RANGE to allow MEAN_REVERSION

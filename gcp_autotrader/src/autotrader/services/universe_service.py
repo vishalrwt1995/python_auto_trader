@@ -4866,15 +4866,17 @@ class UniverseService:
                     + (0.20 * liquidity_component)
                     + (0.15 * vol_sanity_component)
                 ) * 100.0
+                _phase1_label = "PHASE1_REVERSAL"   # oversold bounce candidates in bearish market
             else:
                 momentum_component = self._norm_minmax_clip(ret20, -0.20, 0.20)
                 phase1_score = self._clip01((0.40 * momentum_component) + (0.25 * liquidity_component) + (0.20 * vol_sanity_component) + (0.15 * adx_p1_component)) * 100.0
+                _phase1_label = "PHASE1_MOMENTUM"   # upside momentum candidates in bullish market
 
             intraday_phase1.append(
                 {
                     **r,
                     "score": float(round(phase1_score, 2)),
-                    "setupLabel": "PHASE1_MOMENTUM",
+                    "setupLabel": _phase1_label,
                     "momentumComponent": self._norm_minmax_clip(ret20, -0.20, 0.20),
                     "liquidityComponent": liquidity_component,
                     "volSanityComponent": vol_sanity_component,
