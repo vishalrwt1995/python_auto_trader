@@ -260,7 +260,7 @@ def score_signal(
     _range_ok = {"MEAN_REVERSION", "VWAP_REVERSAL", "VWAP_TREND", "PULLBACK", "SHORT_PULLBACK"}
     if regime.regime == "RANGE" and _setup_upper not in _range_ok:
         bd.penalty -= 8
-    if ind.adx < 15 and regime.regime != "RANGE":
+    if ind.adx > 0 and ind.adx < 15 and regime.regime != "RANGE":
         bd.penalty -= 5
     if abs(ind.close - ind.open) / (ind.close or 1) * 100 > 2.5:
         bd.penalty -= 5
