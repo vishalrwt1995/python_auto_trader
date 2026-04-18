@@ -331,6 +331,21 @@ def check_strategy_entry(
             return False, "strategy_pullback_rsi_outside_reload_zone"
         if not is_buy and not (40 <= rsi <= 62):
             return False, "strategy_pullback_rsi_outside_reload_zone"
+        # Actual pullback check: price must be near fast EMA support/resistance
+        # (within ±3%). If price is >3% above EMA for BUY, it already ran — not a pullback.
+        # If price is >3% below EMA for BUY, the trend is broken — not a pullback entry.
+        if ind.ema_fast.curr > 0:
+            _ema_dist_pct = (ind.close - ind.ema_fast.curr) / ind.ema_fast.curr * 100.0
+            if is_buy:
+                if _ema_dist_pct > 3.0:
+                    return False, "strategy_pullback_price_extended_above_ema"
+                if _ema_dist_pct < -3.0:
+                    return False, "strategy_pullback_price_broke_below_ema"
+            else:
+                if _ema_dist_pct < -3.0:
+                    return False, "strategy_pullback_price_extended_below_ema"
+                if _ema_dist_pct > 3.0:
+                    return False, "strategy_pullback_price_broke_above_ema"
         return True, ""
 
     if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
@@ -368,7 +383,7 @@ def check_strategy_entry(
 
         if ind.vwap > 0:
             vwap_dev = abs(ind.close - ind.vwap) / ind.vwap * 100
-            if vwap_dev < 1.5:
+            if vwap_dev < 1.0:
                 return False, "strategy_mr_insufficient_vwap_extension"
         return True, ""
 

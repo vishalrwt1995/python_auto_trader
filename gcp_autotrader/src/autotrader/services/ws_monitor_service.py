@@ -39,9 +39,8 @@ _HARD_STOP_MINUTE = 15 * 60 + 30   # 15:30 IST
 
 def _ist_minutes_now() -> int:
     utc_sec = time.time()
-    ist_sec = utc_sec + _IST_OFFSET
-    dt = datetime.utcfromtimestamp(ist_sec)
-    return dt.hour * 60 + dt.minute
+    ist_sec = int(utc_sec) + _IST_OFFSET
+    return ((ist_sec % 86400) // 3600) * 60 + ((ist_sec % 3600) // 60)
 
 
 class WsMonitorService:
@@ -242,6 +241,21 @@ class WsMonitorService:
         best = pos.get("best_price", entry_price)
         sl_dist = pos.get("sl_dist", 0.0)
         original_qty = pos.get("original_qty", 0)
+
+        # Emergency SL: if sl_price is 0 (missing), compute from ATR to prevent unlimited loss
+        if sl == 0.0 and entry_price > 0 and atr > 0:
+            _emergency_dist = atr * 2.0
+            sl = round(entry_price - _emergency_dist, 2) if side == "BUY" else round(entry_price + _emergency_dist, 2)
+            pos["sl_price"] = sl
+            logger.warning(
+                "emergency_sl_assigned tag=%s sl=%.2f entry=%.2f atr=%.2f side=%s",
+                tag, sl, entry_price, atr, side,
+            )
+            try:
+                self.state.update_position(tag, {"sl_price": sl})
+                self._sl_last_persist[tag] = time.time()
+            except Exception as _e:
+                logger.warning("emergency_sl_persist_failed tag=%s err=%s", tag, _e)
 
         # ── Track best price seen since entry ────────────────────────
         if side == "BUY" and ltp > best:
@@ -504,6 +518,8 @@ class WsMonitorService:
 
     async def _on_disconnect(self) -> None:
         logger.warning("ws_disconnected — will reconnect")
+        # Refresh positions on reconnect: picks up new positions, drops closed ones
+        await self._refresh_positions()
         # Re-fetch the access token from Secret Manager on every disconnect so
         # that a daily token rotation (Upstox tokens expire at 03:30 IST) or a
         # manual token refresh is automatically picked up without a service restart.

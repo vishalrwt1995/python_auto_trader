@@ -443,7 +443,7 @@ class MarketBrainService:
         atr_med = float(daily.get("atrMedian252") or 0.0)
         range_exp = float(intraday.get("rangeExpansion30m") or 0.0)
         slope = abs(float(intraday.get("vwapSlope") or 0.0))
-        vix = float(live_regime.vix) if live_regime is not None else 0.0
+        vix = float(live_regime.vix) if (live_regime is not None and live_regime.vix > 0) else 15.0  # 15.0 = neutral Indian VIX; 0 means fetch failed
         chop = float(getattr(getattr(live_regime, "nifty_structure", None), "chop_risk", 0.0) or 0.0) if live_regime else 0.0
         gap = abs(float(getattr(getattr(live_regime, "nifty_structure", None), "gap_pct", 0.0) or 0.0)) if live_regime else 0.0
         atr_p = (atr_pct / atr_med) if atr_med > 0 else 1.0
@@ -801,6 +801,21 @@ class MarketBrainService:
         )
         trend_score = self._compute_trend_score(regime_ctx)
         breadth = self.compute_breadth_snapshot(expected_lcd=expected_lcd, rows=rows)
+        # Guard against false PANIC from breadth data fetch failure.
+        # If processedCount < 10 and score < 5, it's likely a data miss — use neutral 50.0.
+        # A genuine market crash will have data (stocks trade every day), so processedCount
+        # will be high even on bad days. Zero processedCount = service failure, not PANIC.
+        _breadth_processed = float(breadth.get("processedCount") or 0.0)
+        _breadth_score_raw = float(breadth.get("score") or 0.0)
+        if _breadth_score_raw < 5.0 and _breadth_processed < 10:
+            logger.warning(
+                "breadth_data_sparse processed=%.0f score=%.1f — fallback to neutral 50.0",
+                _breadth_processed, _breadth_score_raw,
+            )
+            breadth = dict(breadth)
+            breadth["score"] = 50.0
+            breadth["_fallback"] = True
+            breadth["_original_score"] = _breadth_score_raw
         leadership = self.compute_leadership_snapshot(expected_lcd=expected_lcd, rows=rows, now_i=asof_i)
 
         live_regime: RegimeSnapshot | None = None

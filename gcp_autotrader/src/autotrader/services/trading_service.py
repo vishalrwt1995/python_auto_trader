@@ -299,9 +299,25 @@ class TradingService:
                 brain_state = self.market_brain_service.build_post_open_market_brain(now_ist().isoformat())
                 market_policy = self.market_brain_service.derive_market_policy(brain_state)
             except Exception:
-                logger.exception("scan_once market_brain_v2_unavailable")
-                self.log_sink.action("TradingService", "run_scan_once", "SKIP", "market_brain_v2_unavailable")
-                return {"skipped": "market_brain_v2_unavailable"}
+                logger.warning("scan_once market_brain_build_failed — trying last_known_good", exc_info=True)
+                try:
+                    brain_state = self.market_brain_service.read_latest_market_brain_state()
+                    if brain_state is None:
+                        raise ValueError("no_last_known_good_brain_state")
+                    market_policy = self.market_brain_service.derive_market_policy(brain_state)
+                    logger.warning(
+                        "scan_once using last_known_good brain_state ts=%s regime=%s",
+                        brain_state.asof_ts, brain_state.regime,
+                    )
+                    self.log_sink.action(
+                        "TradingService", "run_scan_once", "WARN",
+                        "using_last_known_good_brain_state",
+                        {"asof_ts": brain_state.asof_ts, "regime": brain_state.regime},
+                    )
+                except Exception:
+                    logger.exception("scan_once market_brain_v2_unavailable — no fallback")
+                    self.log_sink.action("TradingService", "run_scan_once", "SKIP", "market_brain_v2_unavailable")
+                    return {"skipped": "market_brain_v2_unavailable"}
 
             regime = MarketRegimeService.from_market_brain_state(brain_state)
             self.log_sink.decision(
@@ -360,6 +376,11 @@ class TradingService:
             # only in clearly-favourable regimes so we don't over-expose in chop.
             if brain_state and brain_state.regime in ("TREND_UP", "RECOVERY"):
                 max_signals_allowed = max(max_signals_allowed, 5)
+
+            # Floor: always allow at least 2 signals regardless of regime/risk-mode.
+            # A DEFENSIVE multiplier of 0.70 × 3 max_positions rounds to 2 — acceptable.
+            # But if max_positions=2, DEFENSIVE gives 1 — too restrictive for diversification.
+            max_signals_allowed = max(2, max_signals_allowed)
 
             # ── Daily PnL circuit breakers ────────────────────────────────
             # Enforce max_daily_loss and daily_profit_target before scanning.
@@ -484,6 +505,11 @@ class TradingService:
                     logger.info("live_ltp_prefetch fetched=%d of %d", len(live_ltp_map), len(_all_iks))
                 except Exception:
                     logger.warning("live_ltp_prefetch_failed — falling back to candle close", exc_info=True)
+
+            # VWAP guard is only reliable after 09:30 IST — before that, only 1-2 candles
+            # exist and VWAP is essentially just the open price, causing false blocks.
+            _ist_now = now_ist()
+            _vwap_guard_active = (_ist_now.hour * 60 + _ist_now.minute) >= (9 * 60 + 30)
 
             for w in subset:
                 _is_swing = getattr(w, "wl_type", "intraday") == "swing"
@@ -789,9 +815,9 @@ class TradingService:
                     policy_block_reason = "stale_signal_price_moved"
                 # Live VWAP guard: if price drifted to wrong side of VWAP since candle close, reject entry.
                 # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
-                elif direction == "BUY" and _live > 0 and ltp < ind.vwap and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
+                elif direction == "BUY" and _live > 0 and ltp < ind.vwap and _vwap_guard_active and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
                     policy_block_reason = "live_price_below_vwap"
-                elif direction == "SELL" and _live > 0 and ltp > ind.vwap and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
+                elif direction == "SELL" and _live > 0 and ltp > ind.vwap and _vwap_guard_active and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
                     policy_block_reason = "live_price_above_vwap"
                 else:
                     # Strategy-specific hard gates: validate that the current market
