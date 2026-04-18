@@ -413,6 +413,32 @@ class TradingService:
             _portfolio_sectors = self._build_portfolio_sector_map()
             _MAX_SAME_SECTOR = 2   # hard cap: max positions from one sector
 
+            # Strategy concentration: pre-build strategy count of open positions.
+            # Prevents running 3 BREAKOUT positions simultaneously — correlated signals
+            # that all lose together when the breakout fails (same market condition).
+            _open_positions_all = self.state.list_open_positions()
+            _portfolio_strategies: dict[str, int] = {}
+            for _op in _open_positions_all:
+                _strat = str(_op.get("strategy") or "").strip().upper()
+                if _strat and _strat not in ("AUTO", "DEFAULT", ""):
+                    _portfolio_strategies[_strat] = _portfolio_strategies.get(_strat, 0) + 1
+            _MAX_SAME_STRATEGY = 2   # max 2 positions of the same setup type at once
+
+            # Earnings blackout: read Firestore config/earnings_blackout document.
+            # Format: {"symbols": {"RELIANCE": "2026-04-25"}, "blackout_days": 2}
+            # Maintained manually (or via a weekly update script). Prevents entering
+            # positions 2 days before/after results when gap risk is maximum.
+            _earnings_blackout: dict[str, str] = {}
+            _blackout_days = 2
+            try:
+                _eb_cfg = self.state.get_json("config", "earnings_blackout") or {}
+                _earnings_blackout = {
+                    str(k).upper(): str(v) for k, v in (_eb_cfg.get("symbols") or {}).items()
+                }
+                _blackout_days = int(_eb_cfg.get("blackout_days", 2))
+            except Exception:
+                pass  # earnings blackout is best-effort — don't block the scan
+
             # Count existing swing positions for separate cap
             _open_swing_count = sum(
                 1 for p in self.state.list_open_positions()
@@ -599,6 +625,20 @@ class TradingService:
                 else:
                     _atr_mult = self.settings.strategy.atr_sl_mult
 
+                # Per-stock ATR-% adaptive tier: different stocks have fundamentally
+                # different volatility profiles (HDFC moves 0.5% daily; TATASTEEL 2.5%).
+                # Apply a final multiplier so low-vol stocks get tighter SLs (less room
+                # wasted) and high-vol stocks get wider SLs (prevent noise-stops).
+                if ltp > 0 and ind.atr > 0:
+                    _atr_pct = ind.atr / ltp   # ATR as % of price
+                    if _atr_pct < 0.008:        # Very low vol (HDFC, ITC type)
+                        _atr_mult = round(_atr_mult * 0.85, 3)
+                    elif _atr_pct > 0.025:      # Very high vol (metals, PSU micro)
+                        _atr_mult = round(_atr_mult * 1.25, 3)
+                    elif _atr_pct > 0.018:      # Above-average vol
+                        _atr_mult = round(_atr_mult * 1.10, 3)
+                    _atr_mult = max(0.8, min(3.0, _atr_mult))   # sensible floor/ceiling
+
                 if _is_swing:
                     pos = calc_swing_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult if _atr_mult != self.settings.strategy.atr_sl_mult else None)
                 else:
@@ -768,6 +808,26 @@ class TradingService:
                         _sym_sector = w.sector.upper()
                         if len(_portfolio_sectors.get(_sym_sector, [])) >= _MAX_SAME_SECTOR:
                             policy_block_reason = "portfolio_sector_concentrated"
+                    # Strategy concentration: max 2 of the same setup type at once.
+                    # Prevents 3 correlated BREAKOUT/VWAP_TREND signals firing together
+                    # — they all fail for the same reason (same market condition).
+                    elif (
+                        w.strategy
+                        and str(w.strategy).strip().upper() not in ("AUTO", "DEFAULT")
+                        and _portfolio_strategies.get(str(w.strategy).strip().upper(), 0) >= _MAX_SAME_STRATEGY
+                    ):
+                        policy_block_reason = "portfolio_strategy_concentrated"
+                    # Earnings blackout: skip symbols ±2 days around earnings results.
+                    elif str(w.symbol).strip().upper() in _earnings_blackout:
+                        _result_date_str = _earnings_blackout[str(w.symbol).strip().upper()]
+                        try:
+                            from datetime import date as _date_cls
+                            _result_date = _date_cls.fromisoformat(_result_date_str)
+                            _days_delta = abs((_result_date - _date_cls.today()).days)
+                            if _days_delta <= _blackout_days:
+                                policy_block_reason = f"earnings_blackout_{_result_date_str}"
+                        except Exception:
+                            pass  # malformed date — don't block
 
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
                 if direction != "HOLD" and adjusted_score >= dynamic_min_score and is_entry_window_open_ist() and not policy_block_reason:
@@ -813,6 +873,9 @@ class TradingService:
                         _open_swing_count += 1
                     if w.sector and w.sector.upper() != "UNKNOWN":
                         _portfolio_sectors.setdefault(w.sector.upper(), []).append(w.symbol)
+                    _strat_key = str(w.strategy or "").strip().upper()
+                    if _strat_key and _strat_key not in ("AUTO", "DEFAULT"):
+                        _portfolio_strategies[_strat_key] = _portfolio_strategies.get(_strat_key, 0) + 1
                     self.order_service.place_entry_order(
                         symbol=w.symbol,
                         exchange=w.exchange,

@@ -147,6 +147,7 @@ class OrderService:
         wl_type: str = "intraday",
         instrument_key: str = "",
     ) -> None:
+        _sl_dist = round(abs(entry_price - sl_price), 4)
         doc = {
             "position_tag": position_tag,
             "symbol": symbol,
@@ -154,6 +155,8 @@ class OrderService:
             "segment": segment,
             "side": side,
             "qty": qty,
+            "original_qty": qty,        # never mutated — used for partial exit sizing
+            "sl_dist": _sl_dist,        # distance from entry to SL — used for R-multiple targets
             "entry_price": round(entry_price, 2),
             "sl_price": round(sl_price, 2),
             "target": round(target, 2),
@@ -166,6 +169,9 @@ class OrderService:
             "entry_ts": now_ist_str(),
             "exit_ts": "",
             "pnl": 0.0,
+            "partial_pnl": 0.0,         # accumulated P&L from partial exits (not in final pnl yet)
+            "partial_exit_1_done": False,
+            "partial_exit_2_done": False,
             "regime": regime,
             "risk_mode": risk_mode,
             "signal_score": signal_score,
@@ -630,6 +636,116 @@ class OrderService:
             "order_id": order_id,
             "exit_price": fill_price,
             "exit_reason": exit_reason,
+            "filled": probe.get("filled", False),
+        }
+
+    def place_partial_exit_order(
+        self,
+        *,
+        position_tag: str,
+        instrument_key: str,
+        exit_qty: int,
+        exit_reason: str = "PARTIAL_TARGET",
+    ) -> dict[str, Any]:
+        """Exit a fraction of the position, reducing qty in Firestore but keeping status OPEN.
+
+        Called by ws_monitor at Stage 1 (1:1 R:R, 40%) and Stage 2 (1.5:1 R:R, 30%).
+        The final remaining qty is closed by the normal `place_exit_order` path.
+
+        For paper trades: uses live LTP as exit price, records partial P&L.
+        For live trades: places a MARKET order for `exit_qty` shares. The bracket SL/target
+        still covers the full original qty at broker level — on the next SL/target hit,
+        only `qty_remaining` will be booked (the rest already exited). This works correctly
+        because the live position's net qty at broker matches Firestore after partial fills.
+        """
+        pos = self.state.get_position(position_tag)
+        if not pos:
+            return {"error": "position_not_found", "tag": position_tag}
+        if str(pos.get("status", "")) != "OPEN":
+            return {"skipped": "already_closed", "tag": position_tag}
+
+        symbol = str(pos.get("symbol") or "")
+        side = str(pos.get("side") or "BUY").upper()
+        current_qty = int(pos.get("qty") or 0)
+        exit_qty = max(1, min(exit_qty, current_qty - 1))  # always leave at least 1 share
+        remaining_qty = current_qty - exit_qty
+        exit_side = "SELL" if side == "BUY" else "BUY"
+        entry_price = float(pos.get("entry_price") or 0)
+        paper = self.settings.runtime.paper_trade
+
+        if paper:
+            try:
+                quote = self.upstox.get_quote(instrument_key)
+                exit_price = quote.ltp or entry_price
+            except Exception:
+                exit_price = entry_price
+            multiplier = 1 if side == "BUY" else -1
+            partial_pnl = round((exit_price - entry_price) * exit_qty * multiplier, 2)
+            new_partial_pnl = round(float(pos.get("partial_pnl", 0)) + partial_pnl, 2)
+            self.state.update_position(position_tag, {
+                "qty": remaining_qty,
+                "partial_pnl": new_partial_pnl,
+                f"{exit_reason.lower()}_exit_price": round(exit_price, 2),
+                f"{exit_reason.lower()}_exit_qty": exit_qty,
+            })
+            logger.info(
+                "paper_partial_exit tag=%s reason=%s exit_qty=%d remaining=%d price=%.2f pnl=%.2f",
+                position_tag, exit_reason, exit_qty, remaining_qty, exit_price, partial_pnl,
+            )
+            return {
+                "paper": True, "partial": True,
+                "exit_price": exit_price, "exit_qty": exit_qty,
+                "remaining_qty": remaining_qty, "partial_pnl": partial_pnl,
+            }
+
+        # Live: place MARKET order for exit_qty, then update Firestore qty
+        ref_id = make_ref_id()
+        _pos_wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
+        _exit_product = "D" if _pos_wl_type == "swing" else "I"
+        try:
+            resp = self.upstox.place_order({
+                "quantity": exit_qty,
+                "product": _exit_product,
+                "validity": "DAY",
+                "price": 0,
+                "tag": ref_id,
+                "instrument_token": instrument_key,
+                "order_type": "MARKET",
+                "transaction_type": exit_side,
+                "disclosed_quantity": 0,
+                "trigger_price": 0,
+                "is_amo": False,
+            })
+        except Exception as exc:
+            logger.exception("partial_exit_order_failed tag=%s", position_tag)
+            return {"error": str(exc), "tag": position_tag}
+
+        order_id = str(resp.get("order_id") or resp.get("data", {}).get("order_id") or ref_id)
+        probe = self._await_fill(order_id, ref_id, exit_qty, timeout_ms=8_000)
+        fill_price = float((probe.get("snapshot") or {}).get("avg_fill_price") or 0)
+        if fill_price <= 0:
+            try:
+                fill_price = float(self.upstox.get_quote(instrument_key).ltp or entry_price)
+            except Exception:
+                fill_price = entry_price
+
+        multiplier = 1 if side == "BUY" else -1
+        partial_pnl = round((fill_price - entry_price) * exit_qty * multiplier, 2)
+        new_partial_pnl = round(float(pos.get("partial_pnl", 0)) + partial_pnl, 2)
+        self.state.update_position(position_tag, {
+            "qty": remaining_qty,
+            "partial_pnl": new_partial_pnl,
+            f"{exit_reason.lower()}_exit_price": round(fill_price, 2),
+            f"{exit_reason.lower()}_exit_qty": exit_qty,
+        })
+        logger.info(
+            "live_partial_exit tag=%s reason=%s exit_qty=%d remaining=%d fill=%.2f pnl=%.2f",
+            position_tag, exit_reason, exit_qty, remaining_qty, fill_price, partial_pnl,
+        )
+        return {
+            "order_id": order_id, "partial": True,
+            "exit_price": fill_price, "exit_qty": exit_qty,
+            "remaining_qty": remaining_qty, "partial_pnl": partial_pnl,
             "filled": probe.get("filled", False),
         }
 

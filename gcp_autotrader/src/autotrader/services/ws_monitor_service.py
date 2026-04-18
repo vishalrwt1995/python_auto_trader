@@ -166,6 +166,10 @@ class WsMonitorService:
                 # Preserve best_price tracking across refreshes
                 old = self._positions.get(ikey, {})
                 wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
+                _orig_qty = int(pos.get("original_qty") or pos.get("qty") or 0)
+                _sl_dist = float(pos.get("sl_dist") or 0)
+                if _sl_dist <= 0 and entry_price > 0:
+                    _sl_dist = abs(entry_price - float(pos.get("sl_price") or entry_price))
                 new_map[ikey] = {
                     "position_tag": tag,
                     "sl_price": float(pos.get("sl_price") or 0),
@@ -185,6 +189,11 @@ class WsMonitorService:
                     # we switch to a tighter trail to let the winner run.
                     "target_passed": old.get("target_passed", False),
                     "regime_tightened": old.get("regime_tightened", False),
+                    # Partial exit tracking — read from Firestore (persisted) or carry forward
+                    "original_qty": _orig_qty,
+                    "sl_dist": _sl_dist,
+                    "partial_exit_1_done": pos.get("partial_exit_1_done", old.get("partial_exit_1_done", False)),
+                    "partial_exit_2_done": pos.get("partial_exit_2_done", old.get("partial_exit_2_done", False)),
                 }
             self._positions = new_map
             self._last_refresh = time.time()
@@ -231,6 +240,8 @@ class WsMonitorService:
         entry_price = pos.get("entry_price", 0.0)
         atr = pos.get("atr", 0.0)
         best = pos.get("best_price", entry_price)
+        sl_dist = pos.get("sl_dist", 0.0)
+        original_qty = pos.get("original_qty", 0)
 
         # ── Track best price seen since entry ────────────────────────
         if side == "BUY" and ltp > best:
@@ -315,6 +326,51 @@ class WsMonitorService:
             except Exception as _e:
                 logger.warning("sl_persist_failed tag=%s err=%s", tag, _e)
 
+        # ── Partial exits: 3-stage profit capture ─────────────────────────────
+        # Stage 1 at 1:1 R:R (40% of position): locks in partial profit, SL moves to breakeven.
+        # Stage 2 at 1.5:1 R:R (30% of position): books more while trade runs.
+        # Remaining 30%: trails via the standard trailing-stop logic below.
+        # Only active on intraday (bracket handles the full qty at broker level for live).
+        # Skipped if sl_dist is unknown or original_qty is too small to split.
+        if sl_dist > 0 and original_qty >= 3 and not is_swing:
+            _stage1_price = (entry_price + sl_dist) if side == "BUY" else (entry_price - sl_dist)
+            _stage2_price = (entry_price + sl_dist * 1.5) if side == "BUY" else (entry_price - sl_dist * 1.5)
+
+            _stage1_hit = (side == "BUY" and ltp >= _stage1_price) or (side == "SELL" and ltp <= _stage1_price)
+            _stage2_hit = (side == "BUY" and ltp >= _stage2_price) or (side == "SELL" and ltp <= _stage2_price)
+
+            if _stage1_hit and not pos.get("partial_exit_1_done"):
+                _exit_qty_1 = max(1, int(original_qty * 0.4))
+                pos["partial_exit_1_done"] = True
+                # Move SL to breakeven immediately on stage-1 trigger
+                _be_buffer = atr * 0.1 if atr > 0 else 0
+                _new_be_sl = round(entry_price + _be_buffer, 2) if side == "BUY" else round(entry_price - _be_buffer, 2)
+                if (side == "BUY" and _new_be_sl > sl) or (side == "SELL" and (_new_be_sl < sl or sl == 0)):
+                    pos["sl_price"] = _new_be_sl
+                    pos["sl_moved"] = True
+                    sl = _new_be_sl
+                try:
+                    self.state.update_position(tag, {
+                        "partial_exit_1_done": True,
+                        "sl_price": sl,
+                        "sl_moved": True,
+                    })
+                    self._sl_last_persist[tag] = time.time()
+                except Exception as _e:
+                    logger.warning("partial_persist_failed tag=%s err=%s", tag, _e)
+                logger.info("partial_exit_stage1 tag=%s qty=%d ltp=%.2f sl_moved_to=%.2f", tag, _exit_qty_1, ltp, sl)
+                asyncio.create_task(self._do_partial_exit(tag, instrument_key, _exit_qty_1, "PARTIAL_1R"))
+
+            elif _stage2_hit and pos.get("partial_exit_1_done") and not pos.get("partial_exit_2_done"):
+                _exit_qty_2 = max(1, int(original_qty * 0.3))
+                pos["partial_exit_2_done"] = True
+                try:
+                    self.state.update_position(tag, {"partial_exit_2_done": True})
+                except Exception as _e:
+                    logger.warning("partial_persist_failed tag=%s err=%s", tag, _e)
+                logger.info("partial_exit_stage2 tag=%s qty=%d ltp=%.2f", tag, _exit_qty_2, ltp)
+                asyncio.create_task(self._do_partial_exit(tag, instrument_key, _exit_qty_2, "PARTIAL_1_5R"))
+
         # ── Trailing stop: once past breakeven (or target), trail SL at N× ATR from best ──
         _sl_changed = False
         if pos.get("sl_moved") and atr > 0:
@@ -388,6 +444,32 @@ class WsMonitorService:
         except Exception:
             logger.exception("exit_failed tag=%s", tag)
             self._exiting.discard(tag)   # allow retry on next tick
+
+    async def _do_partial_exit(self, tag: str, instrument_key: str, exit_qty: int, reason: str) -> None:
+        """Place a partial exit order without closing the position.
+
+        The position stays OPEN with reduced qty.  Final exit happens via the
+        normal _do_exit path when SL or trailing stop is hit on the remainder.
+        """
+        try:
+            from autotrader.services.order_service import OrderService
+            os_svc: OrderService = self._get_order_service()
+            result = os_svc.place_partial_exit_order(
+                position_tag=tag,
+                instrument_key=instrument_key,
+                exit_qty=exit_qty,
+                exit_reason=reason,
+            )
+            logger.info("partial_exit_done tag=%s reason=%s result=%s", tag, reason, result)
+            # Update in-memory qty so the next tick uses the correct remaining qty
+            for ikey, pos in self._positions.items():
+                if pos.get("position_tag") == tag:
+                    _rem = result.get("remaining_qty", 0)
+                    if _rem > 0:
+                        pos["qty"] = _rem
+                    break
+        except Exception:
+            logger.exception("partial_exit_failed tag=%s reason=%s", tag, reason)
 
     # ------------------------------------------------------------------ #
     # EOD watchdog

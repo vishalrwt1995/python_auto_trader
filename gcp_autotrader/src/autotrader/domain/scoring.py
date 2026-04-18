@@ -174,6 +174,29 @@ def score_signal(
 
     if (is_buy and ind.patterns.bull_engulf) or ((not is_buy) and ind.patterns.bear_engulf):
         bd.technical = min(35, bd.technical + 2)
+
+    # Relative Strength vs Nifty: stocks leading the market in the trade direction
+    # are higher quality — they'll be the first to move AND will resist adverse Nifty moves.
+    # Stocks diverging (stock falling while market rising, or vice versa) are low quality.
+    # Only applied when Nifty has moved meaningfully (≥0.15%) to avoid noise on flat days.
+    if ind.prev_close > 0 and abs(regime.nifty.change_pct) >= 0.15:
+        _stock_chg = (ind.close - ind.prev_close) / ind.prev_close * 100.0
+        _rs = _stock_chg / regime.nifty.change_pct   # ratio: 1.0 = in-line, >1 = outperform
+        if is_buy:
+            if _rs >= 2.0:
+                bd.technical += 4    # Strong leadership — stock up 2× more than market
+            elif _rs >= 1.3:
+                bd.technical += 2    # Moderate outperformance
+            elif _rs <= 0.0:
+                bd.technical -= 3    # Divergence — stock falling while market rising
+        else:  # SELL
+            if _rs <= 0.0:
+                bd.technical += 4    # True relative weakness — stock falling vs flat/rising market
+            elif _rs <= 0.5:
+                bd.technical += 2    # Significant underperformance
+            elif _rs >= 2.0:
+                bd.technical -= 3    # Wrong side — stock is leading upward
+
     bd.technical = min(35, bd.technical)
     score += bd.technical
 
