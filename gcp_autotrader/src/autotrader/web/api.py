@@ -1850,3 +1850,30 @@ def run_bq_backfill_candles_1d(
     c = get_container()
     _auth(c.settings.runtime.job_trigger_token, x_job_token)
     return c.universe_service().backfill_candles_1d_to_bq()
+
+
+@app.post("/jobs/refresh-earnings-calendar")
+def run_refresh_earnings_calendar(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Fetch latest Q4/Q1 result dates from NSE and update config/earnings_blackout.
+
+    Scheduled: every Sunday 08:00 IST via Cloud Scheduler.
+    Safe to call manually at any time — merges new dates, keeps manual overrides.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    try:
+        from autotrader.services.earnings_calendar_service import refresh_earnings_blackout
+        result = refresh_earnings_blackout(
+            project_id=c.settings.runtime.gcp_project_id,
+            database=c.settings.runtime.firestore_database,
+        )
+        logger.info("earnings_calendar_refresh_done result=%s ctx=%s", result, sched_ctx)
+        return {"ok": True, **result}
+    except Exception as exc:
+        logger.exception("earnings_calendar_refresh_failed")
+        return {"ok": False, "error": str(exc)}
