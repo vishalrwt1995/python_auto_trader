@@ -118,6 +118,27 @@ class MarketBrainService:
         context: dict[str, Any] | None = None,
         policy: MarketPolicy | None = None,
     ) -> None:
+        # Sanity validation before persisting — prevents corrupted state from becoming
+        # "last-known-good" and contaminating future fallback reads.
+        _valid_regimes = {"TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"}
+        _valid_risk_modes = {"NORMAL", "DEFENSIVE", "AGGRESSIVE", "LOCKDOWN"}
+        if str(state.regime or "").upper() not in _valid_regimes:
+            logger.error(
+                "persist_market_brain_state BLOCKED: invalid regime=%r — state not saved",
+                state.regime,
+            )
+            return
+        if str(state.risk_mode or "").upper() not in _valid_risk_modes:
+            logger.error(
+                "persist_market_brain_state BLOCKED: invalid risk_mode=%r — state not saved",
+                state.risk_mode,
+            )
+            return
+        # Score plausibility: if ALL scores are exactly 50 or 0, something likely went wrong
+        _scores = [state.trend_score, state.breadth_score, state.leadership_score, state.volatility_stress_score]
+        if all(s == 0.0 for s in _scores):
+            logger.error("persist_market_brain_state BLOCKED: all scores are 0 — state not saved (data pipeline failure)")
+            return
         payload = {
             "state": asdict(state),
             "context": context or {},

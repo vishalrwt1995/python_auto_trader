@@ -314,6 +314,23 @@ class TradingService:
                         "using_last_known_good_brain_state",
                         {"asof_ts": brain_state.asof_ts, "regime": brain_state.regime},
                     )
+                    # Stale brain state: cap to DEFENSIVE to avoid over-trading on outdated info
+                    try:
+                        from autotrader.time_utils import parse_any_ts as _pts
+                        from dataclasses import replace as _dc_replace
+                        _bts = _pts(brain_state.asof_ts)
+                        if _bts is not None:
+                            _age_min = (now_ist() - _bts.astimezone(_bts.tzinfo)).total_seconds() / 60.0
+                            if _age_min > 90.0:
+                                logger.warning("stale_brain_state age_min=%.1f — capping DEFENSIVE", _age_min)
+                                brain_state = _dc_replace(
+                                    brain_state,
+                                    risk_mode="DEFENSIVE",
+                                    size_multiplier=min(float(brain_state.size_multiplier or 1.0), 0.65),
+                                    max_positions_multiplier=min(float(brain_state.max_positions_multiplier or 1.0), 0.70),
+                                )
+                    except Exception:
+                        pass  # best-effort; don't break the scan
                 except Exception:
                     logger.exception("scan_once market_brain_v2_unavailable — no fallback")
                     self.log_sink.action("TradingService", "run_scan_once", "SKIP", "market_brain_v2_unavailable")
@@ -417,7 +434,13 @@ class TradingService:
                     "TradingService", "run_scan_once", "SKIP", _pnl_block_reason,
                     {"todayPnl": _today_pnl, "maxLoss": cfg.max_daily_loss, "profitTarget": cfg.daily_profit_target},
                 )
-                return {"skipped": _pnl_block_reason, "today_pnl": _today_pnl}
+                # Daily loss limit: don't hard-stop — counter-trend setups (MEAN_REVERSION,
+                # VWAP_REVERSAL) work best AFTER sharp down moves. Only block directional
+                # momentum strategies. Profit target: block all new entries (protect the gain).
+                if _pnl_block_reason == "daily_profit_target_hit":
+                    return {"skipped": _pnl_block_reason, "today_pnl": _today_pnl}
+                # Daily loss: continue scan but restrict to counter-trend only (handled per-symbol below)
+                # We'll pass _pnl_block_reason through as a flag consumed later in the loop
 
             # Read watchlist: Firestore is primary, Sheets is fallback
             watchlist = self._read_watchlist_with_fallback()
@@ -807,11 +830,15 @@ class TradingService:
                     policy_block_reason = "swing_max_positions_reached"
                 elif not _is_swing and qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
+                elif _pnl_block_reason == "daily_loss_limit_hit" and str(w.strategy or "").strip().upper() not in ("MEAN_REVERSION", "VWAP_REVERSAL", "PHASE1_REVERSAL"):
+                    policy_block_reason = "daily_loss_limit_strategy_restricted"
                 # Staleness gate: if live LTP has moved > 2% away from the candle
                 # close (which is what indicators were computed from), the setup is
                 # stale — we'd be chasing. Compare against ind.close, NOT pos.entry_price
                 # (which is set FROM _live and would always read 0% diff).
-                elif _live > 0 and ind.close > 0 and abs(_live - ind.close) / ind.close > 0.02:
+                elif _live > 0 and ind.close > 0 and ind.atr > 0 and abs(_live - ind.close) / ind.close > max(0.012, min(0.04, ind.atr / ind.close * 1.5)):
+                    policy_block_reason = "stale_signal_price_moved"
+                elif _live > 0 and ind.close > 0 and ind.atr == 0 and abs(_live - ind.close) / ind.close > 0.02:
                     policy_block_reason = "stale_signal_price_moved"
                 # Live VWAP guard: if price drifted to wrong side of VWAP since candle close, reject entry.
                 # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
@@ -896,12 +923,32 @@ class TradingService:
                     })
                     # Update in-memory counters so later symbols in this cycle see the new position
                     if _is_swing:
+                        # Re-verify swing count from Firestore to prevent race condition
+                        # between concurrent scan instances both adding the last slot.
+                        _live_swing_count = sum(
+                            1 for p in self.state.list_open_positions()
+                            if str(p.get("wl_type") or "").strip().lower() == "swing"
+                        )
+                        if _live_swing_count >= self.settings.strategy.swing_max_positions:
+                            qualified -= 1
+                            _scan_row_rich.update({"status": "filtered", "reason": "swing_race_condition_blocked"})
+                            continue
                         _open_swing_count += 1
                     if w.sector and w.sector.upper() != "UNKNOWN":
                         _portfolio_sectors.setdefault(w.sector.upper(), []).append(w.symbol)
                     _strat_key = str(w.strategy or "").strip().upper()
                     if _strat_key and _strat_key not in ("AUTO", "DEFAULT"):
                         _portfolio_strategies[_strat_key] = _portfolio_strategies.get(_strat_key, 0) + 1
+                    # Safety guard: never place an entry order without a valid SL price.
+                    # sl_price=0 means position sizing failed — unlimited loss risk.
+                    if pos.sl_price <= 0:
+                        qualified -= 1
+                        logger.error(
+                            "entry_blocked_sl_zero symbol=%s sl=%.2f qty=%d — skipping",
+                            w.symbol, pos.sl_price, pos.qty,
+                        )
+                        _scan_row_rich.update({"status": "filtered", "reason": "sl_price_zero"})
+                        continue
                     self.order_service.place_entry_order(
                         symbol=w.symbol,
                         exchange=w.exchange,

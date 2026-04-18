@@ -148,9 +148,16 @@ class WsMonitorService:
                 ikey = self._resolve_instrument_key(pos)
                 if not tag or not ikey:
                     logger.warning(
-                        "skip_ws_subscribe: missing instrument_key tag=%s symbol=%s",
+                        "skip_ws_subscribe: missing instrument_key tag=%s symbol=%s — forcing immediate exit",
                         tag, pos.get("symbol", ""),
                     )
+                    # Force-close positions we can't monitor on WS to prevent unlimited loss.
+                    # For paper: exit_price = entry_price (best we can do without a live quote).
+                    # For live: same — last resort, better than leaving position unmonitored.
+                    if tag and tag not in self._exiting:
+                        self._exiting.add(tag)
+                        # Schedule as a task so it doesn't block the refresh loop
+                        asyncio.create_task(self._do_exit(tag, ikey or "", "NO_INSTRUMENT_KEY"))
                     continue
                 entry_price = float(pos.get("entry_price") or 0)
                 atr = float(pos.get("atr") or 0)

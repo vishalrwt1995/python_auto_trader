@@ -110,10 +110,11 @@ def compute_daily_bias(daily_candles: list[list]) -> DailyBias | None:
     elif rsi < 45:
         bear_signals += 1
 
-    # Determine trend
-    if bull_signals >= bear_signals + 2:
+    # Determine trend — requires a net margin of 3+ signals (not 2) for stability.
+    # With 7 max signals, +3 net = 43% majority, preventing noisy flip-flopping.
+    if bull_signals >= bear_signals + 3:
         trend = "UP"
-    elif bear_signals >= bull_signals + 2:
+    elif bear_signals >= bull_signals + 3:
         trend = "DOWN"
     else:
         trend = "NEUTRAL"

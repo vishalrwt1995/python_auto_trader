@@ -359,6 +359,19 @@ class OrderService:
         if self.state.already_fired_today(symbol, side):
             return {"skipped": "duplicate_idempotency"}
 
+        # Critical safety guard: never place an order without a valid stop-loss.
+        # sl_price=0 means position sizing failed — passing this to the broker creates
+        # a position with no stop which can cause unlimited loss.
+        if sl_price <= 0:
+            logger.error(
+                "place_entry_order blocked: sl_price=%.2f symbol=%s side=%s qty=%d — refusing to place order without valid SL",
+                sl_price, symbol, side, qty,
+            )
+            return {"error": "sl_price_zero_or_negative", "symbol": symbol, "sl_price": sl_price}
+        if qty <= 0:
+            logger.error("place_entry_order blocked: qty=%d symbol=%s — refusing to place zero-qty order", qty, symbol)
+            return {"error": "qty_zero_or_negative", "symbol": symbol, "qty": qty}
+
         if not instrument_key:
             # Log prominently — ws-monitor needs a valid Upstox instrument_key
             # to subscribe on WebSocket; without it no intraday SL/target exits fire.

@@ -36,6 +36,8 @@ class MarketRegimeService:
     _last_nifty_structure_fetch_ts: datetime | None = field(default=None, init=False, repr=False)
     _last_regime_key: str = field(default="", init=False, repr=False)
     _last_regime_ts: datetime | None = field(default=None, init=False, repr=False)
+    _last_pcr_snapshot: "PcrSnapshot | None" = field(default=None, init=False, repr=False)
+    _last_pcr_fetch_ts: "datetime | None" = field(default=None, init=False, repr=False)
 
     @staticmethod
     def _to_float(v: object) -> float:
@@ -458,10 +460,25 @@ class MarketRegimeService:
                 confidence=float(self._clamp((near.confidence * 0.7) + (len(snaps) * 10.0), 0.0, 100.0)),
                 fetched_at=now_i.isoformat(),
             )
+            # Cache successful fetch for fallback use
+            self._last_pcr_snapshot = out
+            self._last_pcr_fetch_ts = now_ist()
             return out, "upstox_option_chain"
         except Exception:
             logger.debug("Upstox PCR fetch failed", exc_info=True)
-        return PcrSnapshot(pcr=1.0, fetched_at=now_ist().isoformat()), "fallback"
+        # Use last-known-good PCR if available (within 90 min) rather than neutral 1.0.
+        # A stale PCR is much better than a neutral fallback — market structure rarely flips
+        # in 90 minutes and the directional signal stays meaningful.
+        _now = now_ist()
+        if (
+            self._last_pcr_snapshot is not None
+            and self._last_pcr_fetch_ts is not None
+            and (_now - self._last_pcr_fetch_ts.astimezone(_now.tzinfo)).total_seconds() <= 5400  # 90 min
+        ):
+            logger.debug("pcr_fetch_failed — returning last_known_good age_sec=%.0f",
+                         (_now - self._last_pcr_fetch_ts.astimezone(_now.tzinfo)).total_seconds())
+            return self._last_pcr_snapshot, "cached"
+        return PcrSnapshot(pcr=1.0, fetched_at=_now.isoformat()), "fallback"
 
     def fetch_pcr(self) -> PcrSnapshot:
         pcr, _ = self.fetch_pcr_with_source()
