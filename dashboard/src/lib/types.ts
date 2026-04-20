@@ -37,7 +37,107 @@ export interface MarketBrainState {
   phase2_confidence: number;
   policy_confidence: number;
   run_integrity_confidence: number;
+  // PR-1 signals + lineage (all optional — older Firestore docs may not have them)
+  options_positioning_score?: number;
+  flow_score?: number;
+  breadth_roc_score?: number;
+  prev_regime?: Regime | null;
+  regime_age_seconds?: number;
+  regime_transitions_today?: number;
+  signal_age_penalty?: number;
   updated_at?: { seconds: number; nanoseconds: number };
+}
+
+/* ── PR-2: Narrative card (persisted alongside state in Firestore) ── */
+
+export interface MarketBrainNarrative {
+  headline: string;
+  sentences: string[];
+  key_drivers: string[];
+  risks: string[];
+  opportunities: string[];
+  as_of: string;
+}
+
+/* ── PR-2: Explain payload (GET /dashboard/market-brain/explain) ── */
+
+export interface ExplainComponent {
+  key: string;
+  label: string;
+  score: number;
+  weight: number;
+  contribution: number;
+  delta: number;
+  band: string;
+  rationale: string;
+  inverted: boolean;
+}
+
+export interface ExplainConfidence {
+  market_confidence: number;
+  market_confidence_raw?: number;
+  signal_age_penalty?: number;
+  breadth_confidence?: number;
+  leadership_confidence?: number;
+  phase2_confidence?: number;
+  policy_confidence?: number;
+  run_integrity_confidence?: number;
+}
+
+export interface ExplainRegimeTransition {
+  prev_regime?: Regime | null;
+  regime_age_seconds?: number;
+  regime_transitions_today?: number;
+}
+
+export interface ExplainSignals {
+  options_positioning_score?: number;
+  flow_score?: number;
+  breadth_roc_score?: number;
+}
+
+export interface MarketBrainExplain {
+  as_of: string;
+  regime: Regime;
+  risk_mode: RiskMode;
+  sub_regime_v2?: string;
+  structure_state?: string;
+  participation?: Participation;
+  components: ExplainComponent[];
+  confidence: ExplainConfidence;
+  regime_transition: ExplainRegimeTransition;
+  signals: ExplainSignals;
+  narrative?: MarketBrainNarrative;
+}
+
+/* ── PR-2: History timeseries point (GET /dashboard/market-brain/history) ── */
+
+export interface BrainHistoryPoint {
+  asof_ts: string;
+  regime: Regime;
+  risk_mode: RiskMode;
+  participation?: Participation;
+  trend_score?: number;
+  breadth_score?: number;
+  volatility_stress_score?: number;
+  data_quality_score?: number;
+  options_positioning_score?: number;
+  flow_score?: number;
+  breadth_roc_score?: number;
+  market_confidence?: number;
+  breadth_confidence?: number;
+  leadership_confidence?: number;
+  prev_regime?: Regime | null;
+  regime_age_seconds?: number;
+  regime_transitions_today?: number;
+  signal_age_penalty?: number;
+}
+
+export interface BrainHistoryResponse {
+  points: BrainHistoryPoint[];
+  days: number;
+  limit: number;
+  count: number;
 }
 
 export interface BrainHistoryRow {

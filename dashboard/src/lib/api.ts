@@ -121,6 +121,25 @@ export const api = {
   togglePaperMode: (paperTrade: boolean) =>
     api.post<{ status: string; paper_trade: boolean }>("/dashboard/admin/toggle-paper-mode", { paper_trade: paperTrade }),
 
+  /* ── Market Brain (PR-2) ── */
+
+  getMarketBrainLatest: () =>
+    api.get<{
+      empty?: boolean;
+      state?: import("./types").MarketBrainState;
+      context?: Record<string, unknown>;
+      policy?: Record<string, unknown>;
+      narrative?: import("./types").MarketBrainNarrative;
+    }>("/dashboard/market-brain/latest"),
+
+  getMarketBrainExplain: () =>
+    api.get<import("./types").MarketBrainExplain>("/dashboard/market-brain/explain"),
+
+  getMarketBrainHistory: (days = 1, limit = 500) =>
+    api.get<import("./types").BrainHistoryResponse>(
+      `/dashboard/market-brain/history?days=${days}&limit=${limit}`,
+    ),
+
   exportTrades: (from?: string, to?: string) => {
     const params = new URLSearchParams();
     if (from) params.set("from", from);

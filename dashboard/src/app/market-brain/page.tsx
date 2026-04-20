@@ -5,6 +5,9 @@ import { RegimeBadge } from "@/components/widgets/RegimeBadge";
 import { RiskModeBadge } from "@/components/widgets/RiskModeBadge";
 import { ConfidenceGauge } from "@/components/widgets/ConfidenceGauge";
 import { RadarScore } from "@/components/charts/RadarScore";
+import { ScoreHistoryChart } from "@/components/charts/ScoreHistoryChart";
+import { NarrativeCard } from "@/components/widgets/NarrativeCard";
+import { ExplainPanel } from "@/components/widgets/ExplainPanel";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
 import { LiveDot } from "@/components/shared/LiveDot";
 import { cn, formatTime } from "@/lib/utils";
@@ -97,6 +100,9 @@ export default function MarketBrainPage() {
           <span>Real-time · Firestore</span>
         </div>
       </div>
+
+      {/* PR-2: Narrative card — top-of-page context */}
+      <NarrativeCard />
 
       {/* A. Current State Panel */}
       <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-5">
@@ -242,6 +248,12 @@ export default function MarketBrainPage() {
           </div>
         </div>
       </div>
+
+      {/* PR-2: Explain panel — per-component weight × score breakdown */}
+      <ExplainPanel />
+
+      {/* PR-2: Score history chart — multi-series timeseries from BQ */}
+      <ScoreHistoryChart />
 
       {/* D. Policy Biases */}
       <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4">

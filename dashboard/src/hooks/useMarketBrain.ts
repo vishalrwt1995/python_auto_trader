@@ -5,17 +5,19 @@ import { useFirestoreDoc } from "./useFirestore";
 import { useDashboardStore } from "@/stores/dashboardStore";
 import { voiceEngine } from "@/lib/voice";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { MarketBrainState } from "@/lib/types";
+import type { MarketBrainState, MarketBrainNarrative } from "@/lib/types";
 
 /**
  * The Firestore doc `market_brain/latest` stores data in nested maps:
- *   { state: { regime, risk_mode, ... }, policy: { ... }, context: { ... } }
+ *   { state: { regime, risk_mode, ... }, policy: { ... }, context: { ... }, narrative: { ... } }
  * The dashboard expects a flat MarketBrainState, so we unwrap `state`.
+ * PR-2: `narrative` (if present) is pushed into the store for NarrativeCard.
  */
 interface MarketBrainDoc {
   state?: MarketBrainState;
   policy?: Record<string, unknown>;
   context?: Record<string, unknown>;
+  narrative?: MarketBrainNarrative;
   updated_at?: unknown;
 }
 
@@ -25,6 +27,7 @@ export function useMarketBrain() {
     "latest",
   );
   const setMarketBrain = useDashboardStore((s) => s.setMarketBrain);
+  const setBrainNarrative = useDashboardStore((s) => s.setBrainNarrative);
   const voiceEnabled = useSettingsStore((s) => s.voiceEnabled);
   const prevRegime = useRef<string | null>(null);
 
@@ -35,8 +38,11 @@ export function useMarketBrain() {
       ? (rawDoc as unknown as MarketBrainState)
       : null;
 
+  const narrative: MarketBrainNarrative | null = rawDoc?.narrative ?? null;
+
   useEffect(() => {
     setMarketBrain(data);
+    setBrainNarrative(narrative);
 
     if (data && voiceEnabled && voiceEngine) {
       if (prevRegime.current !== null && prevRegime.current !== data.regime) {
@@ -44,7 +50,7 @@ export function useMarketBrain() {
       }
       prevRegime.current = data.regime;
     }
-  }, [data, setMarketBrain, voiceEnabled]);
+  }, [data, narrative, setMarketBrain, setBrainNarrative, voiceEnabled]);
 
-  return { data, loading, error };
+  return { data, narrative, loading, error };
 }
