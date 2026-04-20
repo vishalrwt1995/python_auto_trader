@@ -1,10 +1,13 @@
 """WebSocket real-time exit monitor.
 
 Deployed as a separate Cloud Run service (autotrader-ws-monitor) with
-min-instances=1 so it stays alive during market hours.
+min-instances=1 so the container stays alive across days. Each trading
+day runs a fresh ``WsMonitorService`` instance; between EOD and the next
+market open the container idles inside ``_main`` (no exit, no reschedule
+loop).
 
-Lifecycle:
-  1. Load all OPEN positions from Firestore on startup + refresh every 60s.
+Lifecycle (per trading day):
+  1. Load all OPEN positions from Firestore on startup + refresh every 15s.
   2. Build instrument-key → position-tag map.
   3. Subscribe to Upstox WebSocket for all symbols.
   4. On each tick:
@@ -12,7 +15,8 @@ Lifecycle:
      - ltp ≥ target    → TARGET_HIT exit
      - time ≥ 15:25    → EOD_CLOSE exit (force-close remaining)
   5. On disconnect: reconnect with exponential back-off.
-  6. At 15:30: close WebSocket, stop service.
+  6. At 15:30: close WebSocket, end the day. Outer loop sleeps until the
+     next weekday 09:00 IST and starts a fresh service instance.
 
 Run with::
 
@@ -26,7 +30,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -573,6 +577,25 @@ async def _health_server(port: int) -> None:
         await server.serve_forever()
 
 
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+
+def _seconds_until_next_market_open() -> float:
+    """Seconds from now until the next IST 09:00 on a weekday (Mon–Fri).
+
+    Skips Sat/Sun but not market holidays — a holiday wake-up just spins
+    up an idle WS session, which is harmless. Avoiding 15:30→next-09:00
+    rescheduling thrash is the goal, not perfect calendar awareness.
+    """
+    now = datetime.now(_IST_TZ)
+    target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    while target.weekday() >= 5:  # 5=Sat, 6=Sun
+        target = target + timedelta(days=1)
+    return max(0.0, (target - now).total_seconds())
+
+
 async def _main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -593,25 +616,52 @@ async def _main() -> None:
     if not project_id:
         raise RuntimeError("GCP_PROJECT_ID env var required")
 
-    # Fetch access token from Secret Manager
     from google.cloud import secretmanager  # type: ignore[import-untyped]
     sm_client = secretmanager.SecretManagerServiceClient()
     secret_name = f"projects/{project_id}/secrets/{access_token_secret}/versions/latest"
-    access_token = sm_client.access_secret_version(request={"name": secret_name}).payload.data.decode("utf-8").strip()
 
-    svc = WsMonitorService(
-        project_id=project_id,
-        access_token=access_token,
-        firestore_database=firestore_db,
-        access_token_secret_name=access_token_secret,
-    )
-
-    # Graceful shutdown on SIGTERM/SIGINT
+    # Process-level shutdown event: tripped by SIGTERM/SIGINT to exit the
+    # multi-day loop. Distinct from svc.stop() which only ends the current
+    # trading day so the loop can sleep through to the next market open.
+    shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, svc.stop)
 
-    await svc.run()
+    while not shutdown_event.is_set():
+        # Re-fetch token each morning — Upstox tokens rotate at 03:30 IST.
+        access_token = sm_client.access_secret_version(
+            request={"name": secret_name}
+        ).payload.data.decode("utf-8").strip()
+
+        svc = WsMonitorService(
+            project_id=project_id,
+            access_token=access_token,
+            firestore_database=firestore_db,
+            access_token_secret_name=access_token_secret,
+        )
+
+        def _on_signal(_svc: WsMonitorService = svc) -> None:
+            shutdown_event.set()
+            _svc.stop()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _on_signal)
+
+        await svc.run()
+
+        if shutdown_event.is_set():
+            break
+
+        sleep_secs = _seconds_until_next_market_open()
+        logger.info(
+            "ws_monitor idle until next market open sleep_seconds=%.0f",
+            sleep_secs,
+        )
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=sleep_secs)
+            break  # shutdown signalled during sleep
+        except asyncio.TimeoutError:
+            pass  # normal — wake for next trading day
+        logger.info("ws_monitor waking for next trading day")
 
 
 if __name__ == "__main__":
