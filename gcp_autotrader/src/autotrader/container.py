@@ -116,6 +116,7 @@ class AppContainer:
                 state=self.state,
                 bq=self.bq,
                 pubsub=self.pubsub,
+                thresholds=self.settings.regime_thresholds,
             )
             self.universe_service().set_market_brain_service(self._market_brain_service)
         return self._market_brain_service

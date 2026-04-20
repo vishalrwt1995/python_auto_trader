@@ -16,6 +16,7 @@ from autotrader.services.market_breadth_service import MarketBreadthService
 from autotrader.services.market_leadership_service import MarketLeadershipService
 from autotrader.services.market_policy_service import MarketPolicyService
 from autotrader.services.regime_service import MarketRegimeService
+from autotrader.settings import RegimeThresholds
 from autotrader.time_utils import IST, now_ist, parse_any_ts
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,12 @@ class MarketBrainService:
     policy_service: MarketPolicyService = field(default_factory=MarketPolicyService)
     bq: BigQueryClient | None = None
     pubsub: PubSubClient | None = None
+    thresholds: RegimeThresholds = field(default_factory=RegimeThresholds)
     latest_state_path: str = "state/market_brain/latest.json"
     history_prefix: str = "state/market_brain/history"
     _last_context: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    # Tracks last-emitted pubsub snapshot to gate duplicate publishes (PR-1 Item 0.3)
+    _last_pubsub_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     @staticmethod
     def _clip(v: float, lo: float, hi: float) -> float:
@@ -99,7 +103,39 @@ class MarketBrainService:
             phase2_confidence=float(payload.get("phase2_confidence") or 50.0),
             policy_confidence=float(payload.get("policy_confidence") or 50.0),
             run_integrity_confidence=float(payload.get("run_integrity_confidence") or 50.0),
+            # PR-1 fields — default-safe for pre-migration snapshots
+            options_positioning_score=float(payload.get("options_positioning_score") or 50.0),
+            flow_score=float(payload.get("flow_score") or 50.0),
+            breadth_roc_score=float(payload.get("breadth_roc_score") or 50.0),
+            prev_regime=str(payload.get("prev_regime") or ""),
+            regime_age_seconds=float(payload.get("regime_age_seconds") or 0.0),
+            regime_transitions_today=int(payload.get("regime_transitions_today") or 0),
+            signal_age_penalty=float(payload.get("signal_age_penalty") or 0.0),
         )
+
+    def _should_emit_pubsub(self, state: MarketBrainState) -> bool:
+        """Gate Pub/Sub publish — emit only on regime/risk_mode transition
+        or after `thresholds.pubsub_heartbeat_sec` silence (PR-1 Item 0.3).
+
+        Pre-PR-1 behaviour: every persist emitted, flooding downstream
+        consumers (dashboard websocket, alert pipelines) with identical
+        snapshots. Now a snapshot is emitted only when interesting state
+        changed, or a heartbeat is due so monitors can detect a silent
+        brain service.
+        """
+        last = self._last_pubsub_state
+        if not last:
+            return True  # first snapshot of process lifetime
+        if last.get("regime") != state.regime or last.get("risk_mode") != state.risk_mode:
+            return True
+        last_ts = last.get("ts")
+        try:
+            if last_ts is None:
+                return True
+            age = (now_ist() - last_ts).total_seconds()
+        except Exception:
+            return True
+        return age >= float(self.thresholds.pubsub_heartbeat_sec)
 
     def _read_latest_context(self) -> dict[str, Any]:
         payload = self.state.get_json("market_brain", "latest")
@@ -165,11 +201,27 @@ class MarketBrainService:
             "volatility_stress_score": state.volatility_stress_score,
             "data_quality_score": state.data_quality_score,
             "selected_watchlist_count": 0,
+            # PR-1 additions — nullable columns; BQ ALTER TABLE required before
+            # they populate (rows inserted against an older schema will surface
+            # these in insert_errors). The `self.bq.insert` wrapper logs but
+            # does not raise, so a pre-migration deploy stays safe.
+            "options_positioning_score": state.options_positioning_score,
+            "flow_score": state.flow_score,
+            "breadth_roc_score": state.breadth_roc_score,
+            "prev_regime": state.prev_regime,
+            "regime_age_seconds": state.regime_age_seconds,
+            "regime_transitions_today": state.regime_transitions_today,
+            "signal_age_penalty": state.signal_age_penalty,
         }
         if self.bq:
             self.bq.insert_market_brain(bq_row)
-        if self.pubsub:
+        if self.pubsub and self._should_emit_pubsub(state):
             self.pubsub.publish_regime_changed(bq_row)
+            self._last_pubsub_state = {
+                "regime": state.regime,
+                "risk_mode": state.risk_mode,
+                "ts": asof.astimezone(IST),
+            }
         # Append snapshot to market_brain/history doc (rolling last-30 array)
         # Lives inside the existing market_brain collection so Firestore rules cover it
         new_snap = {
@@ -648,6 +700,135 @@ class MarketBrainService:
             return "TREND_DAY"
         return "CHOP_DAY"
 
+    # ---------------------------------------------------------------- #
+    # PR-1 helpers: PCR / FII-DII / breadth-RoC / signal-age decay
+    # ---------------------------------------------------------------- #
+
+    @staticmethod
+    def _pcr_to_positioning_score(pcr: float, *, confidence: float = 100.0) -> float:
+        """Map weighted PCR → 0..100 options-positioning score.
+
+        Contrarian read (standard market interpretation):
+          • PCR < 0.7  → too many calls vs puts → crowded longs → BEARISH (score → 0)
+          • PCR ≈ 1.0  → balanced                               → NEUTRAL (score → 50)
+          • PCR > 1.3  → too many puts vs calls → oversold      → BULLISH (score → 100)
+        Below 0.3 or above 2.5 we saturate.
+
+        If confidence is low (fewer expiries aggregated, or fallback), we pull
+        the score toward 50 (neutral) so a half-known signal doesn't look
+        strong. Confidence 100 → no dilution; confidence 0 → full dilution.
+        """
+        if pcr is None or pcr <= 0:
+            return 50.0
+        # Piecewise linear: 0.3→0, 0.7→30, 1.0→50, 1.3→70, 2.5→100
+        p = float(pcr)
+        if p <= 0.3:
+            base = 0.0
+        elif p <= 0.7:
+            base = 30.0 * (p - 0.3) / 0.4
+        elif p <= 1.0:
+            base = 30.0 + 20.0 * (p - 0.7) / 0.3
+        elif p <= 1.3:
+            base = 50.0 + 20.0 * (p - 1.0) / 0.3
+        elif p <= 2.5:
+            base = 70.0 + 30.0 * (p - 1.3) / 1.2
+        else:
+            base = 100.0
+        c = max(0.0, min(100.0, float(confidence))) / 100.0
+        return round(50.0 + (base - 50.0) * c, 2)
+
+    @staticmethod
+    def _fii_dii_to_flow_score(fii_net: float, dii_net: float, *, freshness: float = 100.0) -> float:
+        """Map FII + DII net values (₹ crore) → 0..100 institutional flow score.
+
+        Both flows matter: DII buying can cushion FII selling.
+        Combined net = FII + DII (₹ crore, positive = net inflow).
+
+          • < -5000 → 0   (heavy outflow, ~₹5000cr+ net sell)
+          • -5000→0 → 0→50 linear
+          • 0→+5000 → 50→100 linear
+          • > +5000 → 100 (heavy inflow)
+
+        If data is stale (freshness_score below 100), pull toward 50 neutral.
+        """
+        combined = float(fii_net or 0.0) + float(dii_net or 0.0)
+        if combined <= -5000.0:
+            base = 0.0
+        elif combined >= 5000.0:
+            base = 100.0
+        else:
+            base = 50.0 + (combined / 5000.0) * 50.0
+        f = max(0.0, min(100.0, float(freshness))) / 100.0
+        return round(50.0 + (base - 50.0) * f, 2)
+
+    def _breadth_roc_score(self, breadth_score: float, prev: MarketBrainState | None) -> float:
+        """Rate-of-change of breadth → 0..100 (0=collapsing, 100=expanding).
+
+        Compares current breadth_score to prev.breadth_score. Missing prior
+        returns 50 (neutral — no information). One snapshot delta ≈ 1–3 min in
+        LIVE phase, so small deltas are expected; we saturate at ±10 points.
+        """
+        if prev is None:
+            return 50.0
+        try:
+            delta = float(breadth_score) - float(prev.breadth_score)
+        except Exception:
+            return 50.0
+        # Saturate at ±10 breadth-points delta → 0 / 100
+        if delta <= -10.0:
+            return 0.0
+        if delta >= 10.0:
+            return 100.0
+        return round(50.0 + (delta / 10.0) * 50.0, 2)
+
+    def _signal_age_penalty(self, live_regime: "RegimeSnapshot | None") -> float:
+        """Compute points-to-shave from market_confidence based on signal staleness.
+
+        Uses RegimeSnapshot.freshness — specifically nifty_age_sec, vix_age_sec,
+        pcr_age_sec. Returns a value in [0, thresholds.signal_max_penalty].
+
+        Threshold-linear: <fresh_max → 0, >stale_full → max_penalty.
+        """
+        if live_regime is None:
+            return 0.0
+        try:
+            fresh = live_regime.freshness
+            ages = [
+                float(fresh.nifty_age_sec or 0.0),
+                float(fresh.vix_age_sec or 0.0),
+                float(fresh.pcr_age_sec or 0.0),
+            ]
+        except Exception:
+            return 0.0
+        if not ages:
+            return 0.0
+        worst = max(ages)
+        t = self.thresholds
+        if worst <= t.signal_fresh_max_sec:
+            return 0.0
+        if worst >= t.signal_stale_full_sec:
+            return float(t.signal_max_penalty)
+        # Linear interpolation between fresh_max and stale_full
+        span = max(1e-6, t.signal_stale_full_sec - t.signal_fresh_max_sec)
+        frac = (worst - t.signal_fresh_max_sec) / span
+        return round(float(t.signal_max_penalty) * frac, 2)
+
+    @staticmethod
+    def _count_transitions_today(prev: MarketBrainState | None, is_transition: bool, now_i: datetime) -> int:
+        """Rolls transition count forward; resets at IST midnight."""
+        if prev is None:
+            return 1 if is_transition else 0
+        try:
+            prev_ts = parse_any_ts(prev.asof_ts)
+        except Exception:
+            prev_ts = None
+        prev_day = prev_ts.astimezone(IST).date() if prev_ts is not None else None
+        today = now_i.astimezone(IST).date()
+        base = int(getattr(prev, "regime_transitions_today", 0) or 0)
+        if prev_day != today:
+            base = 0  # rolled into a new trading day
+        return base + (1 if is_transition else 0)
+
     def _map_regime(
         self,
         *,
@@ -659,27 +840,46 @@ class MarketBrainService:
         risk_appetite: float,
         prev: MarketBrainState | None,
     ) -> str:
+        t = self.thresholds
         regime = "RANGE"
-        # PANIC: only for extreme conditions — not marginal weakness.
-        # breadth <= 12 (was 18): only true capitulation, not normal corrections.
-        # stress >= 82 or dq <= 30: unchanged — genuine system-level distress.
-        if volatility_stress_score >= 82.0 or breadth_score <= 12.0 or data_quality_score <= 30.0:
+        # PANIC entry — extreme stress, capitulation breadth, or broken data pipeline
+        if volatility_stress_score >= t.panic_stress_min or breadth_score <= t.panic_breadth_max or data_quality_score <= t.panic_dq_max:
             regime = "PANIC"
-        elif trend_score >= 70.0 and breadth_score >= 62.0 and leadership_score >= 56.0 and volatility_stress_score <= 48.0:
+        elif (
+            trend_score >= t.trend_up_trend_min
+            and breadth_score >= t.trend_up_breadth_min
+            and leadership_score >= t.trend_up_leadership_min
+            and volatility_stress_score <= t.trend_up_stress_max
+        ):
             regime = "TREND_UP"
         # High-breadth alternative: even when Nifty daily structure (trend_score) is
         # weak (e.g. Nifty below EMA50), broad-market participation can still produce
-        # a legitimate trending day. If ≥80% of stocks are above VWAP AND leadership
-        # is solid AND stress is low, call it TREND_UP regardless of index structure.
-        elif breadth_score >= 80.0 and leadership_score >= 60.0 and volatility_stress_score <= 48.0:
+        # a legitimate trending day.
+        elif (
+            breadth_score >= t.trend_up_hi_breadth_min
+            and leadership_score >= t.trend_up_hi_leadership_min
+            and volatility_stress_score <= t.trend_up_hi_stress_max
+        ):
             regime = "TREND_UP"
-        elif trend_score <= 36.0 and breadth_score <= 40.0 and leadership_score <= 45.0:
+        elif (
+            trend_score <= t.trend_down_trend_max
+            and breadth_score <= t.trend_down_breadth_max
+            and leadership_score <= t.trend_down_leadership_max
+        ):
             regime = "TREND_DOWN"
-        elif volatility_stress_score >= 62.0 and leadership_score <= 46.0 and risk_appetite <= 46.0:
+        elif (
+            volatility_stress_score >= t.chop_stress_min
+            and leadership_score <= t.chop_leadership_max
+            and risk_appetite <= t.chop_appetite_max
+        ):
             regime = "CHOP"
-        elif prev is not None and prev.regime in {"PANIC", "TREND_DOWN", "CHOP"} and trend_score >= 40.0 and breadth_score >= 35.0 and leadership_score >= 40.0:
-            # RECOVERY: lowered thresholds (was 55/50/50) so the system can
-            # transition out of PANIC/TREND_DOWN without needing a full bull reversal.
+        elif (
+            prev is not None
+            and prev.regime in {"PANIC", "TREND_DOWN", "CHOP"}
+            and trend_score >= t.recovery_trend_min
+            and breadth_score >= t.recovery_breadth_min
+            and leadership_score >= t.recovery_leadership_min
+        ):
             regime = "RECOVERY"
 
         if prev is None:
@@ -690,26 +890,36 @@ class MarketBrainService:
                 # PANIC exit guard — only market-structure signals gate exit.
                 # data_quality_score excluded: in PANIC/LOCKDOWN no scanner runs,
                 # which collapses data_quality via stale-writer penalties.
-                # Lowered breadth guard from 35→22: allow exit once breadth shows
-                # any recovery, not requiring a full structural reversal.
-                if volatility_stress_score > 65.0 or breadth_score < 22.0:
+                if volatility_stress_score > t.panic_exit_stress_above or breadth_score < t.panic_exit_breadth_below:
                     return "PANIC"
         if prev.regime == "TREND_UP" and regime != "TREND_UP":
-            if trend_score >= 60.0 and breadth_score >= 55.0 and leadership_score >= 50.0:
+            if (
+                trend_score >= t.trend_up_hold_trend_min
+                and breadth_score >= t.trend_up_hold_breadth_min
+                and leadership_score >= t.trend_up_hold_leadership_min
+            ):
                 return "TREND_UP"
         if prev.regime not in {"TREND_UP"} and regime == "TREND_UP":
-            # Allow two qualifying paths into TREND_UP:
+            # Two qualifying paths into TREND_UP:
             # 1) Standard: Nifty trend structure is confirmed (trend_score high)
             # 2) High-breadth: broad participation overrides weak index structure
-            _standard_entry = trend_score >= 74.0 and breadth_score >= 66.0 and leadership_score >= 58.0
-            _highbreadth_entry = breadth_score >= 82.0 and leadership_score >= 62.0 and volatility_stress_score <= 45.0
+            _standard_entry = (
+                trend_score >= t.trend_up_reenter_trend_min
+                and breadth_score >= t.trend_up_reenter_breadth_min
+                and leadership_score >= t.trend_up_reenter_leadership_min
+            )
+            _highbreadth_entry = (
+                breadth_score >= t.trend_up_reenter_hi_breadth_min
+                and leadership_score >= t.trend_up_reenter_hi_leadership_min
+                and volatility_stress_score <= t.trend_up_reenter_hi_stress_max
+            )
             if not (_standard_entry or _highbreadth_entry):
                 return prev.regime
         if prev.regime != regime and regime != "PANIC":
             prev_ts = parse_any_ts(prev.asof_ts)
             if prev_ts is not None:
                 age_sec = (now_ist() - prev_ts.astimezone(IST)).total_seconds()
-                if age_sec <= 240.0:
+                if age_sec <= t.transition_min_age_sec:
                     return prev.regime
         return regime
 
@@ -721,14 +931,25 @@ class MarketBrainService:
         volatility_stress_score: float,
         data_quality_score: float,
     ) -> str:
+        t = self.thresholds
         # LOCKDOWN: reserved for extreme stress — not every PANIC.
         # PANIC alone → DEFENSIVE (system still trades with caution).
         # LOCKDOWN only when volatility is extreme OR data is broken.
-        if volatility_stress_score >= 85.0 or data_quality_score < 35.0:
+        if volatility_stress_score >= t.lockdown_stress_min or data_quality_score < t.lockdown_dq_max:
             return "LOCKDOWN"
-        if regime == "PANIC" or regime in {"CHOP", "TREND_DOWN"} or volatility_stress_score >= 65.0 or data_quality_score < 55.0:
+        if (
+            regime == "PANIC"
+            or regime in {"CHOP", "TREND_DOWN"}
+            or volatility_stress_score >= t.defensive_stress_min
+            or data_quality_score < t.defensive_dq_max
+        ):
             return "DEFENSIVE"
-        if regime in {"TREND_UP", "RECOVERY"} and risk_appetite >= 66.0 and volatility_stress_score <= 50.0 and data_quality_score >= 65.0:
+        if (
+            regime in {"TREND_UP", "RECOVERY"}
+            and risk_appetite >= t.aggressive_appetite_min
+            and volatility_stress_score <= t.aggressive_stress_max
+            and data_quality_score >= t.aggressive_dq_min
+        ):
             return "AGGRESSIVE"
         return "NORMAL"
 
@@ -991,6 +1212,49 @@ class MarketBrainService:
             or confidence_family.get("run_integrity_confidence", 100.0) < 55.0
             or confidence_family.get("phase2_confidence", 100.0) < 35.0
         )
+        # ── PR-1 Tier-0: PCR / FII-DII / breadth-RoC / signal-age decay ──────
+        options_positioning_score = 50.0
+        flow_score = 50.0
+        if live_regime is not None:
+            try:
+                options_positioning_score = self._pcr_to_positioning_score(
+                    float(live_regime.pcr.pcr_weighted or live_regime.pcr.pcr or 1.0),
+                    confidence=float(live_regime.pcr.confidence or 0.0),
+                )
+                flow_score = self._fii_dii_to_flow_score(
+                    float(live_regime.fii.fii or 0.0),
+                    float(live_regime.fii.dii or 0.0),
+                    freshness=float(live_regime.fii.freshness_score or 0.0),
+                )
+            except Exception:
+                logger.debug("market_brain_v2 PCR/FII score derivation failed", exc_info=True)
+        breadth_roc_score = self._breadth_roc_score(
+            float(breadth.get("score") or 0.0), prior,
+        )
+        signal_age_penalty = self._signal_age_penalty(live_regime)
+        # Decay market_confidence for stale signals — informational telemetry is kept
+        # on state.signal_age_penalty so the dashboard can show WHY confidence dipped.
+        market_confidence_raw = float(confidence_family.get("market_confidence", 50.0))
+        market_confidence_decayed = self._clip(market_confidence_raw - signal_age_penalty, 0.0, 100.0)
+
+        # Regime-transition tracking — enables FE timeline + PANIC-exit-age debugging
+        is_transition = bool(prior is not None and prior.regime != regime)
+        if is_transition:
+            prev_regime_label = prior.regime if prior is not None else ""
+            regime_age_seconds = 0.0
+        elif prior is not None:
+            prev_regime_label = getattr(prior, "prev_regime", "") or ""
+            prior_ts = parse_any_ts(prior.asof_ts)
+            if prior_ts is not None:
+                age_now = (asof_i - prior_ts.astimezone(IST)).total_seconds()
+                regime_age_seconds = float(getattr(prior, "regime_age_seconds", 0.0) or 0.0) + max(0.0, age_now)
+            else:
+                regime_age_seconds = float(getattr(prior, "regime_age_seconds", 0.0) or 0.0)
+        else:
+            prev_regime_label = ""
+            regime_age_seconds = 0.0
+        regime_transitions_today = self._count_transitions_today(prior, is_transition, asof_i)
+
         reasons = [
             f"phase={phase}",
             f"trend={round(trend_score, 2)}",
@@ -1003,8 +1267,15 @@ class MarketBrainService:
             f"subRegime={sub_regime_v2}",
             f"struct={structure_state}",
             f"event={event_state}",
+            f"optionsPos={round(options_positioning_score, 2)}",
+            f"flow={round(flow_score, 2)}",
+            f"breadthRoC={round(breadth_roc_score, 2)}",
+            f"sigAgePenalty={round(signal_age_penalty, 2)}",
+            f"transitionsToday={regime_transitions_today}",
             f"degraded={'Y' if run_degraded_flag else 'N'}",
         ]
+        if is_transition:
+            reasons.append(f"transitionFrom={prev_regime_label}")
 
         state = MarketBrainState(
             asof_ts=asof_i.isoformat(),
@@ -1031,12 +1302,19 @@ class MarketBrainService:
             volatility_stress_score=round(volatility_stress_score, 2),
             liquidity_health_score=round(liquidity_health_score, 2),
             data_quality_score=round(data_quality_score, 2),
-            market_confidence=float(confidence_family.get("market_confidence", 50.0)),
+            market_confidence=float(market_confidence_decayed),
             breadth_confidence=float(confidence_family.get("breadth_confidence", 50.0)),
             leadership_confidence=float(confidence_family.get("leadership_confidence", 50.0)),
             phase2_confidence=float(confidence_family.get("phase2_confidence", 50.0)),
             policy_confidence=float(confidence_family.get("policy_confidence", 50.0)),
             run_integrity_confidence=float(confidence_family.get("run_integrity_confidence", 50.0)),
+            options_positioning_score=float(options_positioning_score),
+            flow_score=float(flow_score),
+            breadth_roc_score=float(breadth_roc_score),
+            prev_regime=prev_regime_label,
+            regime_age_seconds=float(round(regime_age_seconds, 2)),
+            regime_transitions_today=int(regime_transitions_today),
+            signal_age_penalty=float(signal_age_penalty),
         )
 
         context = {
@@ -1053,6 +1331,35 @@ class MarketBrainService:
             "confidenceFamily": confidence_family,
             "noLookaheadValid": no_lookahead_valid,
             "runDegradedFlag": bool(run_degraded_flag),
+            # PR-1 Tier-0: new inputs surfaced so the FE can visualise them
+            "optionsPositioning": {
+                "score": round(float(options_positioning_score), 2),
+                "pcrWeighted": round(float(live_regime.pcr.pcr_weighted), 3) if live_regime is not None else None,
+                "pcrNear": round(float(live_regime.pcr.pcr_near), 3) if live_regime is not None else None,
+                "confidence": round(float(live_regime.pcr.confidence), 2) if live_regime is not None else None,
+                "expiriesUsed": int(live_regime.pcr.expiries_used) if live_regime is not None else 0,
+            },
+            "flowSnapshot": {
+                "score": round(float(flow_score), 2),
+                "fiiNet": round(float(live_regime.fii.fii), 2) if live_regime is not None else None,
+                "diiNet": round(float(live_regime.fii.dii), 2) if live_regime is not None else None,
+                "asOfDate": live_regime.fii.as_of_date if live_regime is not None else "",
+                "freshness": round(float(live_regime.fii.freshness_score), 2) if live_regime is not None else 0.0,
+            },
+            "breadthRoC": {
+                "score": round(float(breadth_roc_score), 2),
+                "currentBreadth": round(float(breadth.get("score") or 0.0), 2),
+                "priorBreadth": round(float(prior.breadth_score), 2) if prior is not None else None,
+            },
+            "signalAgePenalty": round(float(signal_age_penalty), 2),
+            "marketConfidenceRaw": round(float(market_confidence_raw), 2),
+            "regimeTransition": {
+                "isTransition": bool(is_transition),
+                "fromRegime": prev_regime_label,
+                "toRegime": regime,
+                "ageSeconds": round(float(regime_age_seconds), 2),
+                "transitionsToday": int(regime_transitions_today),
+            },
         }
         policy = self.policy_service.derive_market_policy(state)
         self.persist_market_brain_state(state, context=context, policy=policy)

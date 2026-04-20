@@ -310,6 +310,19 @@ class MarketBrainState:
     phase2_confidence: float = 50.0
     policy_confidence: float = 50.0
     run_integrity_confidence: float = 50.0
+    # ── PR-1 Tier-0 additions (additive, default-safe) ────────────────────
+    # All-new signals: surfaced on state + BQ + dashboard but NOT yet fed
+    # into _map_regime (next PR). Defaults of 50.0 = neutral, so any
+    # consumer reading them without special handling behaves unchanged.
+    options_positioning_score: float = 50.0  # derived from weighted PCR (0=extreme bearish OI, 100=extreme bullish OI)
+    flow_score: float = 50.0                 # derived from FII/DII net (0=heavy outflow, 100=heavy inflow)
+    breadth_roc_score: float = 50.0          # breadth score rate-of-change (0=collapsing, 100=expanding)
+    # Regime transition tracking (for FE timeline + hysteresis debug)
+    prev_regime: str = ""                    # regime value before the most recent transition
+    regime_age_seconds: float = 0.0          # time in current regime (seconds since last transition)
+    regime_transitions_today: int = 0        # count of regime flips since IST midnight
+    # Confidence-decay telemetry (informational; already applied to market_confidence)
+    signal_age_penalty: float = 0.0          # 0..40 points shaved from market_confidence due to stale VIX/PCR/FII
 
 
 @dataclass

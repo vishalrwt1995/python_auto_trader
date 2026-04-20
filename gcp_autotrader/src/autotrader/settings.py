@@ -110,11 +110,79 @@ class RuntimeSettings:
 
 
 @dataclass(frozen=True)
+class RegimeThresholds:
+    """Market-Brain regime classification thresholds.
+
+    Defaults match the magic numbers previously hard-coded in
+    `MarketBrainService._map_regime` / `_map_risk_mode` (PR-1, 2026-04-20).
+    Externalising them lets us tune without redeploying code, and the
+    table-driven regime tests lock behaviour to these defaults so any
+    env override is an explicit, reviewable change.
+    """
+    # PANIC entry
+    panic_stress_min: float = 82.0
+    panic_breadth_max: float = 12.0
+    panic_dq_max: float = 30.0
+    # TREND_UP entry (standard)
+    trend_up_trend_min: float = 70.0
+    trend_up_breadth_min: float = 62.0
+    trend_up_leadership_min: float = 56.0
+    trend_up_stress_max: float = 48.0
+    # TREND_UP entry (high-breadth alternative)
+    trend_up_hi_breadth_min: float = 80.0
+    trend_up_hi_leadership_min: float = 60.0
+    trend_up_hi_stress_max: float = 48.0
+    # TREND_DOWN entry
+    trend_down_trend_max: float = 36.0
+    trend_down_breadth_max: float = 40.0
+    trend_down_leadership_max: float = 45.0
+    # CHOP entry
+    chop_stress_min: float = 62.0
+    chop_leadership_max: float = 46.0
+    chop_appetite_max: float = 46.0
+    # RECOVERY entry
+    recovery_trend_min: float = 40.0
+    recovery_breadth_min: float = 35.0
+    recovery_leadership_min: float = 40.0
+    # PANIC exit guard (stay-in-PANIC conditions)
+    panic_exit_stress_above: float = 65.0
+    panic_exit_breadth_below: float = 22.0
+    # TREND_UP hysteresis (stay-in)
+    trend_up_hold_trend_min: float = 60.0
+    trend_up_hold_breadth_min: float = 55.0
+    trend_up_hold_leadership_min: float = 50.0
+    # TREND_UP hysteresis (entry after absence)
+    trend_up_reenter_trend_min: float = 74.0
+    trend_up_reenter_breadth_min: float = 66.0
+    trend_up_reenter_leadership_min: float = 58.0
+    trend_up_reenter_hi_breadth_min: float = 82.0
+    trend_up_reenter_hi_leadership_min: float = 62.0
+    trend_up_reenter_hi_stress_max: float = 45.0
+    # General transition damper (sub-threshold age in seconds)
+    transition_min_age_sec: float = 240.0
+    # Risk mode thresholds
+    lockdown_stress_min: float = 85.0
+    lockdown_dq_max: float = 35.0
+    defensive_stress_min: float = 65.0
+    defensive_dq_max: float = 55.0
+    aggressive_appetite_min: float = 66.0
+    aggressive_stress_max: float = 50.0
+    aggressive_dq_min: float = 65.0
+    # Signal-staleness decay (PR-1)
+    signal_fresh_max_sec: float = 120.0     # < this → 0 penalty
+    signal_stale_full_sec: float = 900.0    # > this → full penalty (40 pts)
+    signal_max_penalty: float = 40.0
+    # Pubsub emission cadence (PR-1)
+    pubsub_heartbeat_sec: float = 300.0     # emit even without transition after this long
+
+
+@dataclass(frozen=True)
 class AppSettings:
     gcp: GcpSettings
     upstox: UpstoxSettings
     runtime: RuntimeSettings
     strategy: StrategySettings
+    regime_thresholds: RegimeThresholds = RegimeThresholds()
 
     @staticmethod
     def from_env() -> "AppSettings":
@@ -191,4 +259,48 @@ class AppSettings:
                 timezone_name=_env("TZ", "Asia/Kolkata"),
             ),
             strategy=strategy,
+            regime_thresholds=RegimeThresholds(
+                panic_stress_min=_env_float("REGIME_PANIC_STRESS_MIN", 82.0),
+                panic_breadth_max=_env_float("REGIME_PANIC_BREADTH_MAX", 12.0),
+                panic_dq_max=_env_float("REGIME_PANIC_DQ_MAX", 30.0),
+                trend_up_trend_min=_env_float("REGIME_TREND_UP_TREND_MIN", 70.0),
+                trend_up_breadth_min=_env_float("REGIME_TREND_UP_BREADTH_MIN", 62.0),
+                trend_up_leadership_min=_env_float("REGIME_TREND_UP_LEADERSHIP_MIN", 56.0),
+                trend_up_stress_max=_env_float("REGIME_TREND_UP_STRESS_MAX", 48.0),
+                trend_up_hi_breadth_min=_env_float("REGIME_TREND_UP_HI_BREADTH_MIN", 80.0),
+                trend_up_hi_leadership_min=_env_float("REGIME_TREND_UP_HI_LEADERSHIP_MIN", 60.0),
+                trend_up_hi_stress_max=_env_float("REGIME_TREND_UP_HI_STRESS_MAX", 48.0),
+                trend_down_trend_max=_env_float("REGIME_TREND_DOWN_TREND_MAX", 36.0),
+                trend_down_breadth_max=_env_float("REGIME_TREND_DOWN_BREADTH_MAX", 40.0),
+                trend_down_leadership_max=_env_float("REGIME_TREND_DOWN_LEADERSHIP_MAX", 45.0),
+                chop_stress_min=_env_float("REGIME_CHOP_STRESS_MIN", 62.0),
+                chop_leadership_max=_env_float("REGIME_CHOP_LEADERSHIP_MAX", 46.0),
+                chop_appetite_max=_env_float("REGIME_CHOP_APPETITE_MAX", 46.0),
+                recovery_trend_min=_env_float("REGIME_RECOVERY_TREND_MIN", 40.0),
+                recovery_breadth_min=_env_float("REGIME_RECOVERY_BREADTH_MIN", 35.0),
+                recovery_leadership_min=_env_float("REGIME_RECOVERY_LEADERSHIP_MIN", 40.0),
+                panic_exit_stress_above=_env_float("REGIME_PANIC_EXIT_STRESS_ABOVE", 65.0),
+                panic_exit_breadth_below=_env_float("REGIME_PANIC_EXIT_BREADTH_BELOW", 22.0),
+                trend_up_hold_trend_min=_env_float("REGIME_TREND_UP_HOLD_TREND_MIN", 60.0),
+                trend_up_hold_breadth_min=_env_float("REGIME_TREND_UP_HOLD_BREADTH_MIN", 55.0),
+                trend_up_hold_leadership_min=_env_float("REGIME_TREND_UP_HOLD_LEADERSHIP_MIN", 50.0),
+                trend_up_reenter_trend_min=_env_float("REGIME_TREND_UP_REENTER_TREND_MIN", 74.0),
+                trend_up_reenter_breadth_min=_env_float("REGIME_TREND_UP_REENTER_BREADTH_MIN", 66.0),
+                trend_up_reenter_leadership_min=_env_float("REGIME_TREND_UP_REENTER_LEADERSHIP_MIN", 58.0),
+                trend_up_reenter_hi_breadth_min=_env_float("REGIME_TREND_UP_REENTER_HI_BREADTH_MIN", 82.0),
+                trend_up_reenter_hi_leadership_min=_env_float("REGIME_TREND_UP_REENTER_HI_LEADERSHIP_MIN", 62.0),
+                trend_up_reenter_hi_stress_max=_env_float("REGIME_TREND_UP_REENTER_HI_STRESS_MAX", 45.0),
+                transition_min_age_sec=_env_float("REGIME_TRANSITION_MIN_AGE_SEC", 240.0),
+                lockdown_stress_min=_env_float("REGIME_LOCKDOWN_STRESS_MIN", 85.0),
+                lockdown_dq_max=_env_float("REGIME_LOCKDOWN_DQ_MAX", 35.0),
+                defensive_stress_min=_env_float("REGIME_DEFENSIVE_STRESS_MIN", 65.0),
+                defensive_dq_max=_env_float("REGIME_DEFENSIVE_DQ_MAX", 55.0),
+                aggressive_appetite_min=_env_float("REGIME_AGGRESSIVE_APPETITE_MIN", 66.0),
+                aggressive_stress_max=_env_float("REGIME_AGGRESSIVE_STRESS_MAX", 50.0),
+                aggressive_dq_min=_env_float("REGIME_AGGRESSIVE_DQ_MIN", 65.0),
+                signal_fresh_max_sec=_env_float("REGIME_SIGNAL_FRESH_MAX_SEC", 120.0),
+                signal_stale_full_sec=_env_float("REGIME_SIGNAL_STALE_FULL_SEC", 900.0),
+                signal_max_penalty=_env_float("REGIME_SIGNAL_MAX_PENALTY", 40.0),
+                pubsub_heartbeat_sec=_env_float("REGIME_PUBSUB_HEARTBEAT_SEC", 300.0),
+            ),
         )
