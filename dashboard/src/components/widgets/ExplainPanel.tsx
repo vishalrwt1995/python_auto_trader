@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import type { MarketBrainExplain, ExplainComponent } from "@/lib/types";
+import type { MarketBrainExplain, ExplainScore } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -16,6 +16,11 @@ import { cn } from "@/lib/utils";
  * The endpoint is composed server-side from the already-persisted state —
  * there is no live recompute — so two callers on the same page see the same
  * numbers the brain last persisted.
+ *
+ * Resilience:
+ * - BE can return {empty: true} if no brain doc exists yet (fresh deploy).
+ * - BE can return {empty: true, error: "…"} if the Firestore read fails.
+ * - Any array/object on the payload is treated as optional and defaulted.
  */
 export function ExplainPanel() {
   const [explain, setExplain] = useState<MarketBrainExplain | null>(null);
@@ -44,6 +49,9 @@ export function ExplainPanel() {
     };
   }, []);
 
+  const scores: ExplainScore[] = explain?.scores ?? [];
+  const isEmpty = !!explain?.empty || (!loading && !error && scores.length === 0);
+
   return (
     <div className="bg-bg-secondary rounded-lg border border-bg-tertiary p-5">
       <div className="flex items-center justify-between mb-3">
@@ -59,11 +67,19 @@ export function ExplainPanel() {
         <p className="text-xs text-loss">⚠ {error}</p>
       )}
 
-      {!loading && !error && explain && (
+      {!loading && !error && isEmpty && (
+        <p className="text-xs text-text-secondary italic">
+          Breakdown available once the brain emits its first snapshot
+          {explain?.error ? ` — ${explain.error}` : ""}
+          .
+        </p>
+      )}
+
+      {!loading && !error && !isEmpty && explain && (
         <>
           {/* Component grid */}
           <div className="space-y-2 mb-4">
-            {explain.components.map((c) => (
+            {scores.map((c) => (
               <ComponentRow key={c.key} c={c} />
             ))}
           </div>
@@ -72,20 +88,20 @@ export function ExplainPanel() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-3 border-t border-bg-tertiary text-xs">
             <SummaryField
               label="Market Confidence"
-              value={explain.confidence.market_confidence?.toFixed(1) ?? "—"}
+              value={formatNum(explain.confidence?.market)}
               accent="#3b82f6"
               tooltip="Composite confidence after signal-age penalty"
             />
             <SummaryField
               label="Raw Confidence"
-              value={explain.confidence.market_confidence_raw?.toFixed(1) ?? "—"}
+              value={formatNum(explain.confidence?.market_raw)}
               accent="#8b5cf6"
               tooltip="Before signal-age penalty"
             />
             <SummaryField
               label="Signal Age Penalty"
               value={
-                explain.confidence.signal_age_penalty != null
+                explain.confidence?.signal_age_penalty != null
                   ? `-${explain.confidence.signal_age_penalty.toFixed(1)}`
                   : "—"
               }
@@ -95,8 +111,8 @@ export function ExplainPanel() {
             <SummaryField
               label="Regime Age"
               value={
-                explain.regime_transition.regime_age_seconds != null
-                  ? formatDuration(explain.regime_transition.regime_age_seconds)
+                explain.regime_transition?.age_seconds != null
+                  ? formatDuration(explain.regime_transition.age_seconds)
                   : "—"
               }
               accent="#22c55e"
@@ -104,37 +120,40 @@ export function ExplainPanel() {
             />
           </div>
 
-          {/* PR-1 signals passthrough */}
+          {/* PR-1 signals passthrough — BE nests each as {score, …} */}
           <div className="grid grid-cols-3 gap-3 mt-3 text-xs">
             <SummaryField
               label="Options Pos"
-              value={explain.signals.options_positioning_score?.toFixed(0) ?? "—"}
+              value={formatNum(explain.signals?.options_positioning?.score, 0)}
               accent="#06b6d4"
               tooltip="Derived from PCR (contrarian): 50=neutral, high=bullish, low=bearish"
             />
             <SummaryField
               label="Flow (FII+DII)"
-              value={explain.signals.flow_score?.toFixed(0) ?? "—"}
+              value={formatNum(explain.signals?.flow?.score, 0)}
               accent="#06b6d4"
               tooltip="Combined net institutional flow; 50=neutral"
             />
             <SummaryField
               label="Breadth RoC"
-              value={explain.signals.breadth_roc_score?.toFixed(0) ?? "—"}
+              value={formatNum(explain.signals?.breadth_roc?.score, 0)}
               accent="#06b6d4"
               tooltip="Rate-of-change of breadth vs prior snapshot"
             />
           </div>
 
-          {explain.regime_transition.prev_regime && (
+          {explain.regime_transition?.is_transition && (
             <div className="mt-3 px-3 py-2 rounded-md bg-bg-primary text-[11px] text-text-secondary border-l-2 border-blue-500/60">
               Regime transitioned from{" "}
               <span className="font-mono text-text-primary">
-                {String(explain.regime_transition.prev_regime)}
+                {String(explain.regime_transition.from_regime ?? "—")}
               </span>{" "}
-              → <span className="font-mono text-text-primary">{explain.regime}</span>
-              {explain.regime_transition.regime_transitions_today != null && (
-                <> · {explain.regime_transition.regime_transitions_today} transitions today</>
+              →{" "}
+              <span className="font-mono text-text-primary">
+                {String(explain.regime_transition.to_regime ?? explain.regime ?? "—")}
+              </span>
+              {explain.regime_transition.transitions_today != null && (
+                <> · {explain.regime_transition.transitions_today} transitions today</>
               )}
             </div>
           )}
@@ -144,16 +163,16 @@ export function ExplainPanel() {
   );
 }
 
-function ComponentRow({ c }: { c: ExplainComponent }) {
-  const pct = Math.max(0, Math.min(100, c.score));
-  const contrib = c.contribution;
+function ComponentRow({ c }: { c: ExplainScore }) {
+  const pct = Math.max(0, Math.min(100, c.score ?? 0));
+  const contrib = c.contribution ?? 0;
   const contribColor =
     contrib >= 0 ? (contrib >= 10 ? "#22c55e" : "#3b82f6") : "#ef4444";
   const bandColor = bandToColor(c.band, c.inverted);
+  const delta = c.delta ?? 0;
   const deltaStr =
-    c.delta != null && Math.abs(c.delta) >= 0.5
-      ? `${c.delta > 0 ? "+" : ""}${c.delta.toFixed(1)}`
-      : null;
+    Math.abs(delta) >= 0.5 ? `${delta > 0 ? "+" : ""}${delta.toFixed(1)}` : null;
+  const weight = c.weight ?? 0;
 
   return (
     <div className="bg-bg-primary rounded-md p-2.5">
@@ -168,20 +187,20 @@ function ComponentRow({ c }: { c: ExplainComponent }) {
           {c.band}
         </span>
         <span className="text-[10px] text-text-secondary font-mono shrink-0">
-          w={c.weight >= 0 ? `+${c.weight.toFixed(2)}` : c.weight.toFixed(2)}
+          w={weight >= 0 ? `+${weight.toFixed(2)}` : weight.toFixed(2)}
         </span>
         {deltaStr && (
           <span
             className={cn(
               "text-[10px] font-mono shrink-0",
-              c.delta > 0 ? "text-profit" : "text-loss",
+              delta > 0 ? "text-profit" : "text-loss",
             )}
           >
             Δ{deltaStr}
           </span>
         )}
         <span className="text-[10px] text-text-secondary font-mono ml-auto shrink-0">
-          {c.score.toFixed(1)}
+          {(c.score ?? 0).toFixed(1)}
         </span>
         <span
           className="text-[10px] font-mono font-semibold shrink-0 w-14 text-right"
@@ -232,9 +251,8 @@ function SummaryField({
   );
 }
 
-function bandToColor(band: string, inverted: boolean): string {
+function bandToColor(band: string | undefined, inverted: boolean | undefined): string {
   const b = band?.toLowerCase() ?? "";
-  // For inverted metrics (stress), high bands are bad
   if (inverted) {
     if (b === "severe" || b === "elevated") return "#ef4444";
     if (b === "moderate") return "#f59e0b";
@@ -248,8 +266,14 @@ function bandToColor(band: string, inverted: boolean): string {
 }
 
 function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
   if (seconds < 60) return `${Math.round(seconds)}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;
   return `${(seconds / 86400).toFixed(1)}d`;
+}
+
+function formatNum(v: number | undefined, digits = 1): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return v.toFixed(digits);
 }

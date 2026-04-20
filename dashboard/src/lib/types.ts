@@ -59,9 +59,16 @@ export interface MarketBrainNarrative {
   as_of: string;
 }
 
-/* ── PR-2: Explain payload (GET /dashboard/market-brain/explain) ── */
+/* ── PR-2: Explain payload (GET /dashboard/market-brain/explain) ──
+ * Matches the BE contract asserted by tests/test_market_brain_pr2.py:
+ *   scores[], confidence{market, market_raw, signal_age_penalty, …},
+ *   signals{options_positioning{score}, flow{score}, breadth_roc{score}},
+ *   regime_transition{is_transition, from_regime, to_regime, age_seconds,
+ *     transitions_today}.
+ * Also handles the "no brain doc yet" empty response.
+ */
 
-export interface ExplainComponent {
+export interface ExplainScore {
   key: string;
   label: string;
   score: number;
@@ -74,43 +81,61 @@ export interface ExplainComponent {
 }
 
 export interface ExplainConfidence {
-  market_confidence: number;
-  market_confidence_raw?: number;
+  market: number;
+  market_raw?: number;
   signal_age_penalty?: number;
-  breadth_confidence?: number;
-  leadership_confidence?: number;
-  phase2_confidence?: number;
-  policy_confidence?: number;
-  run_integrity_confidence?: number;
+  breadth?: number;
+  leadership?: number;
+  phase2?: number;
+  policy?: number;
+  run_integrity?: number;
 }
 
 export interface ExplainRegimeTransition {
-  prev_regime?: Regime | null;
-  regime_age_seconds?: number;
-  regime_transitions_today?: number;
+  is_transition?: boolean;
+  from_regime?: string | null;
+  to_regime?: string | null;
+  age_seconds?: number;
+  transitions_today?: number;
+}
+
+export interface ExplainSignalBlock {
+  score?: number;
+  pcrWeighted?: number;
+  confidence?: number;
+  [k: string]: unknown;
 }
 
 export interface ExplainSignals {
-  options_positioning_score?: number;
-  flow_score?: number;
-  breadth_roc_score?: number;
+  options_positioning?: ExplainSignalBlock;
+  flow?: ExplainSignalBlock;
+  breadth_roc?: ExplainSignalBlock;
 }
 
 export interface MarketBrainExplain {
-  as_of: string;
-  regime: Regime;
-  risk_mode: RiskMode;
+  empty?: boolean;
+  error?: string;
+  asof_ts?: string;
+  phase?: MarketPhase;
+  regime?: Regime;
+  risk_mode?: RiskMode;
   sub_regime_v2?: string;
-  structure_state?: string;
   participation?: Participation;
-  components: ExplainComponent[];
-  confidence: ExplainConfidence;
-  regime_transition: ExplainRegimeTransition;
-  signals: ExplainSignals;
+  run_degraded_flag?: boolean;
   narrative?: MarketBrainNarrative;
+  scores?: ExplainScore[];
+  total_contribution?: number;
+  risk_appetite?: number;
+  confidence?: ExplainConfidence;
+  signals?: ExplainSignals;
+  regime_transition?: ExplainRegimeTransition;
+  policy?: Record<string, unknown>;
+  reasons?: string[];
 }
 
-/* ── PR-2: History timeseries point (GET /dashboard/market-brain/history) ── */
+/* ── PR-2: History timeseries (GET /dashboard/market-brain/history) ──
+ * BE returns {series, meta} — see test_route_market_brain_history_default_range.
+ */
 
 export interface BrainHistoryPoint {
   asof_ts: string;
@@ -133,11 +158,18 @@ export interface BrainHistoryPoint {
   signal_age_penalty?: number;
 }
 
-export interface BrainHistoryResponse {
-  points: BrainHistoryPoint[];
+export interface BrainHistoryMeta {
   days: number;
   limit: number;
-  count: number;
+  row_count: number;
+  from_date?: string;
+  to_date?: string;
+  error?: string;
+}
+
+export interface BrainHistoryResponse {
+  series: BrainHistoryPoint[];
+  meta: BrainHistoryMeta;
 }
 
 export interface BrainHistoryRow {

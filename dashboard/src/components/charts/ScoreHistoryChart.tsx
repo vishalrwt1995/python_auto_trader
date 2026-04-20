@@ -74,7 +74,9 @@ export function ScoreHistoryChart({ height = 320 }: { height?: number }) {
     api
       .getMarketBrainHistory(days, days === 1 ? 500 : days === 3 ? 1000 : 2000)
       .then((resp) => {
-        if (!cancelled) setPoints(resp.points ?? []);
+        if (cancelled) return;
+        setPoints(Array.isArray(resp?.series) ? resp.series : []);
+        if (resp?.meta?.error) setError(resp.meta.error);
       })
       .catch((e) => {
         if (!cancelled) setError(e?.message ?? "Failed to load history");
