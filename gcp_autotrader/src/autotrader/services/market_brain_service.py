@@ -5,7 +5,7 @@ import math
 import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
@@ -175,10 +175,19 @@ class MarketBrainService:
         if all(s == 0.0 for s in _scores):
             logger.error("persist_market_brain_state BLOCKED: all scores are 0 — state not saved (data pipeline failure)")
             return
+        # PR-2: compose narrative once here so it lives alongside state in
+        # Firestore — FE picks it up via the existing real-time listener
+        # with zero extra round-trips. Failures are swallowed (best-effort).
+        try:
+            narrative = self.build_narrative(state, context or {})
+        except Exception:
+            logger.exception("market_brain narrative build failed")
+            narrative = {}
         payload = {
             "state": asdict(state),
             "context": context or {},
             "policy": asdict(policy) if policy is not None else {},
+            "narrative": narrative,
         }
         self.state.set_json("market_brain", "latest", payload, merge=False)
         self.gcs.write_json(self.latest_state_path, payload)
@@ -1419,3 +1428,322 @@ class MarketBrainService:
 
     def watchlist_regime_payload(self, state: MarketBrainState) -> dict[str, Any]:
         return self._state_to_watchlist_regime(state)
+
+    # ================================================================== #
+    # PR-2 Tier-1: narrative + explain composition
+    # ==================================================================
+    #
+    # Both builders are PURE over (state, context, policy) — no network,
+    # no Firestore. `build_narrative` is called from persist_market_brain_state
+    # so the narrative is stored alongside state/context/policy in the
+    # Firestore `market_brain/latest` doc. The dashboard reads it via the
+    # existing real-time listener with zero extra round-trips.
+    # `build_explain_payload` is called by the HTTP /market-brain/explain
+    # route — it decorates the stored state with per-component weights and
+    # contributions so the UI can render a transparent breakdown.
+
+    # Component weights mirror the `risk_appetite` formula in _build_state
+    # (trend 0.26 + breadth 0.24 + leadership 0.20 + liquidity 0.15 +
+    # dataQ 0.10 − stress 0.15). Stress is a *penalty*; we surface its
+    # weight as a negative number so the UI can show it as "drag".
+    _COMPONENT_WEIGHTS: ClassVar[dict[str, float]] = {
+        "trend": 0.26,
+        "breadth": 0.24,
+        "leadership": 0.20,
+        "liquidity_health": 0.15,
+        "data_quality": 0.10,
+        "volatility_stress": -0.15,
+    }
+
+    _COMPONENT_LABELS: ClassVar[dict[str, str]] = {
+        "trend": "Trend",
+        "breadth": "Breadth",
+        "leadership": "Leadership",
+        "liquidity_health": "Liquidity",
+        "data_quality": "Data Quality",
+        "volatility_stress": "Volatility Stress",
+    }
+
+    @staticmethod
+    def _score_band(score: float, *, inverted: bool = False) -> str:
+        """Map a 0..100 score to a qualitative band. `inverted=True` for
+        stress-like metrics where high = bad."""
+        s = float(score or 0.0)
+        if inverted:
+            if s >= 75: return "severe"
+            if s >= 60: return "elevated"
+            if s >= 40: return "moderate"
+            if s >= 25: return "calm"
+            return "quiet"
+        if s >= 75: return "strong"
+        if s >= 60: return "firm"
+        if s >= 45: return "mixed"
+        if s >= 30: return "weak"
+        return "broken"
+
+    @staticmethod
+    def _score_rationale(key: str, score: float) -> str:
+        """Short human-readable explanation of a single component's current level."""
+        s = float(score or 0.0)
+        if key == "trend":
+            if s >= 70: return "Nifty daily structure is clearly up-trending."
+            if s <= 30: return "Nifty daily structure has broken down."
+            return "Nifty daily structure is mixed / range-bound."
+        if key == "breadth":
+            if s >= 65: return "Broad participation — a majority of stocks are advancing."
+            if s <= 35: return "Narrow participation — few stocks advancing."
+            return "Breadth is average."
+        if key == "leadership":
+            if s >= 60: return "Leading sectors and names are confirming the move."
+            if s <= 35: return "No clear leadership — risk-off character."
+            return "Leadership is mixed."
+        if key == "liquidity_health":
+            if s >= 65: return "Liquidity is healthy for entries."
+            if s <= 40: return "Liquidity is thin; entries may slip."
+            return "Liquidity is acceptable."
+        if key == "data_quality":
+            if s >= 80: return "Pipeline is running clean."
+            if s <= 55: return "Pipeline is degraded; some signals may be stale."
+            return "Pipeline is running with minor gaps."
+        if key == "volatility_stress":
+            if s >= 75: return "Volatility is severe — stress regime behaviour."
+            if s >= 60: return "Volatility is elevated."
+            if s <= 25: return "Volatility is quiet."
+            return "Volatility is within normal range."
+        return ""
+
+    def _narrative_headline(self, state: MarketBrainState) -> str:
+        """One-line headline ≤ ~80 chars suitable for a dashboard hero."""
+        regime = (state.regime or "RANGE").replace("_", " ").title()
+        risk = (state.risk_mode or "NORMAL").title()
+        participation = (state.participation or "MODERATE").title()
+        conf = int(round(float(state.market_confidence or 0.0)))
+        return f"{regime} · {risk} mode · {participation} participation · confidence {conf}"
+
+    def build_narrative(
+        self,
+        state: MarketBrainState,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compose a rule-based narrative from the state + context.
+
+        Deterministic and testable: same inputs → same output. No LLM,
+        no randomness. Intended for display on the dashboard's Market
+        Brain page.
+        """
+        ctx = context or {}
+        transition = ctx.get("regimeTransition", {}) if isinstance(ctx.get("regimeTransition"), dict) else {}
+        options = ctx.get("optionsPositioning", {}) if isinstance(ctx.get("optionsPositioning"), dict) else {}
+        flow = ctx.get("flowSnapshot", {}) if isinstance(ctx.get("flowSnapshot"), dict) else {}
+        breadth_roc = ctx.get("breadthRoC", {}) if isinstance(ctx.get("breadthRoC"), dict) else {}
+
+        regime = str(state.regime or "RANGE")
+        risk_mode = str(state.risk_mode or "NORMAL")
+        sentences: list[str] = []
+        key_drivers: list[str] = []
+        risks: list[str] = []
+        opportunities: list[str] = []
+
+        # Sentence 1 — regime summary
+        regime_phrase = {
+            "TREND_UP":   "Markets are in a confirmed up-trend",
+            "TREND_DOWN": "Markets are in a confirmed down-trend",
+            "RANGE":      "Markets are range-bound",
+            "CHOP":       "Markets are choppy with no clean direction",
+            "PANIC":      "Markets are in PANIC — extreme stress detected",
+            "RECOVERY":   "Markets are attempting a recovery from a stressed regime",
+        }.get(regime, f"Regime is {regime}")
+        sentences.append(f"{regime_phrase}. Risk mode: {risk_mode}.")
+
+        # Sentence 2 — strongest supportive and drag components
+        scores = {
+            "trend": float(state.trend_score or 0.0),
+            "breadth": float(state.breadth_score or 0.0),
+            "leadership": float(state.leadership_score or 0.0),
+            "liquidity_health": float(state.liquidity_health_score or 0.0),
+            "data_quality": float(state.data_quality_score or 0.0),
+        }
+        strongest = max(scores.items(), key=lambda x: x[1])
+        weakest = min(scores.items(), key=lambda x: x[1])
+        stress = float(state.volatility_stress_score or 0.0)
+        sentences.append(
+            f"{self._COMPONENT_LABELS[strongest[0]]} is the strongest component at "
+            f"{round(strongest[1])}; {self._COMPONENT_LABELS[weakest[0]]} is the weakest "
+            f"at {round(weakest[1])}. Volatility stress is {self._score_band(stress, inverted=True)} "
+            f"({round(stress)})."
+        )
+        key_drivers.append(f"{self._COMPONENT_LABELS[strongest[0]]} {round(strongest[1])}")
+        if weakest[1] < 45:
+            risks.append(f"Low {self._COMPONENT_LABELS[weakest[0]]} ({round(weakest[1])})")
+
+        # Sentence 3 — regime transition context
+        is_transition = bool(transition.get("isTransition"))
+        transitions_today = int(transition.get("transitionsToday") or 0)
+        prev_regime = str(transition.get("fromRegime") or state.prev_regime or "")
+        age_sec = float(transition.get("ageSeconds") or state.regime_age_seconds or 0.0)
+        if is_transition and prev_regime:
+            sentences.append(
+                f"Just transitioned from {prev_regime.replace('_', ' ').title()} "
+                f"→ {regime.replace('_', ' ').title()} "
+                f"({transitions_today} transition{'s' if transitions_today != 1 else ''} today)."
+            )
+            if transitions_today >= 3:
+                risks.append(f"Flippy regime — {transitions_today} transitions today")
+        elif age_sec > 0:
+            age_min = int(age_sec // 60)
+            if age_min >= 1:
+                sentences.append(
+                    f"Held in {regime.replace('_', ' ').title()} for {age_min} minute"
+                    f"{'s' if age_min != 1 else ''} so far."
+                )
+
+        # Sentence 4 — signal-age / degraded
+        sig_penalty = float(ctx.get("signalAgePenalty") or state.signal_age_penalty or 0.0)
+        if state.run_degraded_flag:
+            sentences.append("Run is DEGRADED — some data pipelines are stale.")
+            risks.append("Degraded run — trust outputs less than usual")
+        elif sig_penalty >= 5.0:
+            raw_conf = float(ctx.get("marketConfidenceRaw") or state.market_confidence or 0.0)
+            sentences.append(
+                f"Confidence adjusted down by {round(sig_penalty)} points for stale signals "
+                f"(raw {round(raw_conf)} → effective {round(float(state.market_confidence or 0))})."
+            )
+            risks.append(f"Stale signals ({round(sig_penalty)}-pt penalty)")
+
+        # Sentence 5 — options/flow/breadth-RoC flavour
+        flavour_bits: list[str] = []
+        opt_score = float(options.get("score") or state.options_positioning_score or 50.0)
+        if opt_score >= 70:
+            flavour_bits.append("PCR-implied positioning is bullish")
+            opportunities.append("Contrarian long setup (oversold PCR)")
+        elif opt_score <= 30:
+            flavour_bits.append("PCR-implied positioning is bearish / crowded longs")
+            risks.append("Crowded longs (low PCR)")
+        flow_score = float(flow.get("score") or state.flow_score or 50.0)
+        if flow_score >= 70:
+            flavour_bits.append("institutional flows are supportive")
+            key_drivers.append(f"Institutional inflows (flow {round(flow_score)})")
+        elif flow_score <= 30:
+            flavour_bits.append("institutional flows are negative")
+            risks.append(f"Institutional outflows (flow {round(flow_score)})")
+        roc_score = float(breadth_roc.get("score") or state.breadth_roc_score or 50.0)
+        if roc_score >= 70:
+            flavour_bits.append("breadth is expanding")
+            opportunities.append("Expanding breadth — trend-following edge")
+        elif roc_score <= 30:
+            flavour_bits.append("breadth is contracting")
+            risks.append("Breadth is contracting")
+        if flavour_bits:
+            sentences.append("Secondary signals: " + ", ".join(flavour_bits) + ".")
+
+        # Opportunities by regime/risk-mode
+        if regime in {"TREND_UP", "RECOVERY"} and risk_mode == "AGGRESSIVE":
+            opportunities.append("Aggressive sizing allowed for high-conviction setups")
+        if state.swing_permission == "ENABLED" and regime == "TREND_UP":
+            opportunities.append("Swing positions are fully enabled")
+        elif state.swing_permission == "REDUCED":
+            risks.append("Swing sizing is reduced")
+        elif state.swing_permission == "DISABLED":
+            risks.append("Swing positions are disabled")
+
+        # De-duplicate while preserving order
+        def _dedup(items: list[str]) -> list[str]:
+            seen: set[str] = set()
+            out: list[str] = []
+            for x in items:
+                if x and x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            return out
+
+        return {
+            "headline": self._narrative_headline(state),
+            "sentences": sentences,
+            "key_drivers": _dedup(key_drivers)[:4],
+            "risks": _dedup(risks)[:4],
+            "opportunities": _dedup(opportunities)[:4],
+            "as_of": state.asof_ts,
+        }
+
+    def build_explain_payload(
+        self,
+        state: MarketBrainState,
+        context: dict[str, Any] | None = None,
+        policy: MarketPolicy | None = None,
+        narrative: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compose the /market-brain/explain response — per-component
+        weight + contribution + rationale, plus confidence breakdown and
+        secondary signals. Pure; no recomputation.
+        """
+        ctx = context or {}
+        deltas_raw = ctx.get("deltas") if isinstance(ctx.get("deltas"), dict) else {}
+        score_values = {
+            "trend": float(state.trend_score or 0.0),
+            "breadth": float(state.breadth_score or 0.0),
+            "leadership": float(state.leadership_score or 0.0),
+            "liquidity_health": float(state.liquidity_health_score or 0.0),
+            "data_quality": float(state.data_quality_score or 0.0),
+            "volatility_stress": float(state.volatility_stress_score or 0.0),
+        }
+        scores_out: list[dict[str, Any]] = []
+        for key, weight in self._COMPONENT_WEIGHTS.items():
+            score = score_values[key]
+            contribution = round(weight * score, 2)
+            delta_key = "stress" if key == "volatility_stress" else ("quality" if key == "data_quality" else ("liquidity" if key == "liquidity_health" else key))
+            scores_out.append({
+                "key": key,
+                "label": self._COMPONENT_LABELS[key],
+                "score": round(score, 2),
+                "weight": round(weight, 4),
+                "contribution": contribution,
+                "delta": round(float(deltas_raw.get(delta_key) or 0.0), 2),
+                "band": self._score_band(score, inverted=(key == "volatility_stress")),
+                "rationale": self._score_rationale(key, score),
+                "inverted": key == "volatility_stress",
+            })
+
+        total_contribution = round(sum(s["contribution"] for s in scores_out), 2)
+
+        confidence_breakdown = {
+            "market": round(float(state.market_confidence or 0.0), 2),
+            "market_raw": round(float(ctx.get("marketConfidenceRaw") or state.market_confidence or 0.0), 2),
+            "signal_age_penalty": round(float(ctx.get("signalAgePenalty") or state.signal_age_penalty or 0.0), 2),
+            "breadth": round(float(state.breadth_confidence or 0.0), 2),
+            "leadership": round(float(state.leadership_confidence or 0.0), 2),
+            "phase2": round(float(state.phase2_confidence or 0.0), 2),
+            "policy": round(float(state.policy_confidence or 0.0), 2),
+            "run_integrity": round(float(state.run_integrity_confidence or 0.0), 2),
+        }
+
+        transition = ctx.get("regimeTransition", {}) if isinstance(ctx.get("regimeTransition"), dict) else {}
+        signals = {
+            "options_positioning": ctx.get("optionsPositioning", {"score": state.options_positioning_score}),
+            "flow": ctx.get("flowSnapshot", {"score": state.flow_score}),
+            "breadth_roc": ctx.get("breadthRoC", {"score": state.breadth_roc_score}),
+        }
+
+        return {
+            "asof_ts": state.asof_ts,
+            "phase": state.phase,
+            "regime": state.regime,
+            "sub_regime_v2": state.sub_regime_v2,
+            "risk_mode": state.risk_mode,
+            "participation": state.participation,
+            "run_degraded_flag": bool(state.run_degraded_flag),
+            "narrative": narrative or self.build_narrative(state, ctx),
+            "scores": scores_out,
+            "total_contribution": total_contribution,
+            "risk_appetite": round(float(ctx.get("riskAppetite") or 0.0), 2),
+            "confidence": confidence_breakdown,
+            "signals": signals,
+            "regime_transition": {
+                "is_transition": bool(transition.get("isTransition")),
+                "from_regime": transition.get("fromRegime", state.prev_regime),
+                "to_regime": transition.get("toRegime", state.regime),
+                "age_seconds": float(transition.get("ageSeconds") or state.regime_age_seconds or 0.0),
+                "transitions_today": int(transition.get("transitionsToday") or state.regime_transitions_today or 0),
+            },
+            "policy": asdict(policy) if policy is not None else {},
+            "reasons": list(state.reasons or []),
+        }

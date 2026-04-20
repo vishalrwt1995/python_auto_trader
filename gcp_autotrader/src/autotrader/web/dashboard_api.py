@@ -328,6 +328,171 @@ def get_scan_latest(
 
 
 # ---------------------------------------------------------------------------
+# Market Brain — Tier-1 (PR-2)
+# ---------------------------------------------------------------------------
+#
+# Three routes feed the dashboard Market-Brain page:
+#   /market-brain/latest   — full Firestore doc (state + context + policy +
+#                            narrative). Fast Firestore read, no BQ.
+#   /market-brain/explain  — composed breakdown (per-component weights and
+#                            contributions + confidence drivers + secondary
+#                            signals + narrative). Pure over the Firestore
+#                            doc, no recomputation.
+#   /market-brain/history  — BQ-backed timeseries of scores for the chart.
+#
+# The Firestore doc is updated by the market-brain background jobs
+# (premarket-precompute, watchlist-refresh, scan-market-5m). These GETs
+# never trigger a recompute.
+
+
+def _sanitize_brain_doc(doc: dict[str, Any]) -> dict[str, Any]:
+    """Convert Firestore timestamps in the brain doc to ISO strings."""
+    if not isinstance(doc, dict):
+        return {}
+    out = dict(doc)
+    for k in ("updated_at", "asof_ts"):
+        v = out.get(k)
+        if v is not None and hasattr(v, "isoformat"):
+            out[k] = v.isoformat()
+    # Sanitize nested timestamps one level deep
+    for section in ("state", "context", "policy", "narrative"):
+        v = out.get(section)
+        if isinstance(v, dict):
+            for k, x in list(v.items()):
+                if hasattr(x, "isoformat"):
+                    v[k] = x.isoformat()
+    return out
+
+
+@router.get("/market-brain/latest")
+def get_market_brain_latest(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Return the latest full market-brain document from Firestore —
+    state + context + policy + narrative. Cheap: no BQ, no recompute.
+    The same doc the real-time Firestore listener sees; this GET exists
+    for SSR/hydration paths and for non-Firebase clients that cannot
+    open a websocket."""
+    c = get_container()
+    try:
+        doc = c.state.get_json("market_brain", "latest")
+        if not doc:
+            return {"state": {}, "context": {}, "policy": {}, "narrative": {}, "empty": True}
+        return _sanitize_brain_doc(doc)
+    except Exception as exc:
+        logger.error("market-brain/latest query failed: %s", exc)
+        return {"state": {}, "context": {}, "policy": {}, "narrative": {}, "error": str(exc)}
+
+
+@router.get("/market-brain/explain")
+def get_market_brain_explain(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Return a structured per-component explanation of the latest state.
+
+    Uses the persisted Firestore doc (no recompute) and composes a
+    transparent breakdown: each score with its weight, contribution,
+    delta from the previous snapshot, qualitative band, and a short
+    rationale. Also returns confidence drivers and secondary signals.
+    Safe even if the narrative was never persisted (will be built on
+    the fly from state + context)."""
+    c = get_container()
+    try:
+        doc = c.state.get_json("market_brain", "latest")
+        if not doc:
+            return {"empty": True}
+        brain = c.market_brain_service()
+        state_dict = doc.get("state") if isinstance(doc.get("state"), dict) else {}
+        context_dict = doc.get("context") if isinstance(doc.get("context"), dict) else {}
+        narrative_dict = doc.get("narrative") if isinstance(doc.get("narrative"), dict) else {}
+        # Rehydrate a MarketBrainState; tolerant of missing fields (default-safe).
+        state = brain._state_from_dict(state_dict)
+        if state is None:
+            return {"empty": True}
+        narrative = narrative_dict or brain.build_narrative(state, context_dict)
+        explain = brain.build_explain_payload(
+            state,
+            context=context_dict,
+            policy=None,  # policy dict already in doc; _state_from_dict doesn't hydrate MarketPolicy
+            narrative=narrative,
+        )
+        # Attach the raw policy dict directly — no need to rehydrate for a read-only view.
+        explain["policy"] = doc.get("policy") if isinstance(doc.get("policy"), dict) else {}
+        return explain
+    except Exception as exc:
+        logger.exception("market-brain/explain failed")
+        return {"empty": True, "error": str(exc)}
+
+
+_HISTORY_SCORE_COLUMNS: tuple[str, ...] = (
+    "asof_ts",
+    "regime",
+    "risk_mode",
+    "participation",
+    "trend_score",
+    "breadth_score",
+    "volatility_stress_score",
+    "data_quality_score",
+    "options_positioning_score",
+    "flow_score",
+    "breadth_roc_score",
+    "market_confidence",
+    "breadth_confidence",
+    "leadership_confidence",
+    "prev_regime",
+    "regime_age_seconds",
+    "regime_transitions_today",
+    "signal_age_penalty",
+)
+
+
+@router.get("/market-brain/history")
+def get_market_brain_history(
+    days: int = Query(default=1, ge=1, le=7),
+    limit: int = Query(default=500, ge=10, le=2000),
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """BQ-backed timeseries of market-brain scores for charting.
+
+    Returns up to `limit` rows from the last `days` calendar days,
+    ordered chronologically so charts render left-to-right. Bounded
+    hard: days∈[1,7], limit∈[10,2000]. The table has one row per
+    persist_market_brain_state call (typically every 60-180s during
+    market hours, plus premarket + EOD snapshots)."""
+    c = get_container()
+    today = now_ist().strftime("%Y-%m-%d")
+    start = (date.fromisoformat(today) - timedelta(days=max(0, int(days) - 1))).isoformat()
+    cols_sql = ", ".join(_HISTORY_SCORE_COLUMNS)
+    q = f"""
+        SELECT {cols_sql}
+        FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.market_brain_history`
+        WHERE run_date BETWEEN '{start}' AND '{today}'
+        ORDER BY asof_ts ASC
+        LIMIT {int(limit)}
+    """
+    try:
+        rows = c.bq.query(q)
+        # Sanitize timestamps
+        for r in rows:
+            for k, v in list(r.items()):
+                if hasattr(v, "isoformat"):
+                    r[k] = v.isoformat()
+        return {
+            "series": rows,
+            "meta": {
+                "days": int(days),
+                "limit": int(limit),
+                "row_count": len(rows),
+                "from_date": start,
+                "to_date": today,
+            },
+        }
+    except Exception as exc:
+        logger.error("market-brain/history query failed: %s", exc)
+        return {"series": [], "meta": {"days": int(days), "limit": int(limit), "row_count": 0, "error": str(exc)}}
+
+
+# ---------------------------------------------------------------------------
 # Universe
 # ---------------------------------------------------------------------------
 
