@@ -4732,28 +4732,51 @@ class UniverseService:
                 + (0.15 * vol_sanity)
             ) * 100.0
 
-            if regime_v2["regimeDaily"] == "TREND":
-                final_score = (0.60 * breakout) + (0.30 * pullback) + (0.10 * mean_rev)
-            elif regime_v2["regimeDaily"] == "RANGE":
-                final_score = (0.40 * mean_rev) + (0.30 * pullback) + (0.30 * breakout)
-            elif regime_v2["regimeDaily"] == "RISK_OFF":
-                # Bear market: mean-reversion dominates. Breakout/pullback scores
-                # are naturally ~0 in bear markets; don't waste weight on them.
-                # Short-side scoring (below) handles the downside opportunity.
-                final_score = (0.65 * mean_rev) + (0.20 * pullback) + (0.15 * breakout)
-            else:
-                final_score = (0.45 * mean_rev) + (0.30 * breakout) + (0.25 * pullback)
+            # MOMENTUM (swing): pure relative-strength leader chasing. Heavier
+            # weight on RS (60-day return) and long-term trend than BREAKOUT,
+            # no tight-base/20-day-high requirement. Fires on ongoing strength.
+            # Only produces a signal for stocks already in a clear uptrend
+            # (price > ema200, ema50 > ema200); in any other structure the
+            # components collapse to ~0 and MOMENTUM can't win the tie-break.
+            momentum_trend = 1.0 if (close > ema200 > 0 and ema50 > ema200) else 0.0
+            # Multi-month persistence: reward stocks whose 5-day return is also
+            # positive (momentum still intact, not a 60-day winner that's now
+            # rolling over).
+            momentum_persistence = self._clip01(ret5_val / 0.03) if ret5_val > 0 else 0.0
+            momentum = self._clip01(
+                (0.50 * rs_component)            # 60-day relative strength dominates
+                + (0.20 * momentum_trend)        # healthy long-term EMA stack
+                + (0.15 * adx_component)         # trending (ADX ≥ 25 scores best)
+                + (0.10 * momentum_persistence)  # still intact on short timeframes
+                + (0.05 * volume_component)      # confirmation via volume
+            ) * 100.0
 
-            setup_scores = {"BREAKOUT": breakout, "PULLBACK": pullback, "MEAN_REVERSION": mean_rev}
+            if regime_v2["regimeDaily"] == "TREND":
+                # TREND: MOMENTUM + BREAKOUT are the money-makers. Split the
+                # bullish weight 30/30 and keep pullback/mean-rev as secondary.
+                final_score = (0.30 * breakout) + (0.30 * momentum) + (0.25 * pullback) + (0.15 * mean_rev)
+            elif regime_v2["regimeDaily"] == "RANGE":
+                # RANGE: mean-reversion dominates, but leader MOMENTUM can still
+                # work for individual stocks outperforming a ranging index.
+                final_score = (0.35 * mean_rev) + (0.25 * pullback) + (0.20 * breakout) + (0.20 * momentum)
+            elif regime_v2["regimeDaily"] == "RISK_OFF":
+                # Bear market: mean-reversion dominates. Breakout/pullback/momentum
+                # scores are naturally ~0 in bear markets; don't waste weight on them.
+                # Short-side scoring (below) handles the downside opportunity.
+                final_score = (0.65 * mean_rev) + (0.20 * pullback) + (0.10 * breakout) + (0.05 * momentum)
+            else:
+                final_score = (0.40 * mean_rev) + (0.25 * breakout) + (0.20 * momentum) + (0.15 * pullback)
+
+            setup_scores = {"BREAKOUT": breakout, "PULLBACK": pullback, "MEAN_REVERSION": mean_rev, "MOMENTUM": momentum}
             # Regime-aware tie-break. When the top two scores are within 10%,
             # prefer the regime-aligned label so the setup actually matches the
             # market posture. Prior behaviour used dict insertion order, which
             # silently biased towards BREAKOUT in RISK_OFF/RANGE.
             _regime_preference = {
-                "TREND": ("BREAKOUT", "PULLBACK"),
-                "RANGE": ("VWAP_TREND", "MEAN_REVERSION", "PULLBACK"),
+                "TREND": ("MOMENTUM", "BREAKOUT", "PULLBACK"),
+                "RANGE": ("VWAP_TREND", "MEAN_REVERSION", "PULLBACK", "MOMENTUM"),
                 "RISK_OFF": ("MEAN_REVERSION", "PULLBACK"),
-            }.get(regime_v2["regimeDaily"], ("MEAN_REVERSION", "BREAKOUT"))
+            }.get(regime_v2["regimeDaily"], ("MEAN_REVERSION", "MOMENTUM", "BREAKOUT"))
             _sorted = sorted(setup_scores.items(), key=lambda kv: kv[1], reverse=True)
             _top_label, _top_score = _sorted[0]
             _second_label, _second_score = _sorted[1]
@@ -4809,6 +4832,7 @@ class UniverseService:
                     "breakout": breakout,
                     "pullback": pullback,
                     "meanRev": mean_rev,
+                    "momentum": momentum,
                     "adx14Score": float(round(adx_component * 100.0, 1)),
                     "recentEventFlag": bool(r.get("recentEventFlag")),
                 }

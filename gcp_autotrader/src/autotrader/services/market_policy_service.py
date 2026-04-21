@@ -142,7 +142,10 @@ class MarketPolicyService:
             if section == "swing":
                 if policy.swing_permission == "DISABLED":
                     continue
-                if policy.swing_permission == "REDUCED" and setup == "BREAKOUT":
+                # REDUCED swing permission: skip momentum-chasing setups (BREAKOUT,
+                # MOMENTUM). Keep pullback/mean-reversion which are lower-risk in
+                # cautious regimes.
+                if policy.swing_permission == "REDUCED" and setup in {"BREAKOUT", "MOMENTUM"}:
                     continue
             if not policy.intraday_phase2_enabled and source == "PHASE2_INPLAY":
                 continue

@@ -281,9 +281,19 @@ class TradingService:
         if wl_filter not in {"intraday", "swing", "all"}:
             wl_filter = "all"
         self.log_sink.action("TradingService", "run_scan_once", "START", "", {"wlFilter": wl_filter})
-        lease = self.state.try_acquire_lock("run_scan_once", ttl_seconds=180)
+        # 2026-04-22 post-mortem: swing scanner at 09:22 kept colliding with the
+        # 09:21 intraday scanner (3-min cron). Both held lock "run_scan_once" and
+        # swing always lost the race → lock_busy → skipped for weeks (04-17, 04-20,
+        # 04-21 all had zero swing scan rows in BQ). Split the lock by wl_filter so
+        # intraday and swing runs don't block each other. They read different
+        # watchlist rows and manage separate position quotas (swing_max_positions
+        # vs max_signals_allowed), so concurrent execution is safe. Keep a single
+        # "run_scan_once" key for wl_filter="all" to preserve legacy manual
+        # invocations' behaviour.
+        _lock_key = "run_scan_once" if wl_filter == "all" else f"run_scan_once_{wl_filter}"
+        lease = self.state.try_acquire_lock(_lock_key, ttl_seconds=180)
         if lease is None:
-            self.log_sink.action("TradingService", "run_scan_once", "SKIP", "lock busy")
+            self.log_sink.action("TradingService", "run_scan_once", "SKIP", "lock busy", {"lockKey": _lock_key})
             self.log_sink.flush_all()
             return {"skipped": "lock_busy"}
         try:
@@ -724,6 +734,17 @@ class TradingService:
                 if _is_swing:
                     # Swing: higher bar, not risk-mode-adjusted (swing should only fire on strong signals)
                     dynamic_min_score = self.settings.strategy.swing_min_signal_score
+                    # 2026-04-22 post-mortem: swing had 0 trades in 10 days because
+                    # `adjusted_score` is haircut by risk_mode (×0.60–1.08) and
+                    # chop/panic regime (×0.88) BEFORE being compared to the fixed
+                    # 75 swing threshold. In DEFENSIVE+CHOP (common in April) a
+                    # raw-80 signal becomes adjusted-57 → blocked. The Market Brain
+                    # multiplier is designed to dampen intraday size/frequency, not
+                    # to double-penalise swing (which already has a hard 75 bar and
+                    # its own daily-timeframe gates). For swing we compare the
+                    # *affinity-adjusted* score (regime-strategy fit, e.g. BREAKOUT
+                    # in RANGE gets 0.6×) — same regime awareness, no risk_mode
+                    # haircut. Intraday still uses `adjusted_score`.
                 else:
                     dynamic_min_score = _SCORE_THRESHOLDS.get(
                         brain_state.risk_mode if brain_state else "NORMAL",
@@ -799,6 +820,10 @@ class TradingService:
                     "minScore": int(dynamic_min_score),
                     "atrMult": round(_atr_mult, 3),
                     "affinityMult": round(_affinity_mult, 2),
+                    # Swing compares affinity_score (pre-brain-haircut) to minScore;
+                    # intraday compares adjusted_score. Exposing both lets the
+                    # dashboard/analytics show which value the gate actually used.
+                    "affinityScore": int(_affinity_score),
                     # Dashboard reads these as snake_case (daily_trend, daily_strength).
                     # Keep both keys so older dashboard builds still see something.
                     "dailyTrend": _daily_bias.trend if _daily_bias else "",
@@ -890,7 +915,9 @@ class TradingService:
                             pass  # malformed date — don't block
 
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
-                if direction != "HOLD" and adjusted_score >= dynamic_min_score and is_entry_window_open_ist() and not policy_block_reason:
+                # Swing uses _affinity_score (pre-brain-haircut); intraday uses adjusted_score. See note above.
+                _score_for_threshold = _affinity_score if _is_swing else adjusted_score
+                if direction != "HOLD" and _score_for_threshold >= dynamic_min_score and is_entry_window_open_ist() and not policy_block_reason:
                     qualified += 1
                     reason = (
                         f"Score={adjusted_score} RSI={ind.rsi.curr:.1f} VolR={ind.volume.ratio:.2f} "

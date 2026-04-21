@@ -257,7 +257,7 @@ def score_signal(
     # (individual stocks trend even when the index ranges). PULLBACK also works
     # when a stock pulls back to EMA support within its own mini-trend.
     _setup_upper = str(setup or "").strip().upper()
-    _range_ok = {"MEAN_REVERSION", "VWAP_REVERSAL", "VWAP_TREND", "PULLBACK", "SHORT_PULLBACK"}
+    _range_ok = {"MEAN_REVERSION", "VWAP_REVERSAL", "VWAP_TREND", "PULLBACK", "SHORT_PULLBACK", "MOMENTUM"}
     if regime.regime == "RANGE" and _setup_upper not in _range_ok:
         bd.penalty -= 8
     if ind.adx > 0 and ind.adx < 15 and regime.regime != "RANGE":
@@ -471,6 +471,29 @@ def check_swing_entry(
         # SHORT_PULLBACK RSI: 38–62 (was 45–60, blocking best early-downtrend entries)
         if not is_buy and not (38 <= daily_bias.rsi_daily <= 62):
             return False, "swing_pullback_daily_rsi_outside_zone"
+        return True, ""
+
+    if s == "MOMENTUM":
+        # Swing relative-strength momentum: buy the strongest stocks in a
+        # healthy uptrend and ride them for days/weeks. Distinct from BREAKOUT
+        # which requires a tight consolidation + 20-day-high breakout event —
+        # MOMENTUM fires on ongoing strength with no base requirement.
+        # Only long-side (SELL would be shorting strength = structurally wrong).
+        if not is_buy:
+            return False, "swing_momentum_sell_not_supported"
+        if daily_bias.trend != "UP":
+            return False, "swing_momentum_daily_trend_not_up"
+        if not daily_bias.ema_stack:
+            return False, "swing_momentum_daily_ema_not_stacked"
+        if daily_bias.adx_daily < 20:
+            return False, "swing_momentum_daily_adx_too_low"
+        # RSI 50–75 = momentum zone. <50 means the stock has cooled off (PULLBACK
+        # setup, not MOMENTUM). >75 is overbought → poor risk/reward for new entries.
+        if not (50 <= daily_bias.rsi_daily <= 75):
+            return False, "swing_momentum_daily_rsi_outside_zone"
+        # Require at least modest relative-strength confirmation via intraday volume
+        if ind.volume.ratio < 1.0:
+            return False, "swing_momentum_volume_insufficient"
         return True, ""
 
     if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):

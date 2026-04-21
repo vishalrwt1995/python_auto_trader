@@ -24,6 +24,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "OPEN_DRIVE": 1.0,
         "PHASE1_MOMENTUM": 1.2,
         "PHASE1_REVERSAL": 0.6,   # oversold-bounce picks are wrong in a bull market
+        "MOMENTUM": 1.4,          # swing relative-strength leaders — ideal setup for trending markets
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -38,6 +39,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "OPEN_DRIVE": 0.8,
         "PHASE1_MOMENTUM": 0.8,
         "PHASE1_REVERSAL": 1.2,   # oversold bounces are the primary edge in a downtrend
+        "MOMENTUM": 0.3,          # buying strength in a downtrend almost always fails
         "AUTO": 0.9,
         "DEFAULT": 0.9,
     },
@@ -52,6 +54,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "OPEN_DRIVE": 0.8,
         "PHASE1_MOMENTUM": 0.7,
         "PHASE1_REVERSAL": 1.0,   # decent — individual oversold stocks can bounce in a range
+        "MOMENTUM": 1.1,          # leaders can outperform even in a ranging index
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -66,6 +69,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "OPEN_DRIVE": 0.5,
         "PHASE1_MOMENTUM": 0.4,
         "PHASE1_REVERSAL": 0.9,   # choppy index can still produce oversold individual-stock bounces
+        "MOMENTUM": 0.4,          # momentum persistence breaks down in chop
         "AUTO": 0.7,
         "DEFAULT": 0.7,
     },
@@ -80,6 +84,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "OPEN_DRIVE": 0.3,
         "PHASE1_MOMENTUM": 0.3,
         "PHASE1_REVERSAL": 0.9,   # capitulation + oversold = strong reversal candidate
+        "MOMENTUM": 0.2,          # strongest stocks fall hardest in panics
         "AUTO": 0.5,
         "DEFAULT": 0.5,
     },
@@ -94,6 +99,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "OPEN_DRIVE": 1.2,
         "PHASE1_MOMENTUM": 1.1,
         "PHASE1_REVERSAL": 1.1,   # recovery is the ideal environment for oversold-stock bounces
+        "MOMENTUM": 1.3,          # early-recovery leaders tend to extend
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -160,6 +166,7 @@ _HARD_BLOCKS: dict[str, set[str]] = {
     "CHOP": {
         "BREAKOUT", "SHORT_BREAKDOWN", "PULLBACK", "SHORT_PULLBACK",
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
+        "MOMENTUM",    # relative-strength leaders fail when index whipsaws
     },
     # RANGE: block pure-breakout strategies (fakeouts common) and OPEN_DRIVE
     # (needs gap/momentum at open). Allow VWAP_TREND — individual stocks trend
@@ -174,6 +181,7 @@ _HARD_BLOCKS: dict[str, set[str]] = {
     "PANIC": {
         "BREAKOUT", "PULLBACK",
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
+        "MOMENTUM",    # chasing strength into a panic = catching a knife
     },
 }
 

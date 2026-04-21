@@ -1186,20 +1186,22 @@ class MarketBrainService:
             "VWAP_TREND",
             "VWAP_REVERSAL",
             "OPEN_DRIVE",
+            "MOMENTUM",          # swing relative-strength leader chasing
         ]
         if regime in {"CHOP", "PANIC"}:
             # Remove momentum-chasing strategies; keep reversal/mean-reversion.
             # PULLBACK stays: short-side pullbacks are valid in bear markets.
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE"}]
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM"}]
         if regime in {"TREND_DOWN"}:
-            # Down-trend: remove BREAKOUT (upside breakouts fail), keep PULLBACK
+            # Down-trend: remove BREAKOUT (upside breakouts fail) and MOMENTUM
+            # (buying leaders into a downtrend = catching a knife). Keep PULLBACK
             # (short pullbacks are scored in setup scoring), keep VWAP strategies.
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE"}]
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM"}]
         if regime == "PANIC":
             # PANIC: minimal strategies, but VWAP_REVERSAL is the best edge.
             # Keep PULLBACK for short-pullback setups. Add VWAP_TREND only if
             # data quality is sufficient (quality gate checked elsewhere).
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE"}]
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM"}]
         if not allowed_strategies:
             allowed_strategies = ["MEAN_REVERSION", "VWAP_REVERSAL"]
 
