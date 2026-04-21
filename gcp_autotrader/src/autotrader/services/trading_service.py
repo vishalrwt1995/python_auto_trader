@@ -700,11 +700,18 @@ class TradingService:
                 # gets filtered in PANIC (90 × 0.72 = 64.8 < 72).  We lower the
                 # threshold proportionally so the *top decile* of raw signals
                 # can still qualify regardless of regime.
+                # 2026-04-21 post-mortem: DEFENSIVE raised 58 → 65.
+                # 58 was math-justified (raw 72 × 0.82 × 0.88 ≈ 52) but the
+                # practical effect was "enter MORE trades when brain is nervous" —
+                # the opposite of defensive. 04-21's first 3 losing trades fired at
+                # adjusted scores 61/59/59. Raising floor to 65 drops these without
+                # losing the raw top-decile that the risk-mode penalty was designed
+                # to preserve (raw ≥ 90 still clears 65 after ×0.82×0.88 = 65.0).
                 _SCORE_THRESHOLDS = {
                     "AGGRESSIVE": 75,   # bar raised: only the best in bull runs
                     "NORMAL":     72,   # unchanged
-                    "DEFENSIVE":  58,   # ≈ raw 72 after ×0.82×0.88 adjustment
-                    "LOCKDOWN":   52,   # ≈ raw 98 after ×0.60×0.88 adjustment — only the very best survive
+                    "DEFENSIVE":  65,   # raised from 58 — fewer marginal entries
+                    "LOCKDOWN":   58,   # raised from 52 — lockdown = very defensive
                 }
                 # RANGE regime: do NOT lower the bar.
                 # Previously we dropped min score to 65 for RANGE to allow MEAN_REVERSION

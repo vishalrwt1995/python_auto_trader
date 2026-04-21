@@ -372,6 +372,63 @@ class OrderService:
             logger.error("place_entry_order blocked: qty=%d symbol=%s — refusing to place zero-qty order", qty, symbol)
             return {"error": "qty_zero_or_negative", "symbol": symbol, "qty": qty}
 
+        # 2026-04-21 post-mortem: SL/target side validation.
+        # Bug from 04-20/04-21: 6 BUY trades had SL placed ABOVE entry (e.g.,
+        # FINCABLES entry 940.4 SL 941.18; MAHABANK entry 79.6 SL 79.7). The
+        # order_service.place_bracket_order downstream uses abs() on SL/target
+        # distances, silently masking this bug — the broker then snapped the
+        # bracket to the other side at the wrong magnitude. Fail loud here so
+        # the sign error surfaces in audit logs instead of as a mystery loss.
+        _side_u = side.upper()
+        if _side_u == "BUY":
+            if sl_price >= entry_price:
+                logger.error(
+                    "place_entry_order blocked: BUY with SL >= entry (%.4f >= %.4f) symbol=%s — inverted stop",
+                    sl_price, entry_price, symbol,
+                )
+                return {"error": "sl_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "sl": sl_price}
+            if target <= entry_price:
+                logger.error(
+                    "place_entry_order blocked: BUY with target <= entry (%.4f <= %.4f) symbol=%s — inverted target",
+                    target, entry_price, symbol,
+                )
+                return {"error": "target_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "target": target}
+        elif _side_u == "SELL":
+            if sl_price <= entry_price:
+                logger.error(
+                    "place_entry_order blocked: SELL with SL <= entry (%.4f <= %.4f) symbol=%s — inverted stop",
+                    sl_price, entry_price, symbol,
+                )
+                return {"error": "sl_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "sl": sl_price}
+            if target >= entry_price:
+                logger.error(
+                    "place_entry_order blocked: SELL with target >= entry (%.4f >= %.4f) symbol=%s — inverted target",
+                    target, entry_price, symbol,
+                )
+                return {"error": "target_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "target": target}
+
+        # Minimum SL distance floor: 0.8% of entry. Stops tighter than this on
+        # Indian mid/small-caps sit inside single-candle noise. 04-16 had 11/15
+        # SELL trades with sub-1% SLs — all lost. 0.8% is a soft floor; if ATR
+        # math produces tighter, widen to the floor and continue (don't block).
+        _min_sl_dist_pct = 0.008
+        _sl_dist_pct = abs(entry_price - sl_price) / entry_price if entry_price > 0 else 0.0
+        if _sl_dist_pct < _min_sl_dist_pct and entry_price > 0:
+            _old_sl = sl_price
+            _buffer = entry_price * _min_sl_dist_pct
+            sl_price = round(entry_price - _buffer, 2) if _side_u == "BUY" else round(entry_price + _buffer, 2)
+            # Proportionally widen target to preserve planned R:R
+            _old_tgt_dist = abs(target - entry_price)
+            _old_sl_dist = abs(entry_price - _old_sl)
+            if _old_sl_dist > 0:
+                _rr = _old_tgt_dist / _old_sl_dist
+                _new_tgt_dist = _buffer * _rr
+                target = round(entry_price + _new_tgt_dist, 2) if _side_u == "BUY" else round(entry_price - _new_tgt_dist, 2)
+            logger.warning(
+                "place_entry_order sl_floor_applied symbol=%s side=%s entry=%.4f old_sl=%.4f new_sl=%.4f new_target=%.4f dist_pct=%.4f",
+                symbol, side, entry_price, _old_sl, sl_price, target, _sl_dist_pct,
+            )
+
         if not instrument_key:
             # Log prominently — ws-monitor needs a valid Upstox instrument_key
             # to subscribe on WebSocket; without it no intraday SL/target exits fire.

@@ -43,10 +43,14 @@ def is_market_open_ist() -> bool:
 
 
 def is_entry_window_open_ist() -> bool:
-    # Cut-off at 15:00 (900 min): new positions need at least 25 min to reach
-    # 2:1 R:R target before the EOD force-close at 15:25. Entries at 15:19
-    # gave only 6 minutes — almost always closed at EOD for a net loss.
-    return is_market_open_ist() and ist_minutes() <= 900
+    # 2026-04-21 post-mortem: Cut-off tightened from 15:00 → 14:00 (840 min).
+    # With FLAT_TIMEOUT reverted to 120 min, entries after 13:25 cannot complete
+    # their timeout before EOD force-close at 15:25, guaranteeing a premature
+    # exit. 04-16 had multiple entries at 14:29 IST; 04-20 had 4 entries at
+    # ~14:30 — all exited FLAT_TIMEOUT or EOD_CLOSE with poor PnL.
+    # A 14:00 cutoff gives every new position a full 85 min of market time
+    # plus 40 min post-close to develop into SL/target/timeout cleanly.
+    return is_market_open_ist() and ist_minutes() <= 840
 
 
 def parse_any_ts(value: str | int | float | None) -> datetime | None:

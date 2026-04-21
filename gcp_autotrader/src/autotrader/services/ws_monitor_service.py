@@ -232,9 +232,12 @@ class WsMonitorService:
 
     # Time-based exit: close position if it hasn't moved meaningfully after N minutes.
     # "Meaningful" = gained at least 0.3× ATR from entry.  Prevents dead capital.
-    # Reduced from 120 min → 45 min: stale positions often end up as small losers
-    # at EOD; freeing the slot earlier lets a better setup take over.
-    _FLAT_TIMEOUT_SEC = 45 * 60  # 45 minutes
+    # 2026-04-21 post-mortem: Reverted 45 min → 120 min. The 45-min cap was killing
+    # VWAP_TREND BUYs in TREND_UP regime before the thesis had time to play out
+    # (10/14 trades on 04-21 exited FLAT_TIMEOUT, 0 TARGET_HIT). Indian intraday
+    # trend legs typically need 60–120 min to develop; 45 min timeout was
+    # systematically exiting at breakeven right before continuation.
+    _FLAT_TIMEOUT_SEC = 120 * 60  # 120 minutes
 
     async def _on_quote(self, instrument_key: str, ltp: float, ts: float) -> None:
         pos = self._positions.get(instrument_key)
