@@ -51,7 +51,20 @@ class StrategySettings:
     rsi_sell_max: float = 55.0
     vol_mult: float = 1.5
     atr_sl_mult: float = 1.5
-    rr_intraday: float = 2.0   # raised from 1.5 → 2.0: mean-reversion hit rate ~35%; need 2:1 R:R to be profitable
+    # Batch 4.1 (2026-04-22): dropped 2.0 → 1.25. Post-mortem review of recent
+    # trades showed winners routinely peaked at 1.2-1.5R MFE then faded; the
+    # 2R target meant those winners tripped the trailing-stop post-target
+    # logic instead of booking a clean TARGET_HIT, realizing less than the
+    # plan. At 35% hit rate × 1.3R actual capture vs 65% × 1R loss, 2R was
+    # NEGATIVE expectancy despite the headline R:R. 1.25R target should hit
+    # more often (more trades resolve cleanly) and realized R closer to plan.
+    # MEAN_REVERSION keeps a higher target (see rr_intraday_reversion) — fade
+    # setups need meaningful excursion to be worth the counter-trend risk.
+    rr_intraday: float = 1.25
+    # Per-strategy R:R override: MEAN_REVERSION / VWAP_REVERSAL fades need
+    # wider targets because the "snap back" on oversold names routinely does
+    # 2-3R; a 1.25R target cuts them off right where the move is accelerating.
+    rr_intraday_reversion: float = 2.0
     vix_safe_max: float = 20.0
     vix_trend_max: float = 15.0
     pcr_bull_min: float = 0.8
@@ -230,7 +243,9 @@ class AppSettings:
             rsi_sell_max=_env_float("RSI_SELL_MAX", 55),
             vol_mult=_env_float("VOL_MULT", 1.5),
             atr_sl_mult=_env_float("ATR_SL_MULT", 1.5),
-            rr_intraday=_env_float("RR_INTRADAY", 2.0),
+            # Batch 4.1 (2026-04-22): default aligned to dataclass (1.25)
+            rr_intraday=_env_float("RR_INTRADAY", 1.25),
+            rr_intraday_reversion=_env_float("RR_INTRADAY_REVERSION", 2.0),
             vix_safe_max=_env_float("VIX_SAFE_MAX", 20),
             vix_trend_max=_env_float("VIX_TREND_MAX", 15),
             pcr_bull_min=_env_float("PCR_BULL_MIN", 0.8),

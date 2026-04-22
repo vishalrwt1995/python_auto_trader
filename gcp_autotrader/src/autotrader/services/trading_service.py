@@ -741,22 +741,40 @@ class TradingService:
 
                 # Per-stock ATR-% adaptive tier: different stocks have fundamentally
                 # different volatility profiles (HDFC moves 0.5% daily; TATASTEEL 2.5%).
-                # Apply a final multiplier so low-vol stocks get tighter SLs (less room
-                # wasted) and high-vol stocks get wider SLs (prevent noise-stops).
+                #
+                # Batch 4.2 (2026-04-22): re-tiered so the BROAD MIDDLE gets the
+                # widest SL, not the extremes. Prior tiers escalated with vol —
+                # high-vol metals got 1.25× on top of base 1.5, but their actual
+                # intraday range is wider still so they were stopped anyway,
+                # just with more loss per stop. Meanwhile mid-vol stocks (1.5-3%
+                # ATR) were sitting right inside normal candle noise at base
+                # 1.5× and getting noise-stopped. New tiers:
+                #   <1.5% ATR → 0.87× (tighter, less wasted room)
+                #   1.5-3.0% → 1.20× (the widener — reduces noise-stops on the
+                #                     band of stocks where 1.5× ATR was tight)
+                #   >3.0%    → 1.00× (don't give back more on already-spiky names)
                 if ltp > 0 and ind.atr > 0:
                     _atr_pct = ind.atr / ltp   # ATR as % of price
-                    if _atr_pct < 0.008:        # Very low vol (HDFC, ITC type)
-                        _atr_mult = round(_atr_mult * 0.85, 3)
-                    elif _atr_pct > 0.025:      # Very high vol (metals, PSU micro)
-                        _atr_mult = round(_atr_mult * 1.25, 3)
-                    elif _atr_pct > 0.018:      # Above-average vol
-                        _atr_mult = round(_atr_mult * 1.10, 3)
+                    if _atr_pct < 0.015:
+                        _atr_mult = round(_atr_mult * 0.87, 3)
+                    elif _atr_pct <= 0.030:
+                        _atr_mult = round(_atr_mult * 1.20, 3)
+                    # else (>3%): base multiplier unchanged
                     _atr_mult = max(0.8, min(3.0, _atr_mult))   # sensible floor/ceiling
+
+                # Batch 4.1 (2026-04-22): MEAN_REVERSION / VWAP_REVERSAL need a
+                # wider R:R — fades snap back 2-3R and 1.25R cuts them short.
+                _strategy_upper = str(w.strategy or "").strip().upper()
+                _rr_override = (
+                    self.settings.strategy.rr_intraday_reversion
+                    if _strategy_upper in ("MEAN_REVERSION", "VWAP_REVERSAL")
+                    else None
+                )
 
                 if _is_swing:
                     pos = calc_swing_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult if _atr_mult != self.settings.strategy.atr_sl_mult else None)
                 else:
-                    pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult)
+                    pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult, rr_override=_rr_override)
 
                 # ── Dynamic min_signal_score (Item 3) ────────────────────────
                 # adjust_signal() already penalises adjusted_score by 0.60–0.82×

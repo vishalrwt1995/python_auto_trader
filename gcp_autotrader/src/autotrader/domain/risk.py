@@ -86,6 +86,7 @@ def calc_position_size(
     cfg: StrategySettings,
     *,
     atr_mult_override: float | None = None,
+    rr_override: float | None = None,
 ) -> PositionSizing:
     """Calculate position sizing with optional regime-aware ATR multiplier.
 
@@ -94,11 +95,16 @@ def calc_position_size(
             trading_service to scale SL width by regime — tighter in PANIC/
             LOCKDOWN (ATR already inflated 3-4x), wider in AGGRESSIVE TREND_UP
             (give momentum trades room to breathe).
+        rr_override: When provided, replaces cfg.rr_intraday. Batch 4.1
+            (2026-04-22): MEAN_REVERSION / VWAP_REVERSAL pass the wider
+            cfg.rr_intraday_reversion (2.0) because fade setups need
+            meaningful excursion. Trend setups use the default 1.25R.
     """
     sl_mult = atr_mult_override if atr_mult_override is not None else cfg.atr_sl_mult
     sl_dist = max(atr * sl_mult, entry_price * 0.005)
     sl_price = entry_price - sl_dist if direction == "BUY" else entry_price + sl_dist
-    target = entry_price + sl_dist * cfg.rr_intraday if direction == "BUY" else entry_price - sl_dist * cfg.rr_intraday
+    rr = rr_override if rr_override is not None else cfg.rr_intraday
+    target = entry_price + sl_dist * rr if direction == "BUY" else entry_price - sl_dist * rr
 
     raw_qty = int(cfg.risk_per_trade // sl_dist) if sl_dist > 0 else 0
     qty = min(raw_qty, int((cfg.capital * 0.15) // max(entry_price, 1)))
@@ -111,7 +117,7 @@ def calc_position_size(
         qty = max(1, qty)
     brokerage = calc_brokerage(qty, entry_price)
     max_loss = round(qty * sl_dist + brokerage, 2)
-    max_gain = round(qty * sl_dist * cfg.rr_intraday - brokerage, 2)
+    max_gain = round(qty * sl_dist * rr - brokerage, 2)
     return PositionSizing(
         qty=qty,
         sl_price=sl_price,
