@@ -182,12 +182,19 @@ class MarketPolicyService:
         data_quality_multiplier: float = 1.0,
     ) -> PositionSizing:
         del cfg
-        risk_mult = (
-            max(0.10, float(state.size_multiplier))
-            * max(0.40, min(1.40, float(setup_confidence_multiplier)))
-            * max(0.40, min(1.25, float(liquidity_multiplier)))
-            * max(0.40, min(1.20, float(data_quality_multiplier)))
-        )
+        # P0-3 (2026-04-22): use min() of quality factors instead of product().
+        # Prior multiplicative formula (size × setup_conf × liquidity × data_quality)
+        # collapsed typical positions by 40–60%, e.g. 0.9 × 0.8 × 0.85 × 0.8 = 0.49.
+        # At that size, ₹20 brokerage/order became ~33% of the risk budget and the
+        # edge couldn't cover costs. Taking min() lets the *worst* factor cap
+        # size while non-degraded factors don't pile on additional haircuts.
+        # Risk-mode's size_multiplier still applies globally (AGGRESSIVE/DEFENSIVE
+        # scale the whole book); per-trade quality signals use min(), not product.
+        _size_mult = max(0.10, float(state.size_multiplier))
+        _setup_mult = max(0.40, min(1.40, float(setup_confidence_multiplier)))
+        _liq_mult = max(0.40, min(1.25, float(liquidity_multiplier)))
+        _dq_mult = max(0.40, min(1.20, float(data_quality_multiplier)))
+        risk_mult = _size_mult * min(_setup_mult, _liq_mult, _dq_mult)
         if position_sizing.qty == 0:
             qty = 0  # Preserve skip-flag from risk.py (SL too wide for risk budget)
         else:

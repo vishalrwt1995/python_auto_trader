@@ -64,6 +64,14 @@ class StrategySettings:
     swing_max_positions: int = 5
     swing_max_hold_days: int = 10
     swing_min_signal_score: int = 75
+    # P0-2 (2026-04-22): strategy kill-switch. Strategies listed here are
+    # stripped from `allowed_strategies` regardless of regime. Used to disable
+    # known-bad strategies surfaced by live P&L analysis.
+    # Current blocklist:
+    #   VWAP_REVERSAL — 13 trades over 30d, 23% win-rate, -0.61% avg P&L,
+    #     12/13 closed at EOD never reaching target or SL. Negative expectancy.
+    # Re-enable only after backtest or replay proves the strategy has edge.
+    disabled_strategies: tuple[str, ...] = ("VWAP_REVERSAL",)
 
 
 @dataclass(frozen=True)

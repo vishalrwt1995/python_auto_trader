@@ -12,6 +12,7 @@ from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
+from autotrader.domain.risk import calc_round_trip_brokerage
 from autotrader.settings import AppSettings
 from autotrader.time_utils import now_ist_str, now_utc_iso, parse_any_ts, today_ist
 
@@ -199,6 +200,17 @@ class OrderService:
         side = str(pos.get("side") or "BUY").upper()
         multiplier = 1 if side == "BUY" else -1
         pnl = round((exit_price - entry_price) * qty * multiplier, 2)
+        # P0-1 (2026-04-22): subtract real brokerage + taxes to report NET P&L.
+        # Prior behavior wrote gross pnl to BQ, masking ~0.10–0.20% cost drag
+        # per trade. That cost eats the edge on small positions — trades must
+        # clear brokerage + STT + GST + exchange before they're profitable.
+        brokerage = calc_round_trip_brokerage(qty, entry_price, exit_price) if qty > 0 else 0.0
+        # Add per-leg partial-exit brokerage if any partials happened.
+        partial_brk = float(pos.get("partial_brokerage", 0.0) or 0.0)
+        brokerage = round(brokerage + partial_brk, 2)
+        partial_pnl = float(pos.get("partial_pnl", 0.0) or 0.0)
+        gross_pnl = round(pnl + partial_pnl, 2)
+        net_pnl = round(gross_pnl - brokerage, 2)
         exit_ts = now_ist_str()
         # Compute real hold duration from entry_ts → exit_ts (both IST strings).
         entry_ts_str = str(pos.get("entry_ts") or "")
@@ -217,7 +229,9 @@ class OrderService:
                 "exit_price": round(exit_price, 2),
                 "exit_reason": exit_reason,
                 "exit_ts": exit_ts,
-                "pnl": pnl,
+                "pnl": gross_pnl,
+                "brokerage": brokerage,
+                "net_pnl": net_pnl,
                 "hold_minutes": hold_minutes,
             },
         )
@@ -225,7 +239,10 @@ class OrderService:
         if self.pubsub:
             closed_doc = {**(self.state.get_position(position_tag) or {}), "exit_price": round(exit_price, 2), "exit_reason": exit_reason}
             self.pubsub.publish_position_closed(closed_doc)
-        # Write completed trade to BigQuery — retry up to 3 times to reduce data gaps
+        # Write completed trade to BigQuery — retry up to 3 times to reduce data gaps.
+        # `pnl` kept for backward compatibility with existing dashboards/queries; it
+        # now equals gross P&L including partial exits. Use `net_pnl` for the real
+        # post-cost number going forward.
         trade_row = {
             "trade_date": today_ist(),
             "position_tag": position_tag,
@@ -236,8 +253,11 @@ class OrderService:
             "exit_price": round(exit_price, 2),
             "sl_price": float(pos.get("sl_price") or 0),
             "target": float(pos.get("target") or 0),
-            "pnl": pnl,
-            "pnl_pct": round(pnl / (entry_price * qty) * 100, 4) if entry_price and qty else 0.0,
+            "pnl": gross_pnl,
+            "brokerage": brokerage,
+            "net_pnl": net_pnl,
+            "pnl_pct": round(gross_pnl / (entry_price * qty) * 100, 4) if entry_price and qty else 0.0,
+            "net_pnl_pct": round(net_pnl / (entry_price * qty) * 100, 4) if entry_price and qty else 0.0,
             "exit_reason": exit_reason,
             "strategy": str(pos.get("strategy") or ""),
             "entry_ts": str(pos.get("entry_ts") or ""),
@@ -752,15 +772,20 @@ class OrderService:
             multiplier = 1 if side == "BUY" else -1
             partial_pnl = round((exit_price - entry_price) * exit_qty * multiplier, 2)
             new_partial_pnl = round(float(pos.get("partial_pnl", 0)) + partial_pnl, 2)
+            # Track partial-exit brokerage so final close can include it in net_pnl.
+            # Each partial exit has its own entry+exit legs at the partial qty.
+            partial_brk = calc_round_trip_brokerage(exit_qty, entry_price, exit_price)
+            new_partial_brk = round(float(pos.get("partial_brokerage", 0)) + partial_brk, 2)
             self.state.update_position(position_tag, {
                 "qty": remaining_qty,
                 "partial_pnl": new_partial_pnl,
+                "partial_brokerage": new_partial_brk,
                 f"{exit_reason.lower()}_exit_price": round(exit_price, 2),
                 f"{exit_reason.lower()}_exit_qty": exit_qty,
             })
             logger.info(
-                "paper_partial_exit tag=%s reason=%s exit_qty=%d remaining=%d price=%.2f pnl=%.2f",
-                position_tag, exit_reason, exit_qty, remaining_qty, exit_price, partial_pnl,
+                "paper_partial_exit tag=%s reason=%s exit_qty=%d remaining=%d price=%.2f pnl=%.2f brk=%.2f",
+                position_tag, exit_reason, exit_qty, remaining_qty, exit_price, partial_pnl, partial_brk,
             )
             return {
                 "paper": True, "partial": True,
@@ -802,15 +827,18 @@ class OrderService:
         multiplier = 1 if side == "BUY" else -1
         partial_pnl = round((fill_price - entry_price) * exit_qty * multiplier, 2)
         new_partial_pnl = round(float(pos.get("partial_pnl", 0)) + partial_pnl, 2)
+        partial_brk = calc_round_trip_brokerage(exit_qty, entry_price, fill_price)
+        new_partial_brk = round(float(pos.get("partial_brokerage", 0)) + partial_brk, 2)
         self.state.update_position(position_tag, {
             "qty": remaining_qty,
             "partial_pnl": new_partial_pnl,
+            "partial_brokerage": new_partial_brk,
             f"{exit_reason.lower()}_exit_price": round(fill_price, 2),
             f"{exit_reason.lower()}_exit_qty": exit_qty,
         })
         logger.info(
-            "live_partial_exit tag=%s reason=%s exit_qty=%d remaining=%d fill=%.2f pnl=%.2f",
-            position_tag, exit_reason, exit_qty, remaining_qty, fill_price, partial_pnl,
+            "live_partial_exit tag=%s reason=%s exit_qty=%d remaining=%d fill=%.2f pnl=%.2f brk=%.2f",
+            position_tag, exit_reason, exit_qty, remaining_qty, fill_price, partial_pnl, partial_brk,
         )
         return {
             "order_id": order_id, "partial": True,

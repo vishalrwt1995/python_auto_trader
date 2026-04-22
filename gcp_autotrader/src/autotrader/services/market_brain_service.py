@@ -16,7 +16,7 @@ from autotrader.services.market_breadth_service import MarketBreadthService
 from autotrader.services.market_leadership_service import MarketLeadershipService
 from autotrader.services.market_policy_service import MarketPolicyService
 from autotrader.services.regime_service import MarketRegimeService
-from autotrader.settings import RegimeThresholds
+from autotrader.settings import RegimeThresholds, StrategySettings
 from autotrader.time_utils import IST, now_ist, parse_any_ts
 
 logger = logging.getLogger(__name__)
@@ -1204,6 +1204,17 @@ class MarketBrainService:
             allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM"}]
         if not allowed_strategies:
             allowed_strategies = ["MEAN_REVERSION", "VWAP_REVERSAL"]
+        # P0-2 (2026-04-22): apply the disabled_strategies blocklist AFTER regime
+        # logic. This is the strategy kill-switch — strategies with proven
+        # negative expectancy (see StrategySettings.disabled_strategies) are
+        # removed regardless of regime. If the blocklist would empty the list,
+        # fall back to MEAN_REVERSION so scans still produce some signal.
+        _disabled = {str(s).upper() for s in (StrategySettings().disabled_strategies or ())}
+        if _disabled:
+            _kept = [s for s in allowed_strategies if s.upper() not in _disabled]
+            if not _kept:
+                _kept = ["MEAN_REVERSION"]
+            allowed_strategies = _kept
 
         no_lookahead_valid = self._validate_phase_no_lookahead(state=MarketBrainState(asof_ts=asof_i.isoformat(), phase=phase), context={"regimeContext": regime_ctx})
         confidence_family = self._confidence_family(
