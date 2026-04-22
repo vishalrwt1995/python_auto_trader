@@ -5040,15 +5040,68 @@ class UniverseService:
                 if phase2_final_block:
                     # Final-block phase2 is allowed but requires stricter completed-bar confidence.
                     phase2_score = float(phase2_score * 0.92)
-                # VWAP position is the primary label determinant — a stock above VWAP
-                # needs a trend entry (VWAP_TREND), not a reversal (which requires
-                # price BELOW VWAP to fire). On choppy days the score comparison alone
-                # was assigning VWAP_REVERSAL to above-VWAP stocks, then blocking them
-                # all at check_strategy_entry. Use scores as tiebreaker only when the
-                # stock is on the reversal side (below VWAP).
-                if close_now > vwap_now:
+                # Batch 5 (2026-04-22) — capability expansion: diversify Phase 2
+                # labels beyond VWAP_TREND / VWAP_REVERSAL. Previously only those
+                # two were emitted here, and one (VWAP_REVERSAL) was usually in
+                # the disabled_strategies kill-switch — so Phase 2 effectively
+                # produced exactly one setup type. That's a single bet, not a
+                # scanner. We now route to OPEN_DRIVE / BREAKOUT / PULLBACK /
+                # MEAN_REVERSION when the intraday microstructure matches, with
+                # the old VWAP_TREND / VWAP_REVERSAL as the catch-all fallback.
+                #
+                # Priority order reflects edge quality: OPEN_DRIVE and BREAKOUT
+                # have the cleanest signal (a breakout with volume is
+                # mechanically definable), PULLBACK needs a healthy uptrend
+                # structure, MEAN_REVERSION only fires in CHOPPY regime with
+                # measurable overstretch.
+                _ist_now = now_i.astimezone(IST)
+                _is_early_session = (_ist_now.hour, _ist_now.minute) < (10, 45)
+                _above_vwap = close_now > vwap_now
+                _below_vwap = close_now < vwap_now
+                _strong_volume = float(volume_shock_component) >= 0.50
+                _mod_volume = float(volume_shock_component) >= 0.35
+                _rising_vwap = float(vwap_slope_component) >= 0.35
+                _strong_extension = float(ext_component) >= 0.60
+                _choppy_regime = regime_v2["regimeIntraday"] == "CHOPPY"
+                _reversal_fired = float(reversal_signal) >= 1.0
+
+                if (
+                    _is_early_session
+                    and orb_label == "UP_BREAK"
+                    and _above_vwap
+                    and _strong_volume
+                ):
+                    # Early-session breakout with a volume thrust = classic
+                    # opening-drive behaviour. Gated separately via
+                    # market_policy.open_drive_enabled below.
+                    setup_label = "OPEN_DRIVE"
+                elif orb_label == "UP_BREAK" and _above_vwap and _mod_volume:
+                    # ORB break with volume confirmation — tradable as a
+                    # breakout any time in the session.
+                    setup_label = "BREAKOUT"
+                elif (
+                    _choppy_regime
+                    and _reversal_fired
+                    and _strong_extension
+                    and _below_vwap
+                ):
+                    # Price overstretched below VWAP in a choppy regime and a
+                    # reversal signal fired — fade the move back to mean. Only
+                    # enabled in CHOPPY because fading in a trending regime is
+                    # how accounts die.
+                    setup_label = "MEAN_REVERSION"
+                elif (
+                    _above_vwap
+                    and _rising_vwap
+                    and _mod_volume
+                    and orb_label != "DOWN_BREAK"
+                ):
+                    # Above VWAP with a rising VWAP slope and confirming volume
+                    # — ride a healthy uptrend on a pullback-style entry.
+                    setup_label = "PULLBACK"
+                elif _above_vwap:
                     setup_label = "VWAP_TREND"
-                elif close_now < vwap_now:
+                elif _below_vwap:
                     setup_label = "VWAP_REVERSAL"
                 else:
                     setup_label = "VWAP_TREND" if trend_score >= reversal_score else "VWAP_REVERSAL"
