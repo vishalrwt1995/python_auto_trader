@@ -215,29 +215,32 @@ def score_signal(
     # Layer 5: Multi-timeframe Alignment (15)
     # When daily_bias is provided, reward signals aligned with the daily trend
     # and penalise those fighting it.
+    #
+    # Batch 3.2 (2026-04-22): daily_bias.strength now scales the alignment
+    # magnitude directly, not just as a ±3 post-adjustment. A weak UP trend
+    # (strength=25) should award fewer alignment points than a strong UP trend
+    # (strength=90) — previously both collapsed to +15 and we over-weighted
+    # weak-trend setups that were structurally coin-flips. Scaling: the fixed
+    # baseline captures "direction is correct" and the strength multiplier
+    # captures "the daily trend actually has conviction".
     if daily_bias is not None:
+        _strength_norm = max(0.0, min(1.0, float(daily_bias.strength or 0) / 100.0))
         if is_buy:
             if daily_bias.trend == "UP":
-                # Perfect alignment: intraday BUY + daily uptrend
-                bd.alignment += 15
+                # 8 baseline + up to 7 scaled by strength → weak trend +8, strong trend +15
+                bd.alignment += int(round(8 + 7 * _strength_norm))
             elif daily_bias.trend == "NEUTRAL":
                 bd.alignment += 5
             else:
-                # Counter-trend: intraday BUY against daily downtrend
-                bd.alignment -= 10
+                # Counter-trend: penalty also scales with how strongly DOWN it is
+                bd.alignment -= int(round(5 + 5 * _strength_norm))
         else:  # SELL
             if daily_bias.trend == "DOWN":
-                bd.alignment += 15
+                bd.alignment += int(round(8 + 7 * _strength_norm))
             elif daily_bias.trend == "NEUTRAL":
                 bd.alignment += 5
             else:
-                bd.alignment -= 10
-
-        # Strength bonus: stronger daily trend = more alignment weight
-        if daily_bias.strength >= 70 and bd.alignment > 0:
-            bd.alignment = min(15, bd.alignment + 3)
-        elif daily_bias.strength < 30 and bd.alignment > 0:
-            bd.alignment = max(0, bd.alignment - 3)
+                bd.alignment -= int(round(5 + 5 * _strength_norm))
 
         bd.alignment = max(-10, min(15, bd.alignment))
     score += bd.alignment

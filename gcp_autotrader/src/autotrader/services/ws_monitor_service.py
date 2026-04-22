@@ -81,6 +81,11 @@ class WsMonitorService:
         # Breakeven / regime-tighten events persist immediately; trailing updates
         # are throttled to at most once per 30 seconds to avoid excessive writes.
         self._sl_last_persist: dict[str, float] = {}
+        # Batch 3.1 (2026-04-22): throttle best_price persistence independently of
+        # sl_price. Without persisted best_price, a ws_monitor restart would reset
+        # the trailing high-watermark to entry_price, regressing the trailing-stop
+        # reference point and silently losing every gain accrued before the crash.
+        self._best_last_persist: dict[str, float] = {}
         # Current brain regime — refreshed alongside positions. Used to tighten
         # stops when the market turns while we hold a trend position.
         self._current_regime: str = ""
@@ -173,8 +178,18 @@ class WsMonitorService:
                     entry_epoch = _dt.timestamp() if _dt else time.time()
                 except Exception:
                     entry_epoch = time.time()
-                # Preserve best_price tracking across refreshes
+                # Preserve best_price tracking across refreshes.
+                # Batch 3.1 (2026-04-22): merge Firestore-persisted state with
+                # in-memory. In-memory wins when present (freshest — updated every
+                # tick), else fall back to the persisted Firestore value so a
+                # service restart doesn't wipe best_price / sl_moved / flags.
                 old = self._positions.get(ikey, {})
+                def _carry(key: str, default):
+                    mem_val = old.get(key)
+                    if mem_val is not None:
+                        return mem_val
+                    fs_val = pos.get(key)
+                    return fs_val if fs_val is not None else default
                 wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
                 _orig_qty = int(pos.get("original_qty") or pos.get("qty") or 0)
                 _sl_dist = float(pos.get("sl_dist") or 0)
@@ -192,13 +207,14 @@ class WsMonitorService:
                     "wl_type": wl_type,
                     # Entry regime (for regime-change exit logic)
                     "entry_regime": str(pos.get("regime") or "").strip().upper(),
-                    # Carry forward best_price from previous tick tracking
-                    "best_price": old.get("best_price", entry_price),
-                    "sl_moved": old.get("sl_moved", False),
+                    # Carry forward best_price from previous tick tracking —
+                    # Firestore fallback survives a ws_monitor restart (Batch 3.1).
+                    "best_price": float(_carry("best_price", entry_price) or entry_price),
+                    "sl_moved": bool(_carry("sl_moved", False)),
                     # Target-trailing flag: once we blow through target, we don't exit —
                     # we switch to a tighter trail to let the winner run.
-                    "target_passed": old.get("target_passed", False),
-                    "regime_tightened": old.get("regime_tightened", False),
+                    "target_passed": bool(_carry("target_passed", False)),
+                    "regime_tightened": bool(_carry("regime_tightened", False)),
                     # Partial exit tracking — read from Firestore (persisted) or carry forward
                     "original_qty": _orig_qty,
                     "sl_dist": _sl_dist,
@@ -272,12 +288,26 @@ class WsMonitorService:
                 logger.warning("emergency_sl_persist_failed tag=%s err=%s", tag, _e)
 
         # ── Track best price seen since entry ────────────────────────
+        _best_advanced = False
         if side == "BUY" and ltp > best:
             pos["best_price"] = ltp
             best = ltp
+            _best_advanced = True
         elif side == "SELL" and ltp < best:
             pos["best_price"] = ltp
             best = ltp
+            _best_advanced = True
+
+        # Batch 3.1 (2026-04-22): persist best_price to Firestore throttled at
+        # 60s. Without this, a ws_monitor restart loses the high-watermark and
+        # the trailing-stop reference regresses to entry_price — silently wiping
+        # any gains that weren't already locked in via sl_moved/target_passed.
+        if _best_advanced and time.time() - self._best_last_persist.get(tag, 0) >= 60:
+            try:
+                self.state.update_position(tag, {"best_price": round(best, 2)})
+                self._best_last_persist[tag] = time.time()
+            except Exception as _e:
+                logger.warning("best_price_persist_failed tag=%s err=%s", tag, _e)
 
         # ── Swing vs intraday parameters ────────────────────────────
         is_swing = pos.get("wl_type") == "swing"
@@ -293,9 +323,11 @@ class WsMonitorService:
                 sl = pos["sl_price"]
                 logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
                 # Persist immediately — critical: restart must not regress to original SL
+                # Batch 3.1: persist best_price alongside so the trailing reference survives.
                 try:
-                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True})
+                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True, "best_price": round(best, 2)})
                     self._sl_last_persist[tag] = time.time()
+                    self._best_last_persist[tag] = time.time()
                 except Exception as _e:
                     logger.warning("sl_persist_failed tag=%s err=%s", tag, _e)
             elif side == "SELL" and best <= entry_price - atr * _breakeven_atr_mult:
@@ -304,8 +336,9 @@ class WsMonitorService:
                 sl = pos["sl_price"]
                 logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
                 try:
-                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True})
+                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True, "best_price": round(best, 2)})
                     self._sl_last_persist[tag] = time.time()
+                    self._best_last_persist[tag] = time.time()
                 except Exception as _e:
                     logger.warning("sl_persist_failed tag=%s err=%s", tag, _e)
 
@@ -317,6 +350,15 @@ class WsMonitorService:
                 pos["target_passed"] = True
                 pos["sl_moved"] = True   # activate trailing immediately
                 logger.info("target_passed_trailing tag=%s ltp=%.2f target=%.2f", tag, ltp, target)
+                # Batch 3.1 (2026-04-22): persist target_passed + best_price so a
+                # ws_monitor restart doesn't re-trigger this one-shot transition.
+                try:
+                    self.state.update_position(tag, {
+                        "target_passed": True, "sl_moved": True, "best_price": round(best, 2),
+                    })
+                    self._best_last_persist[tag] = time.time()
+                except Exception as _e:
+                    logger.warning("target_passed_persist_failed tag=%s err=%s", tag, _e)
 
         _active_trail_mult = 1.2 if pos.get("target_passed") else _trail_atr_mult
 

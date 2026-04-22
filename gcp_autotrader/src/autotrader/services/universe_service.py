@@ -4791,7 +4791,24 @@ class UniverseService:
             trade_direction = "BUY"
 
             # Fix 3: short-side scoring in bearish regimes (PANIC / TREND_DOWN)
-            if is_bearish_regime:
+            #
+            # Batch 3.3 (2026-04-22): also permit short-side scoring for stocks
+            # that are individually bearish (ema50 < ema200 AND close < ema50),
+            # regardless of overall regime — EXCEPT in TREND_UP where the tide
+            # would lift even weak stocks. Previously, a stock with a clean
+            # multi-week daily downtrend could never surface as SHORT_PULLBACK /
+            # SHORT_BREAKDOWN in RANGE/CHOP/RECOVERY because this gate short-
+            # circuited short scoring entirely. The downstream breadth filter in
+            # trading_service (nifty_breadth_too_bullish_for_shorts) already
+            # protects against shorting into a strongly-bid tape; gating here as
+            # well was belt-and-suspenders that silently killed valid swing shorts.
+            _stock_bearish_structure = (
+                ema50 > 0 and ema200 > 0 and ema50 < ema200 and close < ema50
+            )
+            _allow_short_scoring = is_bearish_regime or (
+                _stock_bearish_structure and canonical_regime != "TREND_UP"
+            )
+            if _allow_short_scoring:
                 z_short = 0.60 * (-z_sector) + 0.40 * (-z_universe)
                 rs_short = self._norm_minmax_clip(max(-3.0, min(3.0, z_short)), -3.0, 3.0)
                 low252 = float(r.get("low252") or low20)
