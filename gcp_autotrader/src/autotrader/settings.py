@@ -63,7 +63,15 @@ class StrategySettings:
     swing_risk_per_trade: float = 200.0
     swing_max_positions: int = 5
     swing_max_hold_days: int = 10
-    swing_min_signal_score: int = 75
+    # P1 (2026-04-22): dropped 75 → 70 after live observation that scorer-eligible
+    # daily-uptrending names (WELCORP daily_strength=82, LLOYDSME=84, STLTECH=88)
+    # cluster at adjusted_score 62–73 in RANGE/NORMAL regimes. Intraday uses a
+    # risk-mode-tiered threshold (58–75) and adjusted_score post brain-haircut;
+    # swing uses _affinity_score (pre-haircut) against this single threshold.
+    # A 3–10 day swing trade's edge is the daily trend — over-filtering at 75
+    # on intraday-composite scoring kills the sample size (see 2026-04-22:
+    # 35 evaluations → 1 qualified at 76/75, 1-point margin).
+    swing_min_signal_score: int = 70
     # P0-2 (2026-04-22): strategy kill-switch. Strategies listed here are
     # stripped from `allowed_strategies` regardless of regime. Used to disable
     # known-bad strategies surfaced by live P&L analysis.

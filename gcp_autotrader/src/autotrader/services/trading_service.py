@@ -844,6 +844,18 @@ class TradingService:
                     and _brain_regime in ("RANGE", "CHOP", "RECOVERY")
                     and brain_state is not None
                     and brain_state.breadth_score >= 75
+                    # P1 (2026-04-22): exempt swing shorts whose OWN daily trend
+                    # is DOWN. The breadth filter protects intraday shorts from
+                    # intraday-squeeze risk when the tape is bid, but a swing
+                    # trade's thesis is the multi-day trend — if that's already
+                    # DOWN, NIFTY's one-day breadth shouldn't veto it.
+                    # (Today's block list had RELIANCE SELL@98 + SUNPHARMA SELL@95,
+                    # both MEAN_REVERSION, both daily_trend=DOWN — rejected here.)
+                    and not (
+                        _is_swing
+                        and _daily_bias is not None
+                        and str(getattr(_daily_bias, "trend", "") or "").upper() == "DOWN"
+                    )
                 ):
                     # Broad market is clearly bullish (>75% of stocks above their EMAs).
                     # Shorting into a strong rising tide is the #1 cause of SL blowouts.
