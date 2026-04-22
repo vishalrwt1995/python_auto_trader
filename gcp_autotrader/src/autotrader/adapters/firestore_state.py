@@ -164,6 +164,27 @@ class FirestoreStateStore:
             rows.append(row)
         return rows
 
+    def get_today_trade_count(self, today: str) -> int:
+        """Count positions entered today — used to enforce max_trades_day.
+
+        Counts ALL positions (OPEN and CLOSED) whose entry_ts starts with
+        the given ISO date. A position that was opened and stopped-out earlier
+        today still consumes a slot in the daily budget.
+        """
+        count = 0
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                entry_ts = str(row.get("entry_ts", "") or "")
+                if entry_ts.startswith(today):
+                    count += 1
+        except Exception:
+            # Best-effort — if Firestore read fails we fall back to not enforcing
+            # the cap, since hard-blocking the scan on a transient read error
+            # would be worse than letting trading continue.
+            return 0
+        return count
+
     def get_today_realized_pnl(self, today: str) -> float:
         """Sum PnL of all positions closed today (exit_ts starts with today's date).
 

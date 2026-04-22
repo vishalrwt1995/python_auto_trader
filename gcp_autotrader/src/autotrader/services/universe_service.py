@@ -5324,9 +5324,23 @@ class UniverseService:
                 ]
             )
 
-        swing_written = bool(premarket)
-        if not swing_written:
-            logger.info("build_watchlist_v2 swing write skipped premarket=%s runBlock=%s", premarket, run_block)
+        # Batch 1.2 (2026-04-22): prior logic `swing_written = bool(premarket)`
+        # caused intraday rebuilds to under-report swing_selected_count (always 0)
+        # and emitted a confusing "swing write skipped" log, even though the
+        # Firestore watchlist/latest document below is rewritten with the full
+        # union of intraday + swing rows on every build. Report the true count.
+        # The BQ swing_watchlist audit table is premarket-only by design (that
+        # is the run that produces the authoritative daily swing list), so we
+        # keep the `premarket` guard around any BQ write paths but decouple it
+        # from the return/reporting flag.
+        swing_written = True
+        swing_bq_persisted = bool(premarket)
+        if not swing_bq_persisted:
+            logger.info(
+                "build_watchlist_v2 swing BQ audit skipped premarket=%s runBlock=%s "
+                "(Firestore watchlist still includes swing_selected=%d)",
+                premarket, run_block, len(swing_selected),
+            )
 
         # --- Firestore write: persist watchlist for dashboard real-time display ---
         try:

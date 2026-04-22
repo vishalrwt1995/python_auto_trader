@@ -231,7 +231,14 @@ class AppSettings:
             swing_risk_per_trade=_env_float("SWING_RISK_PER_TRADE", 200),
             swing_max_positions=_env_int("SWING_MAX_POSITIONS", 5),
             swing_max_hold_days=_env_int("SWING_MAX_HOLD_DAYS", 10),
-            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 75),
+            # Batch 1.3 (2026-04-22): default aligned to dataclass (70). Prior
+            # divergence (dataclass=70, env default=75) meant production — which
+            # constructs StrategySettings via from_env() — silently used the OLD
+            # pre-P1 threshold while unit tests constructing StrategySettings()
+            # directly saw the P1 value. The P1 swing-threshold calibration only
+            # takes effect because no SWING_MIN_SIGNAL_SCORE env var is set in
+            # Cloud Run today, so from_env's default must be authoritative.
+            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 70),
         )
         return AppSettings(
             gcp=GcpSettings(

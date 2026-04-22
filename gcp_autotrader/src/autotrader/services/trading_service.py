@@ -340,7 +340,11 @@ class TradingService:
                                     max_positions_multiplier=min(float(brain_state.max_positions_multiplier or 1.0), 0.70),
                                 )
                     except Exception:
-                        pass  # best-effort; don't break the scan
+                        # Batch 1.4 (2026-04-22): log at DEBUG so the stale-brain
+                        # cap becomes diagnosable without failing the scan. A
+                        # silent except-pass here previously hid parse_any_ts
+                        # failures that left stale brain state uncapped.
+                        logger.debug("stale_brain_state_cap_failed", exc_info=True)
                 except Exception:
                     logger.exception("scan_once market_brain_v2_unavailable — no fallback")
                     self.log_sink.action("TradingService", "run_scan_once", "SKIP", "market_brain_v2_unavailable")
@@ -452,6 +456,33 @@ class TradingService:
                 # Daily loss: continue scan but restrict to counter-trend only (handled per-symbol below)
                 # We'll pass _pnl_block_reason through as a flag consumed later in the loop
 
+            # ── Daily trade count cap (max_trades_day) ─────────────────────
+            # Batch 1.1 (2026-04-22): previously the setting existed in
+            # StrategySettings but was never read by the trading path. Over-
+            # trading past the intended cap silently burned fixed per-trade
+            # costs (₹40 round-trip brokerage) and increased tail risk from
+            # correlated intraday entries. We count positions entered today
+            # (OPEN + CLOSED) from Firestore and block NEW entries once the
+            # cap is hit. Circuit-breaker parity with max_daily_loss: SKIP
+            # the scan entirely, since every candidate downstream would be
+            # blocked anyway and there is no partial-qualification path.
+            _today_iso = now_ist_str()[:10]
+            try:
+                _today_trade_count = self.state.get_today_trade_count(_today_iso)
+            except Exception:
+                logger.warning("today_trade_count_failed — proceeding without cap", exc_info=True)
+                _today_trade_count = 0
+            if _today_trade_count >= int(cfg.max_trades_day):
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP", "max_trades_day_hit",
+                    {"todayTradeCount": _today_trade_count, "maxTradesDay": cfg.max_trades_day},
+                )
+                return {
+                    "skipped": "max_trades_day_hit",
+                    "today_trade_count": _today_trade_count,
+                    "max_trades_day": int(cfg.max_trades_day),
+                }
+
             # Read watchlist: Firestore is primary, Sheets is fallback
             watchlist = self._read_watchlist_with_fallback()
             if wl_filter in {"intraday", "swing"}:
@@ -491,7 +522,12 @@ class TradingService:
                 }
                 _blackout_days = int(_eb_cfg.get("blackout_days", 2))
             except Exception:
-                pass  # earnings blackout is best-effort — don't block the scan
+                # Batch 1.4 (2026-04-22): log at DEBUG so a broken blackout
+                # document is diagnosable. Silent except-pass previously hid
+                # the fact that earnings blackout was never taking effect
+                # (earnings_blackout document absent → entries fire through
+                # earnings with no protection and no visible error).
+                logger.debug("earnings_blackout_read_failed", exc_info=True)
 
             # Count existing swing positions for separate cap
             _open_swing_count = sum(

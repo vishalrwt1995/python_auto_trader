@@ -263,8 +263,17 @@ def test_watchlist_v2_score_bounds_zero_to_hundred():
         assert 0.0 <= float(r["score"]) <= 100.0
 
 
-def test_watchlist_v2_intraday_run_does_not_report_swing_selected():
-    """When premarket=False, swingSelected in response must be 0 (swing output suppressed)."""
+def test_watchlist_v2_intraday_run_reports_swing_selected_accurately():
+    """When premarket=False, swingSelected must reflect the real count.
+
+    Batch 1.2 (2026-04-22): the prior behaviour asserted `swingSelected == 0`
+    on intraday rebuilds, matching `swing_written = bool(premarket)`. That
+    was misleading — the Firestore `watchlist/latest` document is rewritten
+    with the full union of intraday + swing rows on every rebuild, so the
+    scanner DOES see swing candidates intraday, but the return payload lied
+    about it. We now report the true count so telemetry matches what the
+    scanner actually reads.
+    """
     svc = UniverseService(object(), object(), StrategySettings())
     now_i = now_ist()
     expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
@@ -302,8 +311,14 @@ def test_watchlist_v2_intraday_run_does_not_report_swing_selected():
 
     out = svc.build_watchlist(None, target_size=20, premarket=False, intraday_timeframe="5m")
     assert out["ready"] is True
-    # Intraday-only run: swingSelected reported as 0, swingComputed shows candidates were scored
-    assert out["swingSelected"] == 0
+    # Intraday-only run: swingSelected must equal swingComputed now (Batch 1.2).
+    # Both values reflect the same underlying swing_selected set that the
+    # Firestore watchlist is persisted with.
+    assert out["swingSelected"] == out["swingComputed"], (
+        f"swingSelected={out['swingSelected']} should equal "
+        f"swingComputed={out['swingComputed']} on intraday rebuilds — "
+        "both now reflect the real count written to Firestore."
+    )
     assert out["swingComputed"] >= 1
     assert out["intradaySelected"] >= 1
 
