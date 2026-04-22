@@ -48,9 +48,16 @@ def is_entry_window_open_ist() -> bool:
     # their timeout before EOD force-close at 15:25, guaranteeing a premature
     # exit. 04-16 had multiple entries at 14:29 IST; 04-20 had 4 entries at
     # ~14:30 — all exited FLAT_TIMEOUT or EOD_CLOSE with poor PnL.
-    # A 14:00 cutoff gives every new position a full 85 min of market time
-    # plus 40 min post-close to develop into SL/target/timeout cleanly.
-    return is_market_open_ist() and ist_minutes() <= 840
+    #
+    # Batch 2.2 (2026-04-22): Tightened 14:00 → 13:30 (810 min). At 14:00
+    # entry only 85 min remain before EOD force-close — less than the 120-min
+    # FLAT_TIMEOUT, so every 14:00 entry that doesn't hit SL or target in
+    # 85 min is pre-committed to EOD_CLOSE exits at whatever price the market
+    # gives. 13:30 gives 115 min, which is effectively the full timeout
+    # window and leaves room for intraday continuation/reversal. Post-mortem
+    # showed 04-16/04-20/04-21 had multiple late-afternoon entries exiting
+    # EOD_CLOSE flat-to-losing (see trades table exit_reason distribution).
+    return is_market_open_ist() and ist_minutes() <= 810
 
 
 def parse_any_ts(value: str | int | float | None) -> datetime | None:

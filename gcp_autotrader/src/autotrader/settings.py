@@ -72,6 +72,16 @@ class StrategySettings:
     # on intraday-composite scoring kills the sample size (see 2026-04-22:
     # 35 evaluations → 1 qualified at 76/75, 1-point margin).
     swing_min_signal_score: int = 70
+    # Batch 2.1 (2026-04-22): re-entry cooldown. When a position closes
+    # (SL hit, target hit, or timeout), the scanner should NOT immediately
+    # re-stage the same symbol on the next 3-min cycle. The watchlist will
+    # naturally re-score that name as a strong setup (price just moved
+    # through SL/target), and without a cooldown the bot would enter the
+    # same trade again — compounding a losing thesis. Empirically 04-16
+    # showed multiple symbols churned 2-3 times in under 30 min. 30-min
+    # default chosen to be > 1 intraday-candle (15m) so the next signal
+    # comes from a fresh candle cycle, not the SL breakout bar.
+    reentry_cooldown_minutes: int = 30
     # P0-2 (2026-04-22): strategy kill-switch. Strategies listed here are
     # stripped from `allowed_strategies` regardless of regime. Used to disable
     # known-bad strategies surfaced by live P&L analysis.
@@ -239,6 +249,7 @@ class AppSettings:
             # takes effect because no SWING_MIN_SIGNAL_SCORE env var is set in
             # Cloud Run today, so from_env's default must be authoritative.
             swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 70),
+            reentry_cooldown_minutes=_env_int("REENTRY_COOLDOWN_MINUTES", 30),
         )
         return AppSettings(
             gcp=GcpSettings(

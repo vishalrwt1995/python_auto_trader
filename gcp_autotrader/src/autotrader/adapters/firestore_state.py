@@ -164,6 +164,44 @@ class FirestoreStateStore:
             rows.append(row)
         return rows
 
+    def get_recently_exited_symbols(self, within_minutes: int = 30) -> dict[str, str]:
+        """Return symbols whose last exit was within `within_minutes` minutes.
+
+        Maps symbol → exit_ts ISO string. Used by the scanner to suppress
+        re-entries on freshly-stopped names (the same setup almost always
+        restages within a few bars of an SL, and reversing back into the
+        same direction immediately tends to compound losses).
+
+        Only positions with status=CLOSED are considered. Gracefully returns
+        an empty dict if Firestore is unreachable — we'd rather allow a
+        re-entry than block the whole scan on a transient read error.
+        """
+        from autotrader.time_utils import now_ist, parse_any_ts
+        out: dict[str, str] = {}
+        try:
+            _now = now_ist()
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                exit_ts = str(row.get("exit_ts", "") or "")
+                if not exit_ts:
+                    continue
+                _dt = parse_any_ts(exit_ts)
+                if _dt is None:
+                    continue
+                _age_min = (_now - _dt.astimezone(_now.tzinfo)).total_seconds() / 60.0
+                if 0 <= _age_min <= float(within_minutes):
+                    sym = str(row.get("symbol", "") or "").strip().upper()
+                    if not sym:
+                        continue
+                    # Keep the most recent exit_ts if a symbol was traded twice today
+                    if sym not in out or exit_ts > out[sym]:
+                        out[sym] = exit_ts
+        except Exception:
+            return {}
+        return out
+
     def get_today_trade_count(self, today: str) -> int:
         """Count positions entered today — used to enforce max_trades_day.
 

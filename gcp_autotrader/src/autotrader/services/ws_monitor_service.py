@@ -323,11 +323,23 @@ class WsMonitorService:
         # ── Regime-change tighten: if we entered in TREND_UP/RECOVERY but the
         # market has turned to CHOP/PANIC, tighten SL to 0.8× ATR from current
         # LTP immediately. One-shot: only applied once per position.
+        #
+        # Batch 2.3 (2026-04-22): gated to intraday only. Swing positions hold
+        # 3-10 days and their SL is sized on daily ATR (2.5×). Applying an
+        # intraday regime tighten (0.8× ATR from current LTP) to swing is
+        # wrong on two axes: (a) daily regime has NOT flipped — the flip we
+        # detect is on the intraday timeframe, which is noise for a multi-day
+        # hold; (b) the 0.8× multiplier is 3.1× tighter than swing's 2.5×
+        # daily-ATR SL, so the very first intraday squeeze guarantees stop-out.
+        # Prior behaviour silently undermined the swing thesis every time
+        # intraday regime flipped mid-day (~daily occurrence in RANGE tape).
         cur_regime = getattr(self, "_current_regime", "")
         entry_regime = pos.get("entry_regime", "")
+        _pos_is_swing = str(pos.get("wl_type") or "intraday").strip().lower() == "swing"
         if (
             not pos.get("regime_tightened")
             and atr > 0
+            and not _pos_is_swing
             and entry_regime in ("TREND_UP", "RECOVERY")
             and cur_regime in ("CHOP", "PANIC", "TREND_DOWN")
         ):

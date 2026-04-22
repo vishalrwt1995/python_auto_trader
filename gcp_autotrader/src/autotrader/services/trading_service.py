@@ -535,6 +535,25 @@ class TradingService:
                 if str(p.get("wl_type") or "").strip().lower() == "swing"
             )
 
+            # ── Re-entry cooldown (Batch 2.1, 2026-04-22) ──────────────────
+            # Suppress symbols whose last position closed within the last
+            # `reentry_cooldown_minutes` (default 30). Prevents the scanner
+            # from re-staging the same trade on the 3-min cycle immediately
+            # after an SL/target/timeout. See settings comment for rationale.
+            _recent_exits: dict[str, str] = {}
+            try:
+                _recent_exits = self.state.get_recently_exited_symbols(
+                    within_minutes=int(cfg.reentry_cooldown_minutes),
+                )
+                if _recent_exits:
+                    logger.info(
+                        "reentry_cooldown active count=%d symbols=%s",
+                        len(_recent_exits),
+                        ",".join(sorted(_recent_exits.keys())[:10]),
+                    )
+            except Exception:
+                logger.debug("reentry_cooldown_fetch_failed", exc_info=True)
+
             symbol_set = {str(w.symbol).strip().upper() for w in subset if str(w.symbol).strip()}
             key_by_symbol: dict[str, str] = {}
             if symbol_set:
@@ -869,8 +888,17 @@ class TradingService:
                 }
 
                 policy_block_reason = ""
+                _sym_upper = str(w.symbol).strip().upper()
                 if pos.qty == 0:
                     policy_block_reason = "sl_too_wide_for_risk_budget"
+                elif _sym_upper in _recent_exits:
+                    # Batch 2.1 (2026-04-22): symbol closed a position in the
+                    # last `reentry_cooldown_minutes` — re-staging immediately
+                    # tends to compound a losing thesis (04-16 showed several
+                    # symbols churned 2–3 times inside 30 min). The next scan
+                    # cycle that runs AFTER the cooldown will re-score the
+                    # symbol from a fresh 15-min candle, not the SL bar.
+                    policy_block_reason = "reentry_cooldown"
                 elif direction == "BUY" and market_policy is not None and not bool(market_policy.long_enabled):
                     policy_block_reason = "policy_long_disabled"
                 elif direction == "SELL" and market_policy is not None and not bool(market_policy.short_enabled):
