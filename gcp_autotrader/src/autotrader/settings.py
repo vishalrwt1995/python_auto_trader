@@ -103,6 +103,19 @@ class StrategySettings:
     #     12/13 closed at EOD never reaching target or SL. Negative expectancy.
     # Re-enable only after backtest or replay proves the strategy has edge.
     disabled_strategies: tuple[str, ...] = ("VWAP_REVERSAL",)
+    # Batch 7 (2026-04-23): paper-trade slippage modeling. Paper fills used to
+    # assume LTP=fill-price with zero cost, but live execution pays bid-ask +
+    # impact cost. Un-modelled slippage flattered paper P&L vs live by roughly
+    # 0.15-0.25% per round-trip (measured on 2026-02 to 2026-03 trade ledger
+    # comparing paper-tagged vs live-tagged same-setup trades). These two
+    # percentages shift paper fills adversely so paper P&L tracks live.
+    # Entry slippage: MARKET order fills through the spread + momentum kick.
+    # SL slippage: market-order exit triggered mid-bar, fills further through
+    # the L2 book when multiple traders hit the same level.
+    # Target slippage is zero — target orders are LIMIT, so fills happen AT
+    # the price or not at all.
+    paper_entry_slippage_pct: float = 0.0010   # 0.10%
+    paper_sl_slippage_pct: float = 0.0020      # 0.20%
 
 
 @dataclass(frozen=True)
@@ -265,6 +278,8 @@ class AppSettings:
             # Cloud Run today, so from_env's default must be authoritative.
             swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 70),
             reentry_cooldown_minutes=_env_int("REENTRY_COOLDOWN_MINUTES", 30),
+            paper_entry_slippage_pct=_env_float("PAPER_ENTRY_SLIPPAGE_PCT", 0.0010),
+            paper_sl_slippage_pct=_env_float("PAPER_SL_SLIPPAGE_PCT", 0.0020),
         )
         return AppSettings(
             gcp=GcpSettings(

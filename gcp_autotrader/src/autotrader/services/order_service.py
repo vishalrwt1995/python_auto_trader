@@ -475,6 +475,17 @@ class OrderService:
         # ---- Paper trade ----
         if paper:
             pos_tag = f"BOTP:{ref_id}"
+            # Batch 7 (2026-04-23): apply entry-side paper slippage so paper
+            # P&L tracks live P&L. MARKET entries fill through the spread in
+            # the adverse direction (BUY fills above LTP, SELL fills below).
+            # SL and target are left at their planned prices — SL slippage is
+            # applied at exit time, target is a LIMIT order so no slippage.
+            _entry_slip_pct = float(self.settings.strategy.paper_entry_slippage_pct or 0.0)
+            if _entry_slip_pct > 0:
+                if side.upper() == "BUY":
+                    entry_price = round(entry_price * (1.0 + _entry_slip_pct), 2)
+                else:
+                    entry_price = round(entry_price * (1.0 - _entry_slip_pct), 2)
             self._save_position_firestore(
                 position_tag=pos_tag,
                 symbol=symbol, exchange=exchange, segment=segment,
@@ -646,6 +657,22 @@ class OrderService:
                 exit_price = quote.ltp or float(pos.get("entry_price") or 0)
             except Exception:
                 exit_price = float(pos.get("entry_price") or 0)
+            # Batch 7 (2026-04-23): apply SL-side paper slippage. SL_HIT /
+            # EOD_CLOSE / FLAT_TIMEOUT / regime-tighten exits all use market
+            # orders, which fill through the L2 book when multiple traders
+            # hit the same level. TARGET_HIT is a LIMIT order — no slippage.
+            # PARTIAL_* exits are also market-tagged, so the same slippage
+            # applies; we conservatively shift them too.
+            _reason_upper = str(exit_reason or "").upper()
+            _is_limit_exit = "TARGET" in _reason_upper
+            _sl_slip_pct = float(self.settings.strategy.paper_sl_slippage_pct or 0.0)
+            if _sl_slip_pct > 0 and not _is_limit_exit and exit_price > 0:
+                # Exit side is opposite of entry side: BUY entry exits via SELL
+                # (adverse fill = lower), SELL entry exits via BUY (adverse = higher).
+                if side == "BUY":
+                    exit_price = round(exit_price * (1.0 - _sl_slip_pct), 2)
+                else:
+                    exit_price = round(exit_price * (1.0 + _sl_slip_pct), 2)
             self._close_position_firestore(
                 position_tag=position_tag,
                 exit_price=exit_price,
@@ -769,6 +796,16 @@ class OrderService:
                 exit_price = quote.ltp or entry_price
             except Exception:
                 exit_price = entry_price
+            # Batch 7 (2026-04-23): partial exits are market-tagged and fill
+            # through the book just like full SL exits — apply SL-slippage. The
+            # PARTIAL_1R / PARTIAL_1_5R / PARTIAL_1R_QTY2 reasons don't contain
+            # "TARGET" so they're not accidentally treated as limit fills.
+            _sl_slip_pct = float(self.settings.strategy.paper_sl_slippage_pct or 0.0)
+            if _sl_slip_pct > 0 and exit_price > 0:
+                if side == "BUY":
+                    exit_price = round(exit_price * (1.0 - _sl_slip_pct), 2)
+                else:
+                    exit_price = round(exit_price * (1.0 + _sl_slip_pct), 2)
             multiplier = 1 if side == "BUY" else -1
             partial_pnl = round((exit_price - entry_price) * exit_qty * multiplier, 2)
             new_partial_pnl = round(float(pos.get("partial_pnl", 0)) + partial_pnl, 2)
