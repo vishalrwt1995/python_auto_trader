@@ -107,6 +107,18 @@ class WsMonitorService:
         # Current brain regime — refreshed alongside positions. Used to tighten
         # stops when the market turns while we hold a trend position.
         self._current_regime: str = ""
+        # M1 exit FSM flag + config. We read the runtime flag once at startup
+        # so a mid-day flip is a deliberate service restart (matches the
+        # "flag-gated rollout" rule in BUILD.md — no silent behaviour change).
+        try:
+            from autotrader.container import get_container
+            _settings = get_container().settings
+            self._use_exit_fsm_v1 = bool(getattr(_settings.runtime, "use_exit_fsm_v1", False))
+        except Exception:
+            self._use_exit_fsm_v1 = False
+        from autotrader.domain.exit_fsm import FsmConfig
+        self._fsm_cfg = FsmConfig()
+        logger.info("ws_monitor_init use_exit_fsm_v1=%s", self._use_exit_fsm_v1)
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -245,6 +257,14 @@ class WsMonitorService:
                     # M0.6 MFE/MAE tracking — carry forward in-memory, fall back to Firestore.
                     "mfe_price": float(_carry("max_favorable_excursion_price", entry_price) or entry_price),
                     "mae_price": float(_carry("max_adverse_excursion_price", entry_price) or entry_price),
+                    # M1 FSM state — Firestore-backed so a restart resumes in
+                    # the correct state (otherwise the FSM would re-enter
+                    # INITIAL and move the stop back to the original level).
+                    "_fsm_state": _carry("exit_fsm_state", "INITIAL") or "INITIAL",
+                    "_fsm_peak_mfe_r": float(_carry("max_favorable_excursion_r", 0.0) or 0.0),
+                    "_fsm_confirm_started_epoch": float(
+                        _carry("_fsm_confirm_started_epoch", 0.0) or 0.0
+                    ),
                 }
             self._positions = new_map
             self._last_refresh = time.time()
@@ -302,6 +322,14 @@ class WsMonitorService:
             return
         tag = pos["position_tag"]
         if tag in self._exiting:
+            return
+
+        # M1: if the FSM flag is on, delegate exit logic to the FSM path and
+        # return. The legacy code below is kept intact for the default-off
+        # code path so we can flip back with a single env var if the FSM
+        # misbehaves in production.
+        if self._use_exit_fsm_v1:
+            await self._on_quote_fsm(instrument_key, ltp, ts, pos, tag)
             return
 
         sl = pos["sl_price"]
@@ -665,6 +693,116 @@ class WsMonitorService:
                 tag, exit_reason, ltp, sl, target, best,
             )
             asyncio.create_task(self._do_exit(tag, instrument_key, exit_reason))
+
+    # ------------------------------------------------------------------ #
+    # M1 FSM-based tick handler (flag-gated)
+    # ------------------------------------------------------------------ #
+
+    async def _on_quote_fsm(
+        self,
+        instrument_key: str,
+        ltp: float,
+        ts: float,
+        pos: dict,
+        tag: str,
+    ) -> None:
+        """Alternate tick handler driven by the 5-state exit FSM.
+
+        Gated by settings.runtime.use_exit_fsm_v1. Performs the same side
+        effects as the legacy path (Firestore persists, _do_exit on
+        terminal) but the state transitions come from a pure function so
+        they are deterministic and replay-testable.
+        """
+        from autotrader.domain.exit_fsm import ExitState, PositionView, TickEvent, transition
+
+        side = pos["side"]
+        entry_price = pos.get("entry_price", 0.0)
+        atr = pos.get("atr", 0.0)
+        sl_dist = pos.get("sl_dist", 0.0)
+        is_swing = pos.get("wl_type") == "swing"
+
+        # Map legacy dict fields into the FSM view. Carry FSM-specific state
+        # in in-memory keys prefixed "_fsm_" so the legacy path is unaffected
+        # when the flag is flipped off mid-session.
+        prev_state = ExitState(pos.get("_fsm_state", ExitState.INITIAL.value))
+        best = pos.get("best_price", entry_price) or entry_price
+        view = PositionView(
+            tag=tag,
+            side=side,
+            entry_price=entry_price,
+            atr=atr,
+            sl_dist=sl_dist,
+            is_swing=is_swing,
+            entry_epoch=pos.get("entry_epoch", ts),
+            state=prev_state,
+            best_price=best,
+            peak_mfe_r=float(pos.get("_fsm_peak_mfe_r", 0.0)),
+            current_sl=float(pos.get("sl_price", 0.0)),
+            confirm_started_epoch=float(pos.get("_fsm_confirm_started_epoch", 0.0)),
+        )
+        tick = TickEvent(
+            ltp=ltp,
+            ts=ts,
+            regime=self._current_regime or "",
+            entry_regime=pos.get("entry_regime", ""),
+        )
+        out = transition(view, tick, self._fsm_cfg)
+
+        # Maintain debounce bookkeeping.
+        if prev_state == ExitState.INITIAL:
+            if "confirm_arming" in out.events and pos.get("_fsm_confirm_started_epoch", 0.0) == 0.0:
+                pos["_fsm_confirm_started_epoch"] = ts
+            elif "confirm_aborted" in out.events:
+                pos["_fsm_confirm_started_epoch"] = 0.0
+
+        # Update mutable FSM-tracked fields.
+        if side.upper() == "BUY":
+            pos["best_price"] = max(best, ltp)
+        else:
+            pos["best_price"] = min(best, ltp)
+        pos["_fsm_peak_mfe_r"] = max(float(pos.get("_fsm_peak_mfe_r", 0.0)), out.mfe_r_now)
+
+        # Handle state change + SL writes.
+        if out.next_state != prev_state:
+            pos["_fsm_state"] = out.next_state.value
+            logger.info(
+                "fsm_transition tag=%s %s→%s mfe_r=%.3f events=%s",
+                tag, prev_state.value, out.next_state.value, out.mfe_r_now, out.events,
+            )
+            # Persist the transition immediately — we want state changes in
+            # Firestore before any subsequent tick, to survive a restart.
+            try:
+                update_fields: dict = {"exit_fsm_state": out.next_state.value}
+                if out.sl_changed and out.new_sl > 0:
+                    pos["sl_price"] = out.new_sl
+                    update_fields["sl_price"] = out.new_sl
+                    update_fields["sl_moved"] = True
+                if out.next_state == ExitState.CONFIRMED:
+                    update_fields["breakeven_sl_fired"] = True
+                    update_fields["breakeven_sl_trigger_mfe_r"] = out.mfe_r_now
+                    update_fields["breakeven_sl_trigger_ts"] = _now_ist_str()
+                self.state.update_position(tag, update_fields)
+                self._sl_last_persist[tag] = time.time()
+            except Exception:
+                logger.warning("fsm_persist_failed tag=%s", tag, exc_info=True)
+        elif out.sl_changed and out.new_sl > 0:
+            # Trailing ratchet in RUNNER state — throttled like the legacy path.
+            pos["sl_price"] = out.new_sl
+            if time.time() - self._sl_last_persist.get(tag, 0) >= 30:
+                try:
+                    self.state.update_position(tag, {"sl_price": out.new_sl})
+                    self._sl_last_persist[tag] = time.time()
+                except Exception:
+                    logger.warning("fsm_trail_persist_failed tag=%s", tag, exc_info=True)
+
+        # Terminal → schedule the exit.
+        if out.next_state == ExitState.TERMINAL and out.exit_reason:
+            self._exiting.add(tag)
+            logger.info(
+                "fsm_exit tag=%s reason=%s ltp=%.2f sl=%.2f mfe_r=%.3f",
+                tag, out.exit_reason, ltp, out.new_sl or pos.get("sl_price", 0), out.mfe_r_now,
+            )
+            asyncio.create_task(self._do_exit(tag, instrument_key, out.exit_reason))
 
     async def _do_exit(self, tag: str, instrument_key: str, exit_reason: str) -> None:
         try:

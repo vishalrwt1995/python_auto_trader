@@ -159,6 +159,19 @@ class RuntimeSettings:
     job_trigger_token: str
     log_level: str
     timezone_name: str = "Asia/Kolkata"
+    # ── Redesign feature flags (default OFF — flip to opt in) ──
+    # M1: 5-state exit FSM (INITIAL/CONFIRMED/RUNNER/LOSING/TERMINAL).
+    # When False, the legacy exit precedence in ws_monitor runs.
+    use_exit_fsm_v1: bool = False
+    # M2: Playbook hard-block layer + Edge registry. When False, the legacy
+    # scorer decides entries directly.
+    use_playbook_v1: bool = False
+    # M3: expected_edge_R scoring (backtest-derived R priors). When False,
+    # the legacy signal_score drives entry ranking.
+    use_expected_edge_r_v1: bool = False
+    # M4: PortfolioBook channel budgets + DD governors. When False, the
+    # legacy max_positions / risk_per_trade gates apply.
+    use_portfolio_book_v1: bool = False
 
 
 @dataclass(frozen=True)
@@ -321,6 +334,10 @@ class AppSettings:
                 job_trigger_token=_env("JOB_TRIGGER_TOKEN"),
                 log_level=_env("LOG_LEVEL", "INFO"),
                 timezone_name=_env("TZ", "Asia/Kolkata"),
+                use_exit_fsm_v1=_env_bool("USE_EXIT_FSM_V1", False),
+                use_playbook_v1=_env_bool("USE_PLAYBOOK_V1", False),
+                use_expected_edge_r_v1=_env_bool("USE_EXPECTED_EDGE_R_V1", False),
+                use_portfolio_book_v1=_env_bool("USE_PORTFOLIO_BOOK_V1", False),
             ),
             strategy=strategy,
             regime_thresholds=RegimeThresholds(
