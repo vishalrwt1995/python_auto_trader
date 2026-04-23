@@ -15,6 +15,7 @@ from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.daily_bias import compute_daily_bias
 from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regime_strategy_multiplier
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
+from autotrader.domain.expected_edge import evaluate as evaluate_expected_edge
 from autotrader.domain.playbook import check_playbook
 from autotrader.domain.scoring import check_strategy_entry, check_swing_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
@@ -1037,6 +1038,18 @@ class TradingService:
                         )
                         if not _pb_ok:
                             policy_block_reason = _pb_reason
+                    # M3 — Expected_edge_R gate. Blocks when prior.n ≥
+                    # min_sample_size AND expected_edge_R ≤ 0. Below the
+                    # sample floor it's a no-op. Independent of the playbook
+                    # flag — can be flipped on separately during rollout.
+                    elif self.settings.runtime.use_expected_edge_r_v1:
+                        _ee = evaluate_expected_edge(
+                            regime=_brain_regime,
+                            setup=w.strategy,
+                            direction=direction,
+                        )
+                        if not _ee.allowed:
+                            policy_block_reason = _ee.reason
                     # Portfolio sector concentration: don't pile into the same sector
                     elif w.sector and w.sector.upper() != "UNKNOWN":
                         _sym_sector = w.sector.upper()
