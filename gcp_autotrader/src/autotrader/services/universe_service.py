@@ -918,6 +918,30 @@ class UniverseService:
         return ts.astimezone(IST).isoformat(timespec="seconds")
 
     @staticmethod
+    def _normalize_last_candle_time(text: object) -> str:
+        """Normalize a last_candle_time string for prev-row comparison.
+
+        Inputs may come in either ISO form ("2026-02-27T00:00:00+05:30",
+        produced by _last_candle_text) or space-separated form without a
+        timezone ("2026-02-27 00:00:00", legacy Sheets history index
+        format). Normalize both to "YYYY-MM-DD HH:MM:SS" so the stale-retry
+        guards treat them as equivalent.
+        """
+        s = str(text or "").strip()
+        if not s:
+            return ""
+        s = s.replace("T", " ", 1)
+        if s.endswith("Z"):
+            s = s[:-1]
+        # Strip trailing timezone offset like "+05:30" / "-05:00" that
+        # appears after the time portion. Search only past the date part.
+        for i in range(len(s) - 1, 10, -1):
+            if s[i] in ("+", "-"):
+                s = s[:i]
+                break
+        return s.strip()
+
+    @staticmethod
     def _last_candle_sig(candles: list[list[object]]) -> str:
         if not candles:
             return ""
@@ -1004,8 +1028,9 @@ class UniverseService:
         prev_expected = (prev_row.get("expectedlcd") or "").strip()
         if prev_expected and prev_expected != expected_lcd:
             return False
-        current_last = self._last_candle_text(candles)
-        if not current_last or (prev_row.get("last_candle_time") or "") != current_last:
+        current_last = self._normalize_last_candle_time(self._last_candle_text(candles))
+        prev_last = self._normalize_last_candle_time(prev_row.get("last_candle_time"))
+        if not current_last or prev_last != current_last:
             return False
         prev_src = (prev_row.get("src") or "").strip().lower()
         if prev_status == "STALE_SKIPPED":
@@ -1033,8 +1058,8 @@ class UniverseService:
             return False
         if (prev_row.get("status") or "").upper() != "INVALID_KEY_SKIPPED":
             return False
-        current_last = self._last_candle_text(candles)
-        prev_last = (prev_row.get("last_candle_time") or "").strip()
+        current_last = self._normalize_last_candle_time(self._last_candle_text(candles))
+        prev_last = self._normalize_last_candle_time(prev_row.get("last_candle_time"))
         if not current_last and not prev_last:
             return True
         return bool(current_last) and current_last == prev_last
@@ -1054,8 +1079,8 @@ class UniverseService:
         prev_expected = (prev_row.get("expectedlcd") or "").strip()
         if prev_expected and prev_expected != expected_lcd:
             return False
-        current_last = self._last_candle_text(candles)
-        prev_last = (prev_row.get("last_candle_time") or "").strip()
+        current_last = self._normalize_last_candle_time(self._last_candle_text(candles))
+        prev_last = self._normalize_last_candle_time(prev_row.get("last_candle_time"))
         if current_last != prev_last:
             return False
         prev_src = (prev_row.get("src") or "").strip().lower()
@@ -1085,8 +1110,9 @@ class UniverseService:
         prev_expected = (prev_row.get("expectedlcd") or "").strip()
         if prev_expected and prev_expected != expected_lcd:
             return False
-        current_last = self._last_candle_text(candles)
-        if not current_last or (prev_row.get("last_candle_time") or "") != current_last:
+        current_last = self._normalize_last_candle_time(self._last_candle_text(candles))
+        prev_last = self._normalize_last_candle_time(prev_row.get("last_candle_time"))
+        if not current_last or prev_last != current_last:
             return False
         prev_src = (prev_row.get("src") or "").strip().lower()
         if prev_status == "STALE_SKIPPED":
@@ -1116,8 +1142,8 @@ class UniverseService:
         prev_expected = (prev_row.get("expectedlcd") or "").strip()
         if prev_expected and prev_expected != expected_lcd:
             return False
-        current_last = self._last_candle_text(candles)
-        prev_last = (prev_row.get("last_candle_time") or "").strip()
+        current_last = self._normalize_last_candle_time(self._last_candle_text(candles))
+        prev_last = self._normalize_last_candle_time(prev_row.get("last_candle_time"))
         if current_last != prev_last:
             return False
         prev_src = (prev_row.get("src") or "").strip().lower()
@@ -1146,8 +1172,8 @@ class UniverseService:
         prev_expected = (prev_row.get("expectedlcd") or "").strip()
         if prev_expected and prev_expected != expected_lcd:
             return False
-        current_last = self._last_candle_text(candles)
-        prev_last = (prev_row.get("last_candle_time") or "").strip()
+        current_last = self._normalize_last_candle_time(self._last_candle_text(candles))
+        prev_last = self._normalize_last_candle_time(prev_row.get("last_candle_time"))
         return current_last == prev_last
 
     def _score_cache_index_row(
