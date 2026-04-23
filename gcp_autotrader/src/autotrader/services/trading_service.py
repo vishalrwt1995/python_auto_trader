@@ -15,6 +15,7 @@ from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.daily_bias import compute_daily_bias
 from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regime_strategy_multiplier
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
+from autotrader.domain.playbook import check_playbook
 from autotrader.domain.scoring import check_strategy_entry, check_swing_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
 from autotrader.services.order_service import OrderService
@@ -1023,6 +1024,19 @@ class TradingService:
                         _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind, regime=_brain_regime)
                     if not _strategy_ok:
                         policy_block_reason = _strategy_fail
+                    # M2 — Playbook hard-block (regime × edge × risk_mode).
+                    # Gated behind USE_PLAYBOOK_V1; when OFF we preserve the
+                    # old pass-through behaviour (see DESIGN.md §9 rollout).
+                    elif self.settings.runtime.use_playbook_v1:
+                        _risk_mode = brain_state.risk_mode if brain_state else "NORMAL"
+                        _pb_ok, _pb_reason = check_playbook(
+                            setup=w.strategy,
+                            direction=direction,
+                            regime=_brain_regime,
+                            risk_mode=_risk_mode,
+                        )
+                        if not _pb_ok:
+                            policy_block_reason = _pb_reason
                     # Portfolio sector concentration: don't pile into the same sector
                     elif w.sector and w.sector.upper() != "UNKNOWN":
                         _sym_sector = w.sector.upper()
