@@ -12,6 +12,7 @@ from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
+from autotrader.domain.attribution import build_row_from_position
 from autotrader.domain.risk import calc_round_trip_brokerage
 from autotrader.settings import AppSettings
 from autotrader.time_utils import now_ist_str, now_utc_iso, parse_any_ts, today_ist
@@ -32,6 +33,18 @@ def _bq_insert_with_retry(bq: BigQueryClient, trade_row: dict[str, Any], tag: st
                 time.sleep(wait)
             else:
                 logger.error("bq_trade_insert_failed_permanent tag=%s after %d attempts", tag, max_attempts)
+
+
+def _bq_insert_attribution_best_effort(bq: BigQueryClient, row: dict[str, Any], tag: str) -> None:
+    """Best-effort attribution insert — log and drop on failure.
+
+    Attribution is an analytic enrichment, not part of the trading path.
+    Never raise and never block the close.
+    """
+    try:
+        bq.insert_attribution(row)
+    except Exception:
+        logger.warning("bq_attribution_insert_failed tag=%s", tag, exc_info=True)
 
 
 def make_ref_id() -> str:
@@ -300,6 +313,22 @@ class OrderService:
             "signal_score": int(pos.get("signal_score") or 0),
         }
         _bq_insert_with_retry(self.bq, trade_row, position_tag)
+
+        # M6 — AttributionLog: per-trade WHY row for weekly review.
+        # Flag-gated; failure never blocks the close path.
+        if self.settings.runtime.use_attribution_log_v1:
+            try:
+                enriched = {
+                    **pos,
+                    "exit_price": round(exit_price, 2),
+                    "exit_reason": exit_reason,
+                    "exit_ts": exit_ts,
+                    "hold_minutes": hold_minutes,
+                }
+                attr_row = build_row_from_position(enriched).to_bq_row()
+                _bq_insert_attribution_best_effort(self.bq, attr_row, position_tag)
+            except Exception:
+                logger.warning("attribution_row_build_failed tag=%s", position_tag, exc_info=True)
 
     # ------------------------------------------------------------------ #
     # GTT SL management — CNC/delivery positions only

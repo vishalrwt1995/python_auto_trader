@@ -178,6 +178,10 @@ class RuntimeSettings:
     use_option_analytics_v1: bool = False
     use_news_signals_v1: bool = False
     use_portfolio_stream_v1: bool = False
+    # M6: Per-trade AttributionLog row + daily-metrics rollup. When False,
+    # the close-position path only writes the legacy `trades` row; the
+    # `attribution` table stays empty and the weekly review script no-ops.
+    use_attribution_log_v1: bool = False
 
 
 @dataclass(frozen=True)
@@ -347,6 +351,7 @@ class AppSettings:
                 use_option_analytics_v1=_env_bool("USE_OPTION_ANALYTICS_V1", False),
                 use_news_signals_v1=_env_bool("USE_NEWS_SIGNALS_V1", False),
                 use_portfolio_stream_v1=_env_bool("USE_PORTFOLIO_STREAM_V1", False),
+                use_attribution_log_v1=_env_bool("USE_ATTRIBUTION_LOG_V1", False),
             ),
             strategy=strategy,
             regime_thresholds=RegimeThresholds(
