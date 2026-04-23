@@ -179,6 +179,12 @@ class OrderService:
             "product": product,
             "wl_type": wl_type,
             "instrument_key": instrument_key,
+            # M4 channel: used by PortfolioBook to aggregate open-risk per
+            # channel (intraday/swing/positional/hedge). Derived from
+            # product+wl_type at entry time so the book never needs to
+            # re-derive it. "positional" + "hedge" are reserved for future
+            # expansion — current scanner emits only intraday + swing.
+            "channel": "swing" if str(wl_type or "").strip().lower() == "swing" else "intraday",
             # Mode stickiness — record whether this position was opened in
             # paper or live. Once written, exit/GTT paths must honour the
             # position's recorded mode rather than the current runtime flag.

@@ -243,6 +243,59 @@ class FirestoreStateStore:
             pass
         return round(total, 2)
 
+    def get_realized_pnl_since(self, start_date_iso: str) -> float:
+        """M4 — sum realized PnL of positions closed on/after start_date_iso.
+
+        Used by the PortfolioBook to compute rolling weekly / monthly DD.
+        `start_date_iso` is an ISO date string (YYYY-MM-DD). Any CLOSED
+        position whose `exit_ts` lexicographically >= `start_date_iso`
+        contributes. Matches the cheap date-prefix comparison used by
+        `get_today_realized_pnl`.
+
+        Best-effort: a Firestore outage returns 0.0 rather than raising,
+        consistent with the existing rolling-pnl helpers. Callers that
+        need fail-closed semantics should wrap this themselves.
+        """
+        total = 0.0
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                exit_ts = str(row.get("exit_ts", "") or "")
+                if not exit_ts:
+                    continue
+                if exit_ts[:10] >= start_date_iso:
+                    total += float(row.get("pnl", 0) or 0)
+        except Exception:
+            pass
+        return round(total, 2)
+
+    def get_open_risk_by_channel(self) -> dict[str, float]:
+        """M4 — aggregate open R-at-risk per channel (intraday/swing/positional/hedge).
+
+        "Open risk" per position = max_loss (qty × sl_distance). Each
+        position doc carries a `channel` field (defaults to 'intraday'
+        for legacy rows that don't have it yet). Returns a dict keyed
+        by channel name; missing channels map to 0.0.
+        """
+        out: dict[str, float] = {}
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "OPEN":
+                    continue
+                ch = str(row.get("channel", "") or "").strip().lower()
+                if not ch:
+                    # Back-compat: swing positions have is_swing=True, rest
+                    # are intraday. Positional + hedge channels are new.
+                    ch = "swing" if bool(row.get("is_swing", False)) else "intraday"
+                risk = abs(float(row.get("max_loss", 0) or 0))
+                out[ch] = out.get(ch, 0.0) + risk
+        except Exception:
+            return {}
+        return {k: round(v, 2) for k, v in out.items()}
+
     # ------------------------------------------------------------------ #
     # Kill-switch (M0) — fail-closed. Any read error is treated as ACTIVE
     # so a Firestore outage halts trading rather than letting it run blind.

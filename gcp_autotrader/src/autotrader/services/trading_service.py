@@ -17,6 +17,7 @@ from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regim
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
 from autotrader.domain.expected_edge import evaluate as evaluate_expected_edge
 from autotrader.domain.playbook import check_playbook
+from autotrader.domain.portfolio_book import build_book as build_portfolio_book, check_can_open as portfolio_check_can_open
 from autotrader.domain.scoring import check_strategy_entry, check_swing_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
 from autotrader.services.order_service import OrderService
@@ -513,6 +514,38 @@ class TradingService:
                     "max_trades_day": int(cfg.max_trades_day),
                 }
 
+            # ── M4: PortfolioBook + DD governors ──────────────────────────
+            # Build once per scan cycle so downstream per-symbol checks use a
+            # consistent snapshot. Only when USE_PORTFOLIO_BOOK_V1 is on;
+            # otherwise the channel/DD gate is skipped entirely and the
+            # existing max_daily_loss logic remains the sole defense.
+            _portfolio_book = None
+            if self.settings.runtime.use_portfolio_book_v1:
+                try:
+                    from datetime import date as _date_cls, timedelta as _td
+                    _today_d = _date_cls.fromisoformat(_today_iso)
+                    _week_start = (_today_d - _td(days=7)).isoformat()
+                    _month_start = (_today_d - _td(days=30)).isoformat()
+                    _weekly_pnl = self.state.get_realized_pnl_since(_week_start)
+                    _monthly_pnl = self.state.get_realized_pnl_since(_month_start)
+                    _open_risk = self.state.get_open_risk_by_channel()
+                    _portfolio_book = build_portfolio_book(
+                        capital=float(cfg.capital or 0.0),
+                        open_risk_by_channel=_open_risk,
+                        daily_pnl=_today_pnl,
+                        weekly_pnl=_weekly_pnl,
+                        monthly_pnl=_monthly_pnl,
+                    )
+                except Exception:
+                    # Fail-closed on book construction: if we can't read the
+                    # inputs we shouldn't silently fall back to unlimited.
+                    logger.exception("portfolio_book_build_failed — failing closed")
+                    self.log_sink.action(
+                        "TradingService", "run_scan_once", "SKIP",
+                        "portfolio_book_build_failed_fail_closed",
+                    )
+                    return {"skipped": "portfolio_book_build_failed"}
+
             # Read watchlist: Firestore is primary, Sheets is fallback
             watchlist = self._read_watchlist_with_fallback()
             if wl_filter in {"intraday", "swing"}:
@@ -818,6 +851,33 @@ class TradingService:
                     pos = calc_swing_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult if _atr_mult != self.settings.strategy.atr_sl_mult else None)
                 else:
                     pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult, rr_override=_rr_override)
+
+                # M4 — PortfolioBook gate: channel-budget + DD halts are
+                # hard-block, daily-throttle halves size. Evaluated AFTER
+                # position sizing so we know the exact risk_amount the
+                # trade would commit. Gated behind USE_PORTFOLIO_BOOK_V1.
+                if _portfolio_book is not None and direction != "HOLD":
+                    _channel = "swing" if _is_swing else "intraday"
+                    _risk_amt = abs(float(pos.max_loss or 0.0))
+                    _book_decision = portfolio_check_can_open(
+                        _portfolio_book, channel=_channel, risk_amount=_risk_amt,
+                    )
+                    if not _book_decision.allowed:
+                        policy_block_reason = _book_decision.reason
+                    elif _book_decision.size_multiplier < 1.0:
+                        # Soft throttle — halve qty. Minimum 1 share so
+                        # we don't round to zero on small accounts.
+                        _throttled_qty = max(1, int(pos.qty * _book_decision.size_multiplier))
+                        if _throttled_qty < pos.qty:
+                            pos.qty = _throttled_qty
+                            pos.max_loss = round(abs(pos.entry_price - pos.sl_price) * _throttled_qty, 2)
+                            pos.max_gain = round(abs(pos.target - pos.entry_price) * _throttled_qty, 2)
+                            self.log_sink.action(
+                                "TradingService", "run_scan_once", "THROTTLE",
+                                "portfolio_daily_dd_throttle",
+                                {"symbol": w.symbol, "new_qty": _throttled_qty,
+                                 "daily_dd_pct": round(_portfolio_book.dd.daily_dd_pct, 4)},
+                            )
 
                 # ── Dynamic min_signal_score (Item 3) ────────────────────────
                 # adjust_signal() already penalises adjusted_score by 0.60–0.82×
