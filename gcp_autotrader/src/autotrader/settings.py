@@ -172,6 +172,12 @@ class RuntimeSettings:
     # M4: PortfolioBook channel budgets + DD governors. When False, the
     # legacy max_positions / risk_per_trade gates apply.
     use_portfolio_book_v1: bool = False
+    # M5: Upstox P0 expansion (option analytics poll, news signal ingest,
+    # portfolio-stream WS). Independently flagged so each primitive can
+    # roll out separately during the canary.
+    use_option_analytics_v1: bool = False
+    use_news_signals_v1: bool = False
+    use_portfolio_stream_v1: bool = False
 
 
 @dataclass(frozen=True)
@@ -338,6 +344,9 @@ class AppSettings:
                 use_playbook_v1=_env_bool("USE_PLAYBOOK_V1", False),
                 use_expected_edge_r_v1=_env_bool("USE_EXPECTED_EDGE_R_V1", False),
                 use_portfolio_book_v1=_env_bool("USE_PORTFOLIO_BOOK_V1", False),
+                use_option_analytics_v1=_env_bool("USE_OPTION_ANALYTICS_V1", False),
+                use_news_signals_v1=_env_bool("USE_NEWS_SIGNALS_V1", False),
+                use_portfolio_stream_v1=_env_bool("USE_PORTFOLIO_STREAM_V1", False),
             ),
             strategy=strategy,
             regime_thresholds=RegimeThresholds(

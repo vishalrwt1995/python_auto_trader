@@ -118,7 +118,22 @@ class WsMonitorService:
             self._use_exit_fsm_v1 = False
         from autotrader.domain.exit_fsm import FsmConfig
         self._fsm_cfg = FsmConfig()
-        logger.info("ws_monitor_init use_exit_fsm_v1=%s", self._use_exit_fsm_v1)
+        # M5: Portfolio-stream flag — when ON, the monitor will subscribe to
+        # Upstox portfolio-update WS topic so fills/cancels from other
+        # sessions (or the broker's own OCO cancelations on GTT fires) are
+        # reflected in Firestore without waiting for the next scan cycle.
+        # Left as a stub-hook here: the actual subscribe call is added
+        # once the Upstox WS client exposes a portfolio_topic method.
+        try:
+            from autotrader.container import get_container
+            _s = get_container().settings
+            self._use_portfolio_stream_v1 = bool(getattr(_s.runtime, "use_portfolio_stream_v1", False))
+        except Exception:
+            self._use_portfolio_stream_v1 = False
+        logger.info(
+            "ws_monitor_init use_exit_fsm_v1=%s use_portfolio_stream_v1=%s",
+            self._use_exit_fsm_v1, self._use_portfolio_stream_v1,
+        )
 
     # ------------------------------------------------------------------ #
     # Entry point
