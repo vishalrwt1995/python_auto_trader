@@ -179,6 +179,25 @@ class OrderService:
             "product": product,
             "wl_type": wl_type,
             "instrument_key": instrument_key,
+            # Mode stickiness — record whether this position was opened in
+            # paper or live. Once written, exit/GTT paths must honour the
+            # position's recorded mode rather than the current runtime flag.
+            # This prevents a paper→live flip mid-day from routing a fake
+            # paper entry's exit through the real broker (and vice versa).
+            "paper": bool(self.settings.runtime.paper_trade),
+            # M0.6 MFE/MAE — updated live by ws_monitor on each tick. Stored
+            # as R-multiples (favorable excursion = how far past entry we got
+            # before reversing; adverse = worst drawdown before exit). Used by
+            # M6 AttributionLog + backtest harness to score edge quality. Also
+            # breakeven-fire diagnostics: breakeven_sl_fired=True + trigger_mfe
+            # lets us confirm the FSM actually moved the stop where expected.
+            "max_favorable_excursion_r": 0.0,
+            "max_adverse_excursion_r": 0.0,
+            "max_favorable_excursion_price": round(entry_price, 2),
+            "max_adverse_excursion_price": round(entry_price, 2),
+            "breakeven_sl_fired": False,
+            "breakeven_sl_trigger_mfe_r": 0.0,
+            "breakeven_sl_trigger_ts": "",
         }
         self.state.save_position(position_tag, doc)
         if self.pubsub:
@@ -235,6 +254,12 @@ class OrderService:
                 "hold_minutes": hold_minutes,
             },
         )
+        # M0.5 paper GTT cleanup — remove the paper_gtts row on close so the
+        # ws_monitor reconciler doesn't keep polling a closed position.
+        try:
+            self.state.delete_paper_gtt(position_tag)
+        except Exception:
+            logger.debug("paper_gtt_delete_failed_on_close tag=%s", position_tag, exc_info=True)
         # Publish position_closed event
         if self.pubsub:
             closed_doc = {**(self.state.get_position(position_tag) or {}), "exit_price": round(exit_price, 2), "exit_reason": exit_reason}
@@ -283,36 +308,112 @@ class OrderService:
         qty: int,
         sl_price: float,
     ) -> str | None:
-        """Place a GTT SL order after a swing/CNC entry fills. Returns gtt_id or None."""
-        if self.settings.runtime.paper_trade or not instrument_key:
+        """Place a GTT SL order after a swing/CNC entry fills. Returns gtt_id or None.
+
+        M0.4 (paper path): paper swings now write a Firestore paper_gtts row
+        backed by ws_monitor polling, so paper has the same SL-order semantics
+        as live (was: no SL at all; paper relied on ws_monitor per-tick price
+        compare with no fail-over if monitor crashed).
+        """
+        if not instrument_key:
             return None
+        # Mode stickiness: look up the position's recorded mode first so a
+        # runtime flip doesn't switch the SL routing mid-flight. New entries
+        # don't have a row yet — fall back to runtime for those.
+        pos = self.state.get_position(position_tag) or {}
+        _pos_paper = bool(pos.get("paper", self.settings.runtime.paper_trade))
+        if _pos_paper:
+            # M0.5 paper GTT — write a Firestore doc polled by ws_monitor.
+            try:
+                self.state.save_paper_gtt(position_tag, {
+                    "instrument_key": instrument_key,
+                    "symbol": str(pos.get("symbol") or ""),
+                    "side": side.upper(),
+                    "qty": int(qty),
+                    "trigger_price": float(sl_price),
+                    "exit_side": "SELL" if side.upper() == "BUY" else "BUY",
+                    "created_at": now_ist_str(),
+                    "source": "entry",
+                })
+                logger.info("paper_gtt_saved tag=%s sl=%.2f", position_tag, sl_price)
+                return f"paper:{position_tag}"
+            except Exception:
+                logger.exception("paper_gtt_save_failed tag=%s", position_tag)
+                return None
         exit_side = "SELL" if side.upper() == "BUY" else "BUY"
-        try:
-            resp = self.upstox.place_gtt_order(
-                instrument_token=instrument_key,
-                transaction_type=exit_side,
-                quantity=qty,
-                trigger_price=sl_price,
-                tag=f"sl_{position_tag[-8:]}",
-            )
-            # Response shape: {"id": "..."} or nested under "data"
-            gtt_id = str(
-                resp.get("id") or (resp.get("data") or {}).get("id") or ""
-            ).strip()
-            if gtt_id:
-                self.state.update_position(position_tag, {"gtt_sl_id": gtt_id})
-                logger.info("gtt_sl_placed tag=%s gtt_id=%s sl=%.2f", position_tag, gtt_id, sl_price)
-            return gtt_id or None
-        except Exception:
-            logger.exception("gtt_sl_place_failed tag=%s sl=%.2f", position_tag, sl_price)
-            return None
+        return self._place_live_gtt_with_retries(
+            position_tag=position_tag,
+            instrument_key=instrument_key,
+            exit_side=exit_side,
+            qty=qty,
+            sl_price=sl_price,
+        )
+
+    def _place_live_gtt_with_retries(
+        self,
+        *,
+        position_tag: str,
+        instrument_key: str,
+        exit_side: str,
+        qty: int,
+        sl_price: float,
+        max_attempts: int = 3,
+    ) -> str | None:
+        """Place live GTT SL with bounded retries. Returns gtt_id or None on all failures."""
+        import time as _time
+        last_exc: Exception | None = None
+        for _attempt in range(max_attempts):
+            try:
+                resp = self.upstox.place_gtt_order(
+                    instrument_token=instrument_key,
+                    transaction_type=exit_side,
+                    quantity=qty,
+                    trigger_price=sl_price,
+                    tag=f"sl_{position_tag[-8:]}",
+                )
+                gtt_id = str(
+                    resp.get("id") or (resp.get("data") or {}).get("id") or ""
+                ).strip()
+                if gtt_id:
+                    self.state.update_position(position_tag, {"gtt_sl_id": gtt_id})
+                    logger.info(
+                        "gtt_sl_placed tag=%s gtt_id=%s sl=%.2f attempt=%d",
+                        position_tag, gtt_id, sl_price, _attempt + 1,
+                    )
+                    return gtt_id
+                logger.warning(
+                    "gtt_sl_empty_response tag=%s attempt=%d resp=%s",
+                    position_tag, _attempt + 1, resp,
+                )
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "gtt_sl_place_attempt_failed tag=%s sl=%.2f attempt=%d",
+                    position_tag, sl_price, _attempt + 1, exc_info=True,
+                )
+            if _attempt < max_attempts - 1:
+                _time.sleep(0.5 * (2 ** _attempt))  # 0.5, 1.0s backoff
+        logger.error(
+            "gtt_sl_place_failed_all_attempts tag=%s sl=%.2f last_exc=%s",
+            position_tag, sl_price, last_exc,
+        )
+        return None
 
     def _cancel_gtt_sl(self, position_tag: str) -> None:
         """Cancel the GTT SL order stored on a position (if any). Idempotent."""
-        if self.settings.runtime.paper_trade:
-            return
         pos = self.state.get_position(position_tag)
         if not pos:
+            return
+        # Mode stickiness: honour the position's recorded mode.
+        _pos_paper = bool(pos.get("paper", self.settings.runtime.paper_trade))
+        if _pos_paper:
+            # Paper: clean up the paper_gtts Firestore row.
+            try:
+                self.state.delete_paper_gtt(position_tag)
+            except Exception:
+                logger.debug(
+                    "paper_gtt_cancel_failed tag=%s", position_tag, exc_info=True,
+                )
             return
         gtt_id = str(pos.get("gtt_sl_id") or "").strip()
         if not gtt_id:
@@ -334,10 +435,10 @@ class OrderService:
         """Cancel existing GTT SL and place a new one at the updated SL price.
 
         Called by SwingReconciliationService when trailing SL ratchets up.
-        Returns new gtt_id or None if paper trade / error.
+        Returns new gtt_id or None on error. In paper mode this rewrites the
+        paper_gtts Firestore row so ws_monitor's reconciler picks up the new
+        trigger on its next 60s poll.
         """
-        if self.settings.runtime.paper_trade:
-            return None
         self._cancel_gtt_sl(position_tag)
         pos = self.state.get_position(position_tag)
         if not pos:
@@ -506,6 +607,18 @@ class OrderService:
                 "OPEN", pos_tag, "",
             ])
             self.state.mark_fired_today(symbol, side)
+            # M0.5 paper GTT — write a paper_gtts row for every paper entry
+            # (intraday + swing) so ws_monitor's 60s reconciler can fire the
+            # stop if the tick stream stalls. Swing paper previously had no
+            # SL backstop at all — a ws_monitor crash meant unbounded loss
+            # on open paper swings until manual intervention.
+            self._place_gtt_sl(
+                position_tag=pos_tag,
+                instrument_key=instrument_key,
+                side=side,
+                qty=qty,
+                sl_price=sl_price,
+            )
             logger.info(
                 "paper_order symbol=%s side=%s qty=%d entry=%.2f sl=%.2f target=%.2f tag=%s wl_type=%s",
                 symbol, side, qty, entry_price, sl_price, target, pos_tag, wl_type,
@@ -571,15 +684,40 @@ class OrderService:
                 round(fill_price, 2), 0.0, round(atr, 4),
                 "OPEN", pos_tag, "",
             ])
-            # Place GTT SL for CNC/delivery positions — broker-level SL protection
+            # Place GTT SL for CNC/delivery positions — broker-level SL protection.
+            # Live-only path: paper swings already got a paper_gtts row above.
             if is_swing:
-                self._place_gtt_sl(
+                _gtt_id = self._place_gtt_sl(
                     position_tag=pos_tag,
                     instrument_key=token,
                     side=side,
                     qty=qty,
                     sl_price=sl_price,
                 )
+                # M0.4 assertion: a missing GTT after all retries means the
+                # position has no broker-level SL. Flag needs_manual_gtt=True
+                # so the premarket reconcile + dashboard surface it, and
+                # trigger an immediate market exit since holding overnight
+                # without an SL is strictly worse than paying the round-trip.
+                if not _gtt_id:
+                    logger.critical(
+                        "live_swing_no_gtt_sl_emergency_exit tag=%s sl=%.2f",
+                        pos_tag, sl_price,
+                    )
+                    self.state.update_position(pos_tag, {
+                        "needs_manual_gtt": True,
+                        "gtt_place_failed_at": now_ist_str(),
+                    })
+                    try:
+                        self.place_exit_order(
+                            position_tag=pos_tag,
+                            instrument_key=token,
+                            exit_reason="EMERGENCY_NO_GTT",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "emergency_exit_after_gtt_fail_failed tag=%s", pos_tag,
+                        )
             self.state.mark_fired_today(symbol, side)
             # Save order record to Firestore
             self.state.save_order(ref_id, {
@@ -648,7 +786,15 @@ class OrderService:
         side = str(pos.get("side") or "BUY").upper()
         qty = int(pos.get("qty") or 0)
         exit_side = "SELL" if side == "BUY" else "BUY"
-        paper = self.settings.runtime.paper_trade
+        # Mode stickiness: use the position's recorded mode, falling back to
+        # the runtime flag for legacy positions that predate the field.
+        paper = bool(pos.get("paper", self.settings.runtime.paper_trade))
+        if paper != bool(self.settings.runtime.paper_trade):
+            logger.warning(
+                "exit_mode_override tag=%s pos_paper=%s runtime_paper=%s — "
+                "honouring position's recorded mode",
+                position_tag, paper, self.settings.runtime.paper_trade,
+            )
 
         if paper:
             # Paper exit: use current LTP as proxy
@@ -726,23 +872,68 @@ class OrderService:
             snap = probe.get("snapshot") or {}
             fill_price = float(snap.get("avg_fill_price") or 0)
         else:
-            # Fallback: get LTP as approximate exit
-            try:
-                fill_price = float(self.upstox.get_quote(instrument_key).ltp or 0)
-            except Exception:
-                logger.warning("live_exit_quote_failed tag=%s ik=%s", position_tag, instrument_key, exc_info=True)
-                fill_price = 0.0
+            # M0.3 exit-price fallback chain. The broker fill probe timed out;
+            # we need a best-effort exit price to book P&L. Old code used one
+            # get_quote + entry_price fallback, which silently booked ₹0 P&L
+            # trades whenever the quote endpoint hiccupped at exit time.
+            # New chain:
+            #   1) Retry get_quote up to 3x with 500ms backoff (covers
+            #      transient 429s and sub-second network blips).
+            #   2) Fall back to the ws_monitor's last-known tick stored in
+            #      Firestore collection `ws_last_tick/{instrument_key}`.
+            #   3) Give up: mark position EXIT_FAILED with reason
+            #      `<reason>_EXIT_PRICE_UNKNOWN` and leave status=OPEN so the
+            #      next scan cycle retries. Never fall back to entry_price —
+            #      writing a ₹0 P&L row corrupts daily-PnL aggregation and
+            #      silently hides the loss.
+            import time as _time
+            for _attempt in range(3):
+                try:
+                    fill_price = float(self.upstox.get_quote(instrument_key).ltp or 0)
+                    if fill_price > 0:
+                        break
+                except Exception:
+                    logger.warning(
+                        "live_exit_quote_retry tag=%s ik=%s attempt=%d",
+                        position_tag, instrument_key, _attempt + 1,
+                    )
+                if _attempt < 2:
+                    _time.sleep(0.5)
+            if fill_price <= 0:
+                # Fallback 2: ws_monitor last-tick cache
+                try:
+                    _tick = self.state.get_json("ws_last_tick", instrument_key) or {}
+                    _ws_ltp = float(_tick.get("ltp") or 0)
+                    if _ws_ltp > 0:
+                        fill_price = _ws_ltp
+                        logger.info(
+                            "live_exit_price_from_ws_tick tag=%s ltp=%.2f age_s=%s",
+                            position_tag, fill_price, _tick.get("age_s", "?"),
+                        )
+                except Exception:
+                    logger.debug("ws_last_tick_fetch_failed", exc_info=True)
 
-        # Last-resort: never write exit_price=0 to BQ (corrupts P&L). Use entry_price
-        # so the trade books as ₹0 P&L instead of (entry - 0) × qty disaster.
         if fill_price <= 0:
-            entry_fallback = float(pos.get("entry_price") or 0)
+            # M0.3: abort-and-retry rather than write a corrupt ₹0 P&L row.
+            # The position stays OPEN; exit_reason is stamped with
+            # EXIT_PRICE_UNKNOWN so the next scan can retry. An operator alert
+            # is raised via LogSink so ws_monitor or a human can intervene.
             logger.error(
-                "live_exit_no_fill_price tag=%s order_id=%s — falling back to entry_price=%.2f",
-                position_tag, order_id, entry_fallback,
+                "live_exit_price_unknown tag=%s order_id=%s — aborting close, position stays OPEN",
+                position_tag, order_id,
             )
-            fill_price = entry_fallback
-            exit_reason = f"{exit_reason}_NO_FILL_PRICE"
+            self.state.update_position(position_tag, {
+                "last_exit_attempt_order_id": order_id,
+                "last_exit_attempt_reason": exit_reason,
+                "last_exit_attempt_ts": now_ist_str(),
+                "exit_price_unknown_count": int(pos.get("exit_price_unknown_count", 0)) + 1,
+            })
+            return {
+                "error": "exit_price_unknown",
+                "order_id": order_id,
+                "tag": position_tag,
+                "exit_reason": f"{exit_reason}_EXIT_PRICE_UNKNOWN",
+            }
 
         self._close_position_firestore(
             position_tag=position_tag,
@@ -788,7 +979,8 @@ class OrderService:
         remaining_qty = current_qty - exit_qty
         exit_side = "SELL" if side == "BUY" else "BUY"
         entry_price = float(pos.get("entry_price") or 0)
-        paper = self.settings.runtime.paper_trade
+        # Mode stickiness: honour the position's recorded mode.
+        paper = bool(pos.get("paper", self.settings.runtime.paper_trade))
 
         if paper:
             try:

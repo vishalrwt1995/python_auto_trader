@@ -244,6 +244,59 @@ class FirestoreStateStore:
         return round(total, 2)
 
     # ------------------------------------------------------------------ #
+    # Kill-switch (M0) — fail-closed. Any read error is treated as ACTIVE
+    # so a Firestore outage halts trading rather than letting it run blind.
+    # ------------------------------------------------------------------ #
+
+    def get_kill_switch(self) -> tuple[bool, str]:
+        """Return (active, reason). Fail-closed: read errors => (True, 'fail_closed').
+
+        Doc shape: control/kill_switch = {active: bool, reason: str, set_by: str, set_at: ts}.
+        """
+        try:
+            doc = self.get_json("control", "kill_switch") or {}
+            active = bool(doc.get("active", False))
+            reason = str(doc.get("reason", "") or "")
+            return active, reason
+        except Exception as exc:
+            return True, f"fail_closed:{exc.__class__.__name__}"
+
+    def set_kill_switch(self, active: bool, reason: str = "", set_by: str = "system") -> None:
+        self.set_json(
+            "control",
+            "kill_switch",
+            {"active": bool(active), "reason": reason, "set_by": set_by},
+        )
+
+    # ------------------------------------------------------------------ #
+    # Paper GTTs (M0.5) — Firestore-backed stop orders for paper mode.
+    # Polled by ws_monitor + a 60s cron so paper has real SL protection
+    # matching live-mode GTT behaviour.
+    # ------------------------------------------------------------------ #
+
+    def save_paper_gtt(self, position_tag: str, payload: dict[str, Any]) -> None:
+        data = dict(payload)
+        data["position_tag"] = position_tag
+        data["status"] = data.get("status", "ACTIVE")
+        self.set_json("paper_gtts", position_tag, data)
+
+    def delete_paper_gtt(self, position_tag: str) -> None:
+        self.delete("paper_gtts", position_tag)
+
+    def get_paper_gtt(self, position_tag: str) -> dict[str, Any] | None:
+        return self.get_json("paper_gtts", position_tag)
+
+    def list_paper_gtts(self, status: str = "ACTIVE", limit: int = 500) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for d in self._db().collection("paper_gtts").limit(limit).stream():
+            row = d.to_dict() or {}
+            if status and str(row.get("status", "")).upper() != status.upper():
+                continue
+            row["_id"] = d.id
+            rows.append(row)
+        return rows
+
+    # ------------------------------------------------------------------ #
     # Orders log
     # ------------------------------------------------------------------ #
 

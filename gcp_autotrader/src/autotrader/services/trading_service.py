@@ -297,6 +297,18 @@ class TradingService:
             self.log_sink.flush_all()
             return {"skipped": "lock_busy"}
         try:
+            # ── M0.1 Kill-switch (fail-closed) ────────────────────────────
+            # control/kill_switch.active=True halts all new entries. Any
+            # Firestore read error treats as ACTIVE so a DB outage stops
+            # us rather than letting us trade blind.
+            _ks_active, _ks_reason = self.state.get_kill_switch()
+            if _ks_active:
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP", "kill_switch_active",
+                    {"reason": _ks_reason},
+                )
+                return {"skipped": "kill_switch_active", "reason": _ks_reason}
+
             if not force and not is_market_open_ist():
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "market closed")
                 return {"skipped": "market_closed"}
@@ -420,10 +432,20 @@ class TradingService:
             # the hot path fast.
             _today_pnl = 0.0
             _pnl_block_reason = ""
+            # M0.2 fail-closed: a read failure on the daily-PnL gate is treated
+            # as a SKIP, not a silent continue. Previous behaviour (default to
+            # 0.0 and proceed) meant a Firestore hiccup bypassed max_daily_loss
+            # entirely. One missed 3-min scan is strictly safer than one
+            # unchecked blow-up.
             try:
                 _today_pnl = self.state.get_today_realized_pnl(now_ist_str()[:10])
             except Exception:
-                logger.warning("daily_pnl_check_failed — proceeding without limit", exc_info=True)
+                logger.exception("daily_pnl_check_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "daily_pnl_read_failed_fail_closed",
+                )
+                return {"skipped": "daily_pnl_read_failed"}
             # ── Runtime settings overrides (Firestore config/{key}) ───────
             # Allows live tuning of thresholds without redeploy.
             # Supported: min_signal_score, max_positions, risk_per_trade,
@@ -467,11 +489,17 @@ class TradingService:
             # the scan entirely, since every candidate downstream would be
             # blocked anyway and there is no partial-qualification path.
             _today_iso = now_ist_str()[:10]
+            # M0.2 fail-closed: if we cannot read the day's trade count we
+            # cannot enforce max_trades_day — SKIP rather than assume 0.
             try:
                 _today_trade_count = self.state.get_today_trade_count(_today_iso)
             except Exception:
-                logger.warning("today_trade_count_failed — proceeding without cap", exc_info=True)
-                _today_trade_count = 0
+                logger.exception("today_trade_count_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "trade_count_read_failed_fail_closed",
+                )
+                return {"skipped": "trade_count_read_failed"}
             if _today_trade_count >= int(cfg.max_trades_day):
                 self.log_sink.action(
                     "TradingService", "run_scan_once", "SKIP", "max_trades_day_hit",
@@ -515,6 +543,11 @@ class TradingService:
             # positions 2 days before/after results when gap risk is maximum.
             _earnings_blackout: dict[str, str] = {}
             _blackout_days = 2
+            # M0.2 fail-closed: if we cannot read the blackout document we
+            # cannot guarantee we're not about to enter into earnings — SKIP.
+            # Absent-doc (empty dict) is a legitimate "no blackout" state and
+            # handled by the `or {}` guard, so only true read errors reach the
+            # except branch.
             try:
                 _eb_cfg = self.state.get_json("config", "earnings_blackout") or {}
                 _earnings_blackout = {
@@ -522,12 +555,12 @@ class TradingService:
                 }
                 _blackout_days = int(_eb_cfg.get("blackout_days", 2))
             except Exception:
-                # Batch 1.4 (2026-04-22): log at DEBUG so a broken blackout
-                # document is diagnosable. Silent except-pass previously hid
-                # the fact that earnings blackout was never taking effect
-                # (earnings_blackout document absent → entries fire through
-                # earnings with no protection and no visible error).
-                logger.debug("earnings_blackout_read_failed", exc_info=True)
+                logger.exception("earnings_blackout_read_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "earnings_blackout_read_failed_fail_closed",
+                )
+                return {"skipped": "earnings_blackout_read_failed"}
 
             # Count existing swing positions for separate cap
             _open_swing_count = sum(
@@ -541,6 +574,9 @@ class TradingService:
             # from re-staging the same trade on the 3-min cycle immediately
             # after an SL/target/timeout. See settings comment for rationale.
             _recent_exits: dict[str, str] = {}
+            # M0.2 fail-closed: re-entry cooldown is a safety cap. If we cannot
+            # read it we cannot enforce it — SKIP rather than silently allow
+            # re-entries into freshly-stopped names.
             try:
                 _recent_exits = self.state.get_recently_exited_symbols(
                     within_minutes=int(cfg.reentry_cooldown_minutes),
@@ -552,7 +588,12 @@ class TradingService:
                         ",".join(sorted(_recent_exits.keys())[:10]),
                     )
             except Exception:
-                logger.debug("reentry_cooldown_fetch_failed", exc_info=True)
+                logger.exception("reentry_cooldown_fetch_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "reentry_cooldown_read_failed_fail_closed",
+                )
+                return {"skipped": "reentry_cooldown_read_failed"}
 
             symbol_set = {str(w.symbol).strip().upper() for w in subset if str(w.symbol).strip()}
             key_by_symbol: dict[str, str] = {}
