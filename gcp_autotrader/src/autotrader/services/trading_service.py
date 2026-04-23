@@ -996,14 +996,20 @@ class TradingService:
                         and _portfolio_strategies.get(str(w.strategy).strip().upper(), 0) >= _MAX_SAME_STRATEGY
                     ):
                         policy_block_reason = "portfolio_strategy_concentrated"
-                    # Earnings blackout: skip symbols ±2 days around earnings results.
+                    # Earnings blackout: skip symbols ±N trading days around results.
+                    # Batch 6.2 (2026-04-23): switched from calendar-days to
+                    # trading-days via time_utils.trading_days_between. Friday-
+                    # result + 2-cal-day blackout was exhausting the budget on
+                    # Sat/Sun/Mon and leaving Tue — a real trading day post-
+                    # results — unprotected. Trading-days math fixes that.
                     elif str(w.symbol).strip().upper() in _earnings_blackout:
                         _result_date_str = _earnings_blackout[str(w.symbol).strip().upper()]
                         try:
                             from datetime import date as _date_cls
+                            from autotrader.time_utils import trading_days_between
                             _result_date = _date_cls.fromisoformat(_result_date_str)
-                            _days_delta = abs((_result_date - _date_cls.today()).days)
-                            if _days_delta <= _blackout_days:
+                            _tdays_delta = trading_days_between(_result_date, _date_cls.today())
+                            if _tdays_delta <= _blackout_days:
                                 policy_block_reason = f"earnings_blackout_{_result_date_str}"
                         except Exception:
                             pass  # malformed date — don't block

@@ -413,7 +413,13 @@ class WsMonitorService:
         # Stage 2 at 1.5:1 R:R (30% of position): books more while trade runs.
         # Remaining 30%: trails via the standard trailing-stop logic below.
         # Only active on intraday (bracket handles the full qty at broker level for live).
-        # Skipped if sl_dist is unknown or original_qty is too small to split.
+        #
+        # Batch 6.4 (2026-04-23): qty==2 now gets a degraded 1-stage partial
+        # (50% off at 1R, SL to breakeven) instead of being skipped entirely.
+        # qty<3 covers a meaningful share of low-priced / tight-SL entries —
+        # leaving them with zero partial logic meant a perfectly-timed 1R
+        # touch would round-trip to SL with no booking. qty==1 still gets
+        # nothing (no way to split a 1-share position).
         if sl_dist > 0 and original_qty >= 3 and not is_swing:
             _stage1_price = (entry_price + sl_dist) if side == "BUY" else (entry_price - sl_dist)
             _stage2_price = (entry_price + sl_dist * 1.5) if side == "BUY" else (entry_price - sl_dist * 1.5)
@@ -452,6 +458,35 @@ class WsMonitorService:
                     logger.warning("partial_persist_failed tag=%s err=%s", tag, _e)
                 logger.info("partial_exit_stage2 tag=%s qty=%d ltp=%.2f", tag, _exit_qty_2, ltp)
                 asyncio.create_task(self._do_partial_exit(tag, instrument_key, _exit_qty_2, "PARTIAL_1_5R"))
+
+        # Batch 6.4: degraded 1-stage partial for qty==2 positions.
+        # Book 1 share at 1R, keep 1 share running with SL at breakeven. Same
+        # risk-reduction intent as the full 3-stage path, just quantised to the
+        # 2-share grid.
+        elif sl_dist > 0 and original_qty == 2 and not is_swing:
+            _stage1_price = (entry_price + sl_dist) if side == "BUY" else (entry_price - sl_dist)
+            _stage1_hit = (side == "BUY" and ltp >= _stage1_price) or (side == "SELL" and ltp <= _stage1_price)
+            if _stage1_hit and not pos.get("partial_exit_1_done"):
+                _exit_qty_1 = 1  # half of 2
+                pos["partial_exit_1_done"] = True
+                # Move SL to breakeven immediately on the single-stage trigger.
+                _be_buffer = atr * 0.1 if atr > 0 else 0
+                _new_be_sl = round(entry_price + _be_buffer, 2) if side == "BUY" else round(entry_price - _be_buffer, 2)
+                if (side == "BUY" and _new_be_sl > sl) or (side == "SELL" and (_new_be_sl < sl or sl == 0)):
+                    pos["sl_price"] = _new_be_sl
+                    pos["sl_moved"] = True
+                    sl = _new_be_sl
+                try:
+                    self.state.update_position(tag, {
+                        "partial_exit_1_done": True,
+                        "sl_price": sl,
+                        "sl_moved": True,
+                    })
+                    self._sl_last_persist[tag] = time.time()
+                except Exception as _e:
+                    logger.warning("partial_persist_failed tag=%s err=%s", tag, _e)
+                logger.info("partial_exit_qty2 tag=%s qty=%d ltp=%.2f sl_moved_to=%.2f", tag, _exit_qty_1, ltp, sl)
+                asyncio.create_task(self._do_partial_exit(tag, instrument_key, _exit_qty_1, "PARTIAL_1R_QTY2"))
 
         # ── Trailing stop: once past breakeven (or target), trail SL at N× ATR from best ──
         _sl_changed = False

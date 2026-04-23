@@ -488,8 +488,21 @@ def check_swing_entry(
             return False, "swing_momentum_daily_trend_not_up"
         if not daily_bias.ema_stack:
             return False, "swing_momentum_daily_ema_not_stacked"
+        # Batch 6.3 (2026-04-23): daily SuperTrend must agree with the EMA
+        # stack. ema_stack can be True momentarily while SuperTrend has
+        # already flipped down — that's early-distribution, not momentum, and
+        # entries here systematically rolled over within 2-3 sessions.
+        if daily_bias.supertrend_dir != 1:
+            return False, "swing_momentum_daily_supertrend_not_up"
         if daily_bias.adx_daily < 20:
             return False, "swing_momentum_daily_adx_too_low"
+        # Batch 6.3: composite trend-strength floor. `strength` is 0-100 and
+        # bakes in ADX + EMA spread + RSI distance from 50. <50 means the
+        # uptrend is structurally weak even if the individual components
+        # each clear their own floor — we were buying tiered-pass but low-
+        # conviction names that consistently underperformed the index.
+        if float(daily_bias.strength or 0.0) < 50.0:
+            return False, "swing_momentum_daily_strength_too_low"
         # RSI 50–75 = momentum zone. <50 means the stock has cooled off (PULLBACK
         # setup, not MOMENTUM). >75 is overbought → poor risk/reward for new entries.
         if not (50 <= daily_bias.rsi_daily <= 75):

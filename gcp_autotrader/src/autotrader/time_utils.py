@@ -1,10 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date as _date_cls, datetime, timedelta, timezone
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def trading_days_between(d1: _date_cls, d2: _date_cls) -> int:
+    """Absolute number of trading-day steps between two dates (Mon-Fri only).
+
+    Same-day -> 0. Weekends are skipped entirely so (Fri, Mon) -> 1, not 3.
+    NSE/BSE holidays aren't subtracted — this is a weekday-only approximation
+    used for risk gates (earnings blackout, cooldowns) where a conservative
+    over-count is safer than under-counting.
+
+    Batch 6.2 (2026-04-23): introduced so earnings blackout and similar
+    ±N-day windows respect trading days rather than calendar days. A Friday
+    results date with a 2-day blackout should also block the following
+    Monday and Tuesday (the real-risk trading days); calendar math was
+    exhausting the ±2 budget on Sat-Sun-Mon, leaving Tue unprotected.
+    """
+    if d1 == d2:
+        return 0
+    start, end = (d1, d2) if d1 <= d2 else (d2, d1)
+    count = 0
+    cur = start
+    while cur < end:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:
+            count += 1
+    return count
 
 
 def now_utc() -> datetime:
