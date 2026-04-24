@@ -128,6 +128,12 @@ class UpstoxSettings:
     access_token_expiry_secret_name: str
     redirect_uri: str = ""
     auth_code_secret_name: str = ""
+    # Long-lived Upstox Analytics token (1-year, read-only scope: historical
+    # candles, LTP, option chain, market holidays). When set, all read-side
+    # API calls route through this token and survive daily 03:30 IST rotation
+    # of `access_token_secret_name`. Order placement / portfolio / funds
+    # endpoints always use the daily access token regardless.
+    analytics_token_secret_name: str = ""
     notifier_shared_secret: str = ""
     instruments_complete_url: str = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
     requests_per_second: int = 50
@@ -325,6 +331,7 @@ class AppSettings:
                 access_token_expiry_secret_name=_env("UPSTOX_ACCESS_TOKEN_EXPIRY_SECRET_NAME"),
                 redirect_uri=_env("UPSTOX_REDIRECT_URI", ""),
                 auth_code_secret_name=_env("UPSTOX_AUTH_CODE_SECRET_NAME", ""),
+                analytics_token_secret_name=_env("UPSTOX_ANALYTICS_TOKEN_SECRET_NAME", ""),
                 notifier_shared_secret=_env("UPSTOX_NOTIFIER_SHARED_SECRET", ""),
                 instruments_complete_url=_env(
                     "UPSTOX_INSTRUMENTS_COMPLETE_URL",

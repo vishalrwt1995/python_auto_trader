@@ -137,6 +137,31 @@ class UpstoxClient:
             "Generate a new auth code and store it in Secret Manager (UPSTOX_AUTH_CODE_SECRET_NAME), then retry."
         )
 
+    def ensure_read_token(self) -> str:
+        """Return the token for read-only API calls (historical candles, LTP,
+        option chain, holidays).
+
+        Prefers the long-lived Analytics token (1-yr expiry) stored under
+        `UPSTOX_ANALYTICS_TOKEN_SECRET_NAME` when configured. This survives
+        the daily 03:30 IST rotation of the standard access token, so
+        morning cron jobs (06:15 / 07:05 / 07:40 / 09:00 IST) no longer
+        fail on a stale day-token.
+
+        Falls back to `ensure_access_token()` when the analytics secret is
+        unconfigured or empty — preserves legacy behaviour for deployments
+        that haven't opted in.
+        """
+        name = (self.settings.analytics_token_secret_name or "").strip()
+        if name:
+            try:
+                tok = (self.secrets.get_secret(name) or "").strip()
+            except Exception:
+                logger.exception("Failed to read analytics token secret=%s", name)
+                tok = ""
+            if tok:
+                return tok
+        return self.ensure_access_token()
+
     def exchange_auth_code(self, auth_code: str) -> str:
         creds = self._read_credentials()
         if not self.settings.redirect_uri:
@@ -280,9 +305,21 @@ class UpstoxClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         auth: bool = True,
+        auth_mode: str = "read",
         version: str = "v2",
         content_type: str | None = "application/json",
     ) -> Any:
+        """Issue an authenticated Upstox API request.
+
+        auth_mode:
+          - "read"  (default) uses the long-lived Analytics token when
+            configured; falls back to the daily access token otherwise.
+            Use for market data: historical candles, LTP, option chain,
+            holidays, expiries.
+          - "write" always uses the daily access token. Mandatory for any
+            endpoint that touches user state: order placement / cancel /
+            modify, GTT, portfolio, funds, holdings, positions, trades.
+        """
         base = self.settings.api_v3_host if version == "v3" else self.settings.api_v2_host
         url = endpoint if endpoint.startswith("http") else f"{base.rstrip('/')}/{endpoint.lstrip('/')}"
         last_exc: Exception | None = None
@@ -291,7 +328,12 @@ class UpstoxClient:
                 self.limiter.wait()
                 headers: dict[str, str] = {"Accept": "application/json", "Api-Version": "2.0"}
                 if auth:
-                    headers["Authorization"] = f"Bearer {self.ensure_access_token()}"
+                    token = (
+                        self.ensure_access_token()
+                        if str(auth_mode).lower() == "write"
+                        else self.ensure_read_token()
+                    )
+                    headers["Authorization"] = f"Bearer {token}"
                 if content_type:
                     headers["Content-Type"] = content_type
                 resp = self.http.request(method.upper(), url, params=params, json=json_body, headers=headers)
@@ -695,7 +737,10 @@ class UpstoxClient:
 
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Place a regular market/limit order. Returns the API response dict."""
-        data = self._request("POST", "order/place", json_body=payload, auth=True, version="v2")
+        data = self._request(
+            "POST", "order/place", json_body=payload,
+            auth=True, auth_mode="write", version="v2",
+        )
         return data if isinstance(data, dict) else {"raw": data}
 
     def place_bracket_order(
@@ -742,7 +787,10 @@ class UpstoxClient:
         }
         if order_reference_id:
             body["order_reference_id"] = order_reference_id
-        data = self._request("POST", "order/place", json_body=body, auth=True, version="v2")
+        data = self._request(
+            "POST", "order/place", json_body=body,
+            auth=True, auth_mode="write", version="v2",
+        )
         return data if isinstance(data, dict) else {"raw": data}
 
     def get_order_details(self, order_id: str) -> dict[str, Any] | None:
@@ -753,6 +801,7 @@ class UpstoxClient:
                 "order/details",
                 params={"order_id": str(order_id).strip()},
                 auth=True,
+                auth_mode="write",
                 version="v2",
                 content_type=None,
             )
@@ -772,6 +821,7 @@ class UpstoxClient:
             "order/cancel",
             params={"order_id": str(order_id).strip()},
             auth=True,
+            auth_mode="write",
             version="v2",
             content_type=None,
         )
@@ -780,7 +830,10 @@ class UpstoxClient:
     def list_orders(self) -> list[dict[str, Any]]:
         """Return all orders for today's session."""
         try:
-            data = self._request("GET", "order/retrieve-all", auth=True, version="v2", content_type=None)
+            data = self._request(
+                "GET", "order/retrieve-all",
+                auth=True, auth_mode="write", version="v2", content_type=None,
+            )
         except Exception:
             logger.exception("list_orders failed")
             return []
@@ -834,7 +887,10 @@ class UpstoxClient:
             "price": limit_price,
             "tag": tag,
         }
-        data = self._request("POST", "order/gtt", json_body=body, auth=True, version="v2")
+        data = self._request(
+            "POST", "order/gtt", json_body=body,
+            auth=True, auth_mode="write", version="v2",
+        )
         return data if isinstance(data, dict) else {"raw": data}
 
     def delete_gtt_order(self, gtt_id: str) -> dict[str, Any]:
@@ -843,6 +899,7 @@ class UpstoxClient:
             "DELETE",
             f"order/gtt/{gtt_id}",
             auth=True,
+            auth_mode="write",
             version="v2",
             content_type=None,
         )
