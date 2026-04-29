@@ -749,6 +749,10 @@ class WsMonitorService:
             sl_dist=sl_dist,
             is_swing=is_swing,
             entry_epoch=pos.get("entry_epoch", ts),
+            # Static planned target — without this the FSM never fires
+            # TARGET_HIT and a peak-then-pullback can drop into LOSING with
+            # no exit (AEROFLEX 2026-04-29 regression).
+            target=float(pos.get("target", 0.0) or 0.0),
             state=prev_state,
             best_price=best,
             peak_mfe_r=float(pos.get("_fsm_peak_mfe_r", 0.0)),
@@ -770,12 +774,61 @@ class WsMonitorService:
             elif "confirm_aborted" in out.events:
                 pos["_fsm_confirm_started_epoch"] = 0.0
 
-        # Update mutable FSM-tracked fields.
+        # Update mutable FSM-tracked fields (best price + peak MFE_R).
         if side.upper() == "BUY":
             pos["best_price"] = max(best, ltp)
         else:
             pos["best_price"] = min(best, ltp)
         pos["_fsm_peak_mfe_r"] = max(float(pos.get("_fsm_peak_mfe_r", 0.0)), out.mfe_r_now)
+
+        # ── M0.6 MFE/MAE persistence (mirror legacy path) ───────────────
+        # Without this the FSM path silently drops the MFE/MAE columns the
+        # M6 AttributionLog and backtest harness rely on.
+        _now_epoch = time.time()
+        _mfe_price = pos.get("mfe_price", entry_price) or entry_price
+        _mae_price = pos.get("mae_price", entry_price) or entry_price
+        _mfe_changed = False
+        _mae_changed = False
+        if side.upper() == "BUY":
+            if ltp > _mfe_price:
+                pos["mfe_price"] = ltp
+                _mfe_price = ltp
+                _mfe_changed = True
+            if ltp < _mae_price:
+                pos["mae_price"] = ltp
+                _mae_price = ltp
+                _mae_changed = True
+        else:  # SELL
+            if ltp < _mfe_price:
+                pos["mfe_price"] = ltp
+                _mfe_price = ltp
+                _mfe_changed = True
+            if ltp > _mae_price:
+                pos["mae_price"] = ltp
+                _mae_price = ltp
+                _mae_changed = True
+        if sl_dist > 0 and (_mfe_changed or _mae_changed):
+            _sign = 1 if side.upper() == "BUY" else -1
+            _mfe_r = round((_mfe_price - entry_price) * _sign / sl_dist, 3)
+            _mae_r = round((_mae_price - entry_price) * _sign / sl_dist, 3)
+            if _mfe_changed and _now_epoch - self._mfe_last_persist.get(tag, 0) >= 60:
+                try:
+                    self.state.update_position(tag, {
+                        "max_favorable_excursion_price": round(_mfe_price, 2),
+                        "max_favorable_excursion_r": _mfe_r,
+                    })
+                    self._mfe_last_persist[tag] = _now_epoch
+                except Exception:
+                    logger.debug("fsm_mfe_persist_failed tag=%s", tag, exc_info=True)
+            if _mae_changed and _now_epoch - self._mae_last_persist.get(tag, 0) >= 60:
+                try:
+                    self.state.update_position(tag, {
+                        "max_adverse_excursion_price": round(_mae_price, 2),
+                        "max_adverse_excursion_r": _mae_r,
+                    })
+                    self._mae_last_persist[tag] = _now_epoch
+                except Exception:
+                    logger.debug("fsm_mae_persist_failed tag=%s", tag, exc_info=True)
 
         # Handle state change + SL writes.
         if out.next_state != prev_state:

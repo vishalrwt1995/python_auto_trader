@@ -5,8 +5,10 @@ state machine that every position walks through:
 
     INITIAL ──(MFE ≥ 0.8R for ≥ debounce_s)──► CONFIRMED
             ──(ltp ≤ sl)──► TERMINAL          (SL hit, no confirm yet)
+            ──(ltp ≥ target / ≤ target)──► TERMINAL  (TARGET_HIT — locks profit)
 
     CONFIRMED ──(MFE ≥ 2.0R)──► RUNNER
+              ──(ltp ≥ target / ≤ target)──► TERMINAL  (TARGET_HIT — locks profit)
               ──(ltp ≤ sl OR MFE drawdown ≥ 50% from peak)──► LOSING
               ──(FLAT timeout elapsed)──► TERMINAL
 
@@ -90,6 +92,10 @@ class PositionView:
     sl_dist: float            # abs(entry - initial_sl) — never mutated
     is_swing: bool
     entry_epoch: float        # time.time() at entry
+    # Static planned target. 0.0 disables the target-hit ladder (backward
+    # compat: legacy positions without a target field continue to use
+    # MFE-only transitions).
+    target: float = 0.0
     # Mutable state carried across ticks (stored on the position doc).
     state: ExitState = ExitState.INITIAL
     best_price: float = 0.0
@@ -140,6 +146,19 @@ def _crossed_sl(ltp: float, sl: float, side: str) -> bool:
     return ltp >= sl
 
 
+def _crossed_target(ltp: float, target: float, side: str) -> bool:
+    """Has the live tick crossed the planned target in the favourable direction?
+
+    target == 0 disables the check (back-compat for positions written before
+    target was tracked, or strategies that intentionally run open-ended).
+    """
+    if target <= 0:
+        return False
+    if side.upper() == "BUY":
+        return ltp >= target
+    return ltp <= target
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Transition
 # ──────────────────────────────────────────────────────────────────────────
@@ -185,6 +204,23 @@ def transition(pos: PositionView, tick: TickEvent, cfg: FsmConfig) -> FsmOutput:
         return FsmOutput(
             next_state=ExitState.TERMINAL,
             exit_reason="SL_HIT",
+            new_sl=sl,
+            mfe_r_now=mfe_r_now,
+            events=events,
+        )
+
+    # ─── TARGET hit — fires in INITIAL or CONFIRMED, locks the planned profit ──
+    # Bug fix (2026-04-29): a peak that exceeds target but pulls back ≥ 50% from
+    # peak before reaching the 2.0R RUNNER gate used to fall through to the
+    # CONFIRMED→LOSING path with no exit, leaving the position to drift back to
+    # breakeven SL. The static target is the strategy's planned profit floor —
+    # honour it as a hard exit. RUNNER state means we already chose to let the
+    # winner run, so we don't re-fire TARGET_HIT there.
+    if state in (ExitState.INITIAL, ExitState.CONFIRMED) and _crossed_target(ltp, pos.target, side):
+        events.append("target_hit_from_" + state.value.lower())
+        return FsmOutput(
+            next_state=ExitState.TERMINAL,
+            exit_reason="TARGET_HIT",
             new_sl=sl,
             mfe_r_now=mfe_r_now,
             events=events,
