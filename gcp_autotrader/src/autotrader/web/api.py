@@ -1908,8 +1908,8 @@ def run_compute_daily_metrics(
         sink.action("DailyMetrics", "compute_daily_metrics", "START", "",
                     {**sched_ctx, "since": since, "until": until, "dryRun": dry_run})
         out = _run_rollup(
-            project=c.settings.runtime.gcp_project_id,
-            dataset="autotrader",
+            project=c.settings.gcp.project_id,
+            dataset=c.settings.gcp.bq_dataset,
             since=since,
             until=until,
             dry_run=dry_run,
