@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -268,6 +269,60 @@ class TradingService:
             merged = self.gcs.merge_candles(path, api)
             return merged[-max(need, 120):]
         return cached[-max(need, 120):]
+
+    def _prefetch_candles_parallel(
+        self,
+        subset: list[Any],
+        key_by_symbol: dict[str, str],
+        *,
+        timeframe: str,
+        lookback_days: int,
+        max_workers: int = 10,
+    ) -> dict[str, list[list[Any]]]:
+        """Fetch candles for many symbols concurrently.
+
+        Replaces the old sequential `for w in subset: self._fetch_candles(...)`
+        pattern that gated scan latency at ~230s on 35-symbol watchlists.
+        Upstox v3 historical-candle limit is 50 req/s; max_workers=10 stays
+        comfortably under that.
+
+        On partial failure (one symbol raising), the remaining symbols still
+        complete and their results are returned. Failed symbols are absent
+        from the dict — callers should handle missing keys as "no candles".
+        """
+        if not subset:
+            return {}
+
+        out: dict[str, list[list[Any]]] = {}
+
+        def _fetch_one(w: Any) -> tuple[str, list[list[Any]]]:
+            sym = str(w.symbol).strip().upper()
+            ik = key_by_symbol.get(sym, "")
+            candles = self._fetch_candles(
+                w.symbol,
+                w.exchange,
+                w.segment,
+                instrument_key=ik,
+                timeframe=timeframe,
+                lookback_days=lookback_days,
+            )
+            return sym, candles
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch_one, w): w for w in subset}
+            for fut in as_completed(futures):
+                w = futures[fut]
+                try:
+                    sym, candles = fut.result()
+                    out[sym] = candles
+                except Exception:
+                    logger.warning(
+                        "prefetch_candles_failed symbol=%s timeframe=%s",
+                        getattr(w, "symbol", "?"),
+                        timeframe,
+                        exc_info=True,
+                    )
+        return out
 
     def run_scan_once(
         self,
@@ -675,31 +730,50 @@ class TradingService:
             _ist_now = now_ist()
             _vwap_guard_active = (_ist_now.hour * 60 + _ist_now.minute) >= (9 * 60 + 30)
 
+            # ── Parallel candle prefetch (perf fix, 2026-05) ──────────────
+            # Hoist both candle fetches out of the per-symbol loop and
+            # parallelise across the watchlist subset. Upstox v3 historical-
+            # candle limit is 50 req/s; 10 concurrent workers stays safe.
+            #
+            # `primary_candles_map`: 15m for intraday rows, 1d for swing rows.
+            # `intraday_daily_map`: daily candles for intraday rows only,
+            #   for the multi-timeframe daily_bias overlay (swing rows
+            #   already have daily candles in primary).
+            _intraday_subset = [w for w in subset if getattr(w, "wl_type", "intraday") != "swing"]
+            _swing_subset = [w for w in subset if getattr(w, "wl_type", "intraday") == "swing"]
+            _prefetch_started = time.perf_counter()
+            primary_candles_map: dict[str, list[list[Any]]] = {}
+            primary_candles_map.update(self._prefetch_candles_parallel(
+                _intraday_subset, key_by_symbol, timeframe="15m", lookback_days=8,
+            ))
+            primary_candles_map.update(self._prefetch_candles_parallel(
+                _swing_subset, key_by_symbol, timeframe="1d", lookback_days=120,
+            ))
+            intraday_daily_map = self._prefetch_candles_parallel(
+                _intraday_subset, key_by_symbol, timeframe="1d", lookback_days=120,
+            )
+            logger.info(
+                "candle_prefetch_done intraday=%d swing=%d daily_bias=%d elapsed=%.2fs",
+                len(_intraday_subset), len(_swing_subset), len(intraday_daily_map),
+                time.perf_counter() - _prefetch_started,
+            )
+
             for w in subset:
                 _is_swing = getattr(w, "wl_type", "intraday") == "swing"
-                instrument_key = key_by_symbol.get(str(w.symbol).strip().upper(), "")
-                candles = self._fetch_candles(
-                    w.symbol,
-                    w.exchange,
-                    w.segment,
-                    instrument_key=instrument_key,
-                    timeframe="1d" if _is_swing else "15m",
-                    lookback_days=120 if _is_swing else 8,
-                )
+                _sym_upper = str(w.symbol).strip().upper()
+                instrument_key = key_by_symbol.get(_sym_upper, "")
+                candles = primary_candles_map.get(_sym_upper, [])
                 # ── Daily bias (multi-timeframe confirmation) ──────────────
                 # For swing: candles are already daily → compute bias directly.
-                # For intraday: fetch daily candles separately for alignment overlay.
+                # For intraday: use the prefetched daily candle map.
                 _daily_bias = None
                 try:
                     if _is_swing:
                         _daily_bias = compute_daily_bias(candles)
-                    elif instrument_key:
-                        _daily_candles = self._fetch_candles(
-                            w.symbol, w.exchange, w.segment,
-                            instrument_key=instrument_key,
-                            timeframe="1d", lookback_days=120,
-                        )
-                        _daily_bias = compute_daily_bias(_daily_candles)
+                    else:
+                        _daily_candles = intraday_daily_map.get(_sym_upper, [])
+                        if _daily_candles:
+                            _daily_bias = compute_daily_bias(_daily_candles)
                 except Exception:
                     logger.debug("daily_bias_compute_failed symbol=%s", w.symbol)
 
