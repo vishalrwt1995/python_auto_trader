@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# Backtest output (per-run, large CSVs)
+backtests/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Secrets (never commit)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+service-account*.json
