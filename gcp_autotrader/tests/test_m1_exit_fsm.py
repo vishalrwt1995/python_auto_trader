@@ -191,6 +191,47 @@ def test_flat_timeout_does_not_fire_for_swing():
     assert out.next_state == ExitState.CONFIRMED
 
 
+def test_flat_timeout_fires_in_initial_state():
+    """FLAT_TIMEOUT should fire from INITIAL too — covers positions that
+    never reached CONFIRMED but are stuck flat past the timeout. This was
+    silently broken: the check used to live in the CONFIRMED-only branch
+    and was therefore unreachable for any position that never confirmed.
+    """
+    v = _fresh_view()
+    v.state = ExitState.INITIAL
+    out = transition(v, TickEvent(ltp=100.1, ts=v.entry_epoch + 120 * 60 + 1), _cfg())
+    assert out.next_state == ExitState.TERMINAL
+    assert out.exit_reason == "FLAT_TIMEOUT"
+    assert "flat_timeout_from_initial" in out.events
+
+
+def test_flat_timeout_fires_in_losing_state():
+    """FLAT_TIMEOUT should also fire from LOSING — a position that briefly
+    reached CONFIRMED, pulled back enough to drop into LOSING, then drifted
+    flat for 2 hours should be exited rather than left to waste capital.
+    """
+    v = _fresh_view()
+    v.state = ExitState.LOSING
+    v.current_sl = 99.40
+    v.peak_mfe_r = 1.0
+    out = transition(v, TickEvent(ltp=100.05, ts=v.entry_epoch + 120 * 60 + 1), _cfg())
+    assert out.next_state == ExitState.TERMINAL
+    assert out.exit_reason == "FLAT_TIMEOUT"
+
+
+def test_flat_timeout_does_not_fire_when_entry_epoch_zero():
+    """Defensive: when caller forgot to populate entry_epoch (legacy path
+    with a position written before entry_epoch was tracked), don't claim
+    the position has been flat forever — skip the check rather than
+    closing every untracked position immediately on the first tick.
+    """
+    v = _fresh_view()
+    v.state = ExitState.INITIAL
+    v.entry_epoch = 0.0
+    out = transition(v, TickEvent(ltp=100.1, ts=1_700_000_000.0), _cfg())
+    assert out.next_state != ExitState.TERMINAL or out.exit_reason != "FLAT_TIMEOUT"
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # SELL side symmetry
 # ──────────────────────────────────────────────────────────────────────────

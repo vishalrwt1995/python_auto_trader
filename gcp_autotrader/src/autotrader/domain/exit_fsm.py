@@ -226,6 +226,33 @@ def transition(pos: PositionView, tick: TickEvent, cfg: FsmConfig) -> FsmOutput:
             events=events,
         )
 
+    # ─── FLAT timeout — fires from ANY non-terminal state for intraday ────
+    # Bug fix (2026-05-05): originally lived inside the CONFIRMED branch but
+    # was mathematically unreachable there. The pullback-to-LOSING gate
+    # (current_r < peak/2) and the flat-distance gate (|ltp-entry| < atr*0.3)
+    # cannot both hold once peak_mfe_r ≥ 0.8 — so positions that should time
+    # out instead transitioned to LOSING and stuck. Live's legacy
+    # `_on_quote_legacy` checked FLAT_TIMEOUT regardless of FSM state; this
+    # restores that semantic for the FSM path. Position must still satisfy:
+    #   - intraday (not swing)
+    #   - elapsed since entry ≥ flat_timeout_s
+    #   - price within `flat_atr_fraction × atr` of entry
+    if (
+        not pos.is_swing
+        and cfg.flat_timeout_s > 0
+        and atr > 0
+        and pos.entry_epoch > 0.0
+        and (tick.ts - pos.entry_epoch) >= cfg.flat_timeout_s
+        and abs(ltp - entry) < atr * cfg.flat_atr_fraction
+    ):
+        events.append("flat_timeout_from_" + state.value.lower())
+        return FsmOutput(
+            next_state=ExitState.TERMINAL,
+            exit_reason="FLAT_TIMEOUT",
+            mfe_r_now=mfe_r_now,
+            events=events,
+        )
+
     # ─── INITIAL → CONFIRMED ────────────────────────────────────────────
     if state == ExitState.INITIAL:
         # Debounce tracking: record first epoch MFE crossed the confirm level.
@@ -303,21 +330,8 @@ def transition(pos: PositionView, tick: TickEvent, cfg: FsmConfig) -> FsmOutput:
                 mfe_r_now=mfe_r_now,
                 events=events,
             )
-        # Flat timeout on intraday — deterministic exit if we're stuck.
-        if (
-            not pos.is_swing
-            and cfg.flat_timeout_s > 0
-            and atr > 0
-            and (tick.ts - pos.entry_epoch) >= cfg.flat_timeout_s
-            and abs(ltp - entry) < atr * cfg.flat_atr_fraction
-        ):
-            events.append("flat_timeout")
-            return FsmOutput(
-                next_state=ExitState.TERMINAL,
-                exit_reason="FLAT_TIMEOUT",
-                mfe_r_now=mfe_r_now,
-                events=events,
-            )
+        # Note: FLAT_TIMEOUT used to be checked here but was hoisted up to
+        # fire from any non-terminal state (see "FLAT timeout" block above).
         return FsmOutput(
             next_state=ExitState.CONFIRMED, mfe_r_now=mfe_r_now, events=events,
         )
