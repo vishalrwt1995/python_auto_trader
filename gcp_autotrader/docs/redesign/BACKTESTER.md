@@ -234,6 +234,82 @@ python scripts/redesign/backtest.py walk-forward \
 | BQ-only data path (no GCS cache fallback) | low | doc'd in `data.py` |
 | no per-trade risk caps in account (strategy's job) | doc'd | by design |
 
+## 11. Calibration findings (2026-05-05)
+
+### 11.1 Engine clock units bug — fixed
+
+**Symptom**: sim showed 0 FLAT_TIMEOUT exits and few CONFIRMED FSM transitions
+even though live had both. Root cause was a units mismatch in the engine.
+
+* `engine.run()` incremented `self._sim_epoch += 1.0` per bar — a bar counter.
+* `_make_position_view` set `entry_epoch=0.0` for every position.
+* `tick.ts` passed to `domain.exit_fsm.transition()` was therefore the bar
+  counter, but `FsmConfig.flat_timeout_s=7200` and `confirm_debounce_s=15`
+  are in seconds.
+
+The 15-second debounce became 15-bar (~75 minutes at 5m timeframe), so
+positions almost never reached CONFIRMED. The 7200-second flat timeout
+was unreachable until ~7200 bars had been processed, even though the
+gate compared `tick.ts - entry_epoch=0` (cumulative bar count, not
+elapsed since entry).
+
+**Fix**: parse `bar.ts` (ISO-8601) to epoch seconds and use the entry
+fill's `entry_ts` for `entry_epoch`. New helper `_iso_to_epoch()` is
+LRU-cached. Two regression tests added in `test_engine.py`:
+`test_engine_clock_is_real_epoch_seconds` and
+`test_engine_fsm_debounce_uses_real_seconds`.
+
+### 11.2 Live's 27 FLAT_TIMEOUTs were pre-flag-flip artifacts
+
+The first attempt to calibrate the smoke window (2026-04-16 to 05-04)
+showed live with 27 FLAT_TIMEOUT exits but sim with 0. Per-day grouping
+of the live `trades` table reveals:
+
+| date range | dominant exit reasons | mode |
+|---|---|---|
+| 2026-04-16 | EOD_CLOSE | legacy (different bug) |
+| 2026-04-20 to 04-23 | **FLAT_TIMEOUT (27), SL_HIT (19)** | legacy `_on_quote_legacy` |
+| 2026-04-28 onward | SL_HIT, occasional TARGET_HIT_BACKFILL | FSM `_on_quote_fsm` |
+
+The `USE_EXIT_FSM_V1` Cloud Run env var was flipped on between 04-23
+and 04-28. The 27 FLAT_TIMEOUTs live booked are from when it was off
+and the legacy non-FSM tick handler ran. The post-flip distribution
+matches sim's — both produce mostly SL_HIT and TARGET_HIT, no
+FLAT_TIMEOUT.
+
+### 11.3 FSM FLAT_TIMEOUT from CONFIRMED is mathematically unreachable
+
+A separate finding: `domain.exit_fsm.transition()` only fires
+`FLAT_TIMEOUT` from the CONFIRMED branch (line 307–320). For that to
+fire we need:
+
+1. `peak_mfe_r ≥ 0.8` (to enter CONFIRMED at all)
+2. `current_r ≥ peak / 2` (otherwise the pullback gate fires first
+   and transitions to LOSING, which has no FLAT_TIMEOUT path)
+3. `|ltp − entry| < atr × 0.3` (the "flat" check)
+
+With `sl_dist = atr × atr_mult` and `atr_mult = 1.74` (default), the
+flat gate constrains `|current_r| < 0.3 / 1.74 ≈ 0.17`. But staying in
+CONFIRMED requires `current_r ≥ peak/2 ≥ 0.4`. Contradiction — the
+pullback transition fires first, every time.
+
+This is a real FSM design bug surfaced by the calibration work. **Not
+fixed in this PR** — it changes live behavior. Tracked as a follow-up.
+The legacy `_on_quote_legacy` had FLAT_TIMEOUT as a state-independent
+check that fired regardless of CONFIRMED/RUNNER/LOSING/INITIAL; the
+FSM rewrite tucked it under CONFIRMED only, which was a regression
+that's been silently masked because pullback-to-LOSING dominates.
+
+### 11.4 Calibration gates met
+
+After the units fix, with `per_trade_risk=40` and `max_concurrent=50`:
+
+| metric | sim | live | gap |
+|---|---|---|---|
+| n_trades | 65 | 73 | 11% (gate < 20%) ✓ |
+| win_rate (%) | 38.46 | 34.25 | 4.2pp (gate < 5pp) ✓ |
+| net_pnl (₹) | +140 | -1,368 | sim slightly profitable |
+
 ---
 
 *Generated as part of the redesign/audit-and-design branch. Sources of

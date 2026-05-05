@@ -28,7 +28,26 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from functools import lru_cache
 from typing import Protocol
+
+
+@lru_cache(maxsize=131072)
+def _iso_to_epoch(ts: str) -> float:
+    """Convert an ISO-8601 timestamp (with timezone) to epoch seconds.
+
+    The FSM measures time in seconds (`flat_timeout_s`, `confirm_debounce_s`).
+    Live drives it with `time.time()`. The backtest must drive it with the
+    bar's timestamp converted to epoch seconds, otherwise FSM time-thresholds
+    are silently broken (the symptom: FLAT_TIMEOUT and CONFIRMED debounce
+    barely ever fire because the sim clock is in bar-counts, not seconds).
+
+    Cached because we hit it once per bar and once per FSM tick per position.
+    """
+    if not ts:
+        return 0.0
+    return datetime.fromisoformat(ts).timestamp()
 
 from autotrader.backtest.account import SimAccount
 from autotrader.backtest.types import (
@@ -61,11 +80,9 @@ class StrategyContext:
     last_prices: dict[str, float]      # latest close per symbol — engine maintains
     bar_index_for_symbol: int          # 0-based count of bars seen for THIS symbol
 
-    # Engine clock — wall-clock-based mfe debounce in the FSM expects "epoch
-    # seconds." We use the bar's monotonically-increasing index as a proxy
-    # epoch (ts_index × 60 → "minute-equivalent epoch"). The FSM's debounce
-    # threshold (default 15s) means: same-bar confirmation. For backtest, we
-    # set the debounce via `FsmConfig` → backtest config override.
+    # Engine clock — real epoch seconds (parsed from `bar.ts`). The FSM uses
+    # this to measure debounce / flat-timeout durations. Must be in seconds
+    # because FsmConfig.flat_timeout_s and confirm_debounce_s are seconds.
     sim_epoch: float
 
 
@@ -131,7 +148,9 @@ class BacktestEngine:
         n = 0
 
         for bar in bars_sorted:
-            self._sim_epoch += 1.0
+            # Real epoch seconds (parsed from bar.ts) — required for FSM time
+            # thresholds (flat_timeout_s, confirm_debounce_s) to behave like live.
+            self._sim_epoch = _iso_to_epoch(bar.ts)
             self._sym_bar_count[bar.symbol] = self._sym_bar_count.get(bar.symbol, 0) + 1
             self._last_prices[bar.symbol] = bar.close
 
@@ -266,7 +285,9 @@ class BacktestEngine:
             atr=pos.entry_atr,
             sl_dist=pos.sl_dist,
             is_swing=pos.is_swing,
-            entry_epoch=0.0,
+            # Derive entry epoch from the entry fill timestamp so the FSM's
+            # (tick.ts - entry_epoch) >= flat_timeout_s gate works correctly.
+            entry_epoch=_iso_to_epoch(pos.entry_ts),
             target=pos.target,
             state=ExitState(pos.fsm_state),
             best_price=pos.best_price or pos.entry_price,
