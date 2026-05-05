@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """CLI driver for the autotrader backtest harness.
 
-Two modes (today):
+Modes (today):
   * `live-replay` — replay `scan_decisions` rows through the sim engine.
                     Fast, no decoupling required, validates exits + costs.
+  * `pure-replay` — recompute scoring/direction from raw candles. Use this
+                    to A/B different scoring weights or thresholds.
   * `compare`     — run live-replay AND fetch live trades, print side-by-side.
 
 Examples
@@ -73,7 +75,20 @@ def _build_spec(args: argparse.Namespace):
         direction_filter=args.direction or None,
         out_dir=args.out_dir,
         label=args.label,
+        warmup_days=getattr(args, "warmup_days", 7),
+        min_signal_score=getattr(args, "min_signal_score", None),
+        pure_universe_from_scan=getattr(args, "pure_universe_from_scan", True),
     )
+
+
+def cmd_pure_replay(args: argparse.Namespace) -> int:
+    from autotrader.backtest.runner import run_pure_replay
+    from autotrader.backtest.reports import print_summary
+
+    spec = _build_spec(args)
+    result = run_pure_replay(spec)
+    print_summary(result)
+    return 0
 
 
 def cmd_live_replay(args: argparse.Namespace) -> int:
@@ -209,6 +224,19 @@ def main(argv: list[str] | None = None) -> int:
                             help="replay scan_decisions through sim engine")
     _add_common_args(p_live)
     p_live.set_defaults(func=cmd_live_replay)
+
+    p_pure = sub.add_parser("pure-replay",
+                            help="recompute scoring/direction from raw candles")
+    _add_common_args(p_pure)
+    p_pure.add_argument("--warmup-days", type=int, default=7,
+                        help="calendar days of pre-window history loaded for indicator warm-up")
+    p_pure.add_argument("--min-signal-score", type=int, default=None,
+                        help="override StrategySettings.min_signal_score (default 72 if None)")
+    p_pure.add_argument("--no-scan-universe", dest="pure_universe_from_scan",
+                        action="store_false", default=True,
+                        help="do NOT derive symbol universe from scan_decisions; "
+                             "require --symbols to be set")
+    p_pure.set_defaults(func=cmd_pure_replay)
 
     p_cmp = sub.add_parser("compare",
                            help="live-replay + diff vs live trades table")
