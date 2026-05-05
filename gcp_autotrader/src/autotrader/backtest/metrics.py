@@ -191,14 +191,40 @@ def _max_drawdown_pct(equity_curve: list[EquityPoint]) -> float:
 
 
 def _annualize_return(equity_curve: list[EquityPoint], total_ret_pct: float) -> float:
+    """Geometric-extrapolation annualizer with two safety guards.
+
+    Why guards: extrapolating a ±25% return over 14 trading days to a
+    yearly figure compounds 18×, which is mathematically valid but
+    operationally meaningless — and at extreme edges (return < -100%,
+    fractional exponent on negative base) Python returns NaN/complex
+    which cascades into garbage downstream.
+
+    Rules:
+      1. Need ≥21 trading days (~one calendar month) to annualize at all.
+         Below that, return total_ret_pct unchanged with the assumption
+         the caller knows the run is short.
+      2. Cap absolute output at 9999% — any number bigger is a sign that
+         a single bad day is being extrapolated, not a real annual rate.
+         A blow-up below -100% (account went negative) is clamped to -100.
+    """
     if not equity_curve:
         return 0.0
     days_set = {ep.ts[:10] for ep in equity_curve}
     n_days = max(1, len(days_set))
-    if n_days <= 0:
-        return 0.0
-    # Annualize via 252-day calendar.
-    annualized = ((1 + total_ret_pct / 100) ** (252 / n_days) - 1) * 100
+    # Guard 1: too short to extrapolate.
+    if n_days < 21:
+        return float(total_ret_pct)
+    # Guard 2: account went bust (return ≤ -100%). Geometric extrapolation
+    # of a non-positive base is undefined — clamp.
+    base = 1.0 + total_ret_pct / 100.0
+    if base <= 0:
+        return -100.0
+    annualized = (base ** (252.0 / n_days) - 1.0) * 100.0
+    # Guard 3: cap absurd magnitudes.
+    if annualized > 9999.0:
+        return 9999.0
+    if annualized < -100.0:
+        return -100.0
     return annualized
 
 

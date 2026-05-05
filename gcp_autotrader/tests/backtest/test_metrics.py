@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 
 from autotrader.backtest.metrics import (
+    _annualize_return,
     per_regime_stats,
     per_setup_stats,
     summarize,
@@ -117,3 +118,84 @@ def test_per_regime_aggregates_by_regime_at_entry():
     assert out["TREND"]["n"] == 2
     assert out["RANGE"]["n"] == 1
     assert out["TREND"]["net_pnl"] == 300.0
+
+
+# ── Annualization guards ────────────────────────────────────────────────
+
+
+def _curve_over_n_days(n_days: int, *, ending_equity: float = 1_050_000.0,
+                       starting_equity: float = 1_000_000.0) -> list[EquityPoint]:
+    """Build an equity curve spanning `n_days` distinct calendar days,
+    moving linearly from starting_equity to ending_equity."""
+    pts: list[EquityPoint] = []
+    for i in range(n_days):
+        # Distinct YYYY-MM-DD per index (ts[:10] is what _annualize_return buckets on)
+        day = f"2026-04-{(i % 28) + 1:02d}"
+        # If we span >28 days, push month forward — keeps timestamps unique-day.
+        month = 4 + (i // 28)
+        day = f"2026-{month:02d}-{((i % 28) + 1):02d}"
+        eq = starting_equity + (ending_equity - starting_equity) * (i + 1) / n_days
+        pts.append(_eq(f"{day}T15:30:00+05:30", eq))
+    return pts
+
+
+def test_annualize_short_window_returns_total_unchanged():
+    """Guard 1: < 21 trading days is too short to extrapolate — return total_ret_pct.
+
+    Why this matters: a 14-day run with -25% return geometric-extrapolates to
+    a number that's mathematically valid but operationally meaningless.
+    """
+    curve = _curve_over_n_days(14)
+    # With n_days=14 the function should bypass extrapolation and pass through
+    # the input unchanged regardless of magnitude.
+    assert _annualize_return(curve, total_ret_pct=-25.0) == -25.0
+    assert _annualize_return(curve, total_ret_pct=300.0) == 300.0
+    assert _annualize_return(curve, total_ret_pct=0.0) == 0.0
+
+
+def test_annualize_account_blowup_clamps_to_minus_100():
+    """Guard 2: total_ret_pct ≤ -100% (account went bust) — return -100.
+
+    Geometric extrapolation of base ≤ 0 is undefined (NaN/complex in Python).
+    """
+    curve = _curve_over_n_days(60)
+    # -100% exactly: base = 0, undefined → -100.
+    assert _annualize_return(curve, total_ret_pct=-100.0) == -100.0
+    # Below -100% (impossible in equity terms but defensively handled).
+    assert _annualize_return(curve, total_ret_pct=-150.0) == -100.0
+
+
+def test_annualize_caps_absurd_magnitudes():
+    """Guard 3: extreme one-day spikes that compound to > 9999% are capped.
+
+    Pre-fix the smoke run produced 3.6e+25 for a -27% return over 14 IST days
+    after the n_days<21 guard kicked in (so this test uses 25 days and a
+    return that, when extrapolated, lands above the cap).
+    """
+    curve = _curve_over_n_days(25)
+    # 100% over 25 days extrapolates to (2.0 ** (252/25) - 1)*100 ≈ 109,000% — must cap.
+    out = _annualize_return(curve, total_ret_pct=100.0)
+    assert out == 9999.0
+
+
+def test_annualize_normal_case_geometric_compound():
+    """Sanity: 10% over 252 trading days should round-trip to ~10% annualized."""
+    curve = _curve_over_n_days(252)
+    out = _annualize_return(curve, total_ret_pct=10.0)
+    # Allow tiny float wiggle.
+    assert 9.99 < out < 10.01
+
+
+def test_annualize_empty_curve_returns_zero():
+    assert _annualize_return([], total_ret_pct=50.0) == 0.0
+
+
+def test_annualize_mid_range_loss_compounds_correctly():
+    """A -20% drawdown over ~63 trading days (one quarter) should annualize
+    to roughly -59% [(0.8 ** 4 - 1)*100 = -59.04%], NOT 1e+20."""
+    curve = _curve_over_n_days(63)
+    out = _annualize_return(curve, total_ret_pct=-20.0)
+    # 0.8 ** (252/63) = 0.8 ** 4 = 0.4096 → -59.04%
+    assert -60.0 < out < -58.0
+    # Crucially: must be finite, must not blow up.
+    assert math.isfinite(out)
