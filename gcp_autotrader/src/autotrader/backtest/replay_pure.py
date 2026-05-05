@@ -13,14 +13,16 @@ What this DOES re-compute
   — RSI, EMA stack, MACD, Supertrend, VWAP, ATR, ADX, Bollinger, Stoch.
 * Per-bar `direction` via `domain.scoring.determine_direction`.
 * Per-bar `score` via `domain.scoring.score_signal`.
-* `qualified = score >= min_signal_score`.
+* **Regime affinity multiplier** via `domain.regime_affinity.regime_strategy_multiplier`
+  — same call live makes, same matrix, same direction-dampening logic.
+* **Regime hard-blocks** via `domain.regime_affinity.regime_hard_blocks_strategy`
+  — pure-replay also drops a (regime, strategy) pair if live would have
+  policy-blocked it. Without this we'd over-fire on CHOP/RANGE/PANIC days.
+* `qualified = affinity_score >= min_signal_score` (affinity_score = score
+  × multiplier, clipped to [0, 100]).
 
 What this does NOT re-compute (deferred / honesty disclosure)
 -------------------------------------------------------------
-* **Regime affinity multiplier** — applied in live but skipped here. The
-  multiplier is a function of (regime, strategy, direction); it only
-  scales `score` by ±20%, so this rarely flips a qualified→unqualified
-  decision. Tracked as a future enhancement.
 * **Brain confidence adjustment** (`market_brain_service.adjust_signal`)
   — depends on full BrainState, not just the regime. Sim only has the
   archived `market_brain_history` (regime + risk_mode + a few scalars).
@@ -78,6 +80,10 @@ from autotrader.domain.models import (
     ScoreBreakdown,
     SignalScore,
 )
+from autotrader.domain.regime_affinity import (
+    regime_hard_blocks_strategy,
+    regime_strategy_multiplier,
+)
 from autotrader.domain.scoring import determine_direction, score_signal
 from autotrader.settings import StrategySettings
 
@@ -117,6 +123,13 @@ class PureReplayConfig:
     history_len: int = _DEFAULT_HISTORY_LEN
     # Treat the position as swing if true. Pure replay runs intraday by default.
     is_swing: bool = False
+    # When True, apply regime_strategy_multiplier to score before threshold
+    # comparison (matches live). Disable for cleaner A/B of raw scoring.
+    apply_affinity_multiplier: bool = True
+    # When True, drop signals where regime_hard_blocks_strategy returns True
+    # (matches live's policy-block in scan_service). Disable to study what
+    # those filtered setups would have done if allowed.
+    apply_hard_blocks: bool = True
 
 
 @dataclass
@@ -130,6 +143,8 @@ class _PendingPositionMeta:
     is_swing: bool
     regime: str
     score: float
+    raw_score: float = 0.0          # pre-affinity, for diagnostics
+    affinity_mult: float = 1.0      # what was applied (1.0 = none)
 
 
 def _bar_to_candle(b: Bar) -> Candle:
@@ -298,6 +313,15 @@ class PureReplayStrategy:
             return
 
         regime = _make_regime_snapshot(self.brain, ctx.bar.ts)
+
+        # Hard-block gate — matches the policy-block live applies in
+        # `scan_service`. Mismatched (regime, strategy) pairs (e.g.
+        # BREAKOUT in CHOP) get rejected before scoring.
+        if self.cfg.apply_hard_blocks and regime_hard_blocks_strategy(
+            regime.regime, setup
+        ):
+            return
+
         direction = determine_direction(ind, regime, setup=setup)
         if direction == "HOLD":
             return
@@ -312,13 +336,26 @@ class PureReplayStrategy:
             cfg=self.s_cfg,
             setup=setup,
         )
+        raw_score = float(sig.score)
+
+        # Regime-strategy affinity multiplier — same call live makes in
+        # `trading_service._maybe_open` (line 850). Mismatched setups get
+        # damped (down to 0.2x); aligned ones get a boost (up to 1.4x).
+        if self.cfg.apply_affinity_multiplier:
+            affinity_mult = regime_strategy_multiplier(
+                regime.regime, setup, direction,
+            )
+            adjusted_score = max(0, min(100, int(round(raw_score * affinity_mult))))
+        else:
+            affinity_mult = 1.0
+            adjusted_score = int(round(raw_score))
 
         threshold = (
             self.cfg.min_signal_score
             if self.cfg.min_signal_score is not None
             else self.s_cfg.min_signal_score
         )
-        if sig.score < threshold:
+        if adjusted_score < threshold:
             return
 
         # One-shot per (date, symbol, setup, direction) to avoid
@@ -368,14 +405,16 @@ class PureReplayStrategy:
             symbol=sym, direction=direction, qty=qty,
             atr=atr, atr_mult=self.cfg.default_atr_mult,
             setup=setup, is_swing=self.cfg.is_swing,
-            regime=regime.regime, score=sig.score,
+            regime=regime.regime, score=adjusted_score,
+            raw_score=raw_score, affinity_mult=affinity_mult,
         )
         self._fired_today.add(fkey)
         if self.cfg.debug_orders:
             log.info(
-                "pure_replay_signal sym=%s setup=%s dir=%s score=%.1f "
-                "qty=%d ltp=%.2f atr=%.2f",
-                sym, setup, direction, sig.score, qty, ind.close, atr,
+                "pure_replay_signal sym=%s setup=%s dir=%s raw=%.1f mult=%.2f "
+                "adj=%d qty=%d ltp=%.2f atr=%.2f",
+                sym, setup, direction, raw_score, affinity_mult,
+                adjusted_score, qty, ind.close, atr,
             )
 
 

@@ -132,7 +132,10 @@ def test_make_regime_snapshot_default_when_brain_empty():
 def test_pure_replay_does_not_fire_with_insufficient_warmup(monkeypatch):
     """Strategy must require ≥80 bars of history before calling indicators."""
     _patch_score_pipeline(monkeypatch)
-    cfg = rp.PureReplayConfig(setups=("BREAKOUT",))
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
+    )
     strat = rp.PureReplayStrategy(cfg=cfg)
 
     # Only 5 bars total — well under the 80-bar warmup floor.
@@ -153,6 +156,7 @@ def test_pure_replay_fires_signal_after_warmup(monkeypatch):
     cfg = rp.PureReplayConfig(
         setups=("BREAKOUT",),
         per_trade_risk_inr=5_000.0,
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
     )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
@@ -188,7 +192,10 @@ def test_pure_replay_skips_when_score_below_threshold(monkeypatch):
     """Score < min_signal_score → no order placed."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=50.0)  # below default 72
 
-    cfg = rp.PureReplayConfig(setups=("BREAKOUT",), min_signal_score=72)
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",), min_signal_score=72,
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
+    )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
 
@@ -205,7 +212,10 @@ def test_pure_replay_skips_when_direction_is_hold(monkeypatch):
     """determine_direction = HOLD → no scoring, no order."""
     _patch_score_pipeline(monkeypatch, direction="HOLD", score=99.0)
 
-    cfg = rp.PureReplayConfig(setups=("BREAKOUT",))
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
+    )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
 
@@ -221,7 +231,10 @@ def test_pure_replay_direction_filter_blocks_opposite(monkeypatch):
     """direction_filter='SELL' must block a BUY signal even when qualified."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0)
 
-    cfg = rp.PureReplayConfig(setups=("BREAKOUT",), direction_filter="SELL")
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",), direction_filter="SELL",
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
+    )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
 
@@ -238,7 +251,10 @@ def test_pure_replay_no_double_fire_same_day(monkeypatch):
     on a later bar within the same day."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0)
 
-    cfg = rp.PureReplayConfig(setups=("BREAKOUT",))
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
+    )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
 
@@ -259,7 +275,10 @@ def test_pure_replay_max_concurrent_caps_open_positions(monkeypatch):
     the first symbol's position is open."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0)
 
-    cfg = rp.PureReplayConfig(setups=("BREAKOUT",), max_concurrent=1)
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",), max_concurrent=1,
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
+    )
     warmup = {
         "ACME": _make_warmup_bars("ACME", 90),
         "OTHER": _make_warmup_bars("OTHER", 90),
@@ -289,7 +308,10 @@ def test_pure_replay_resets_fired_today_at_date_boundary(monkeypatch):
     so a fresh signal can fire on the next trading day."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0)
 
-    cfg = rp.PureReplayConfig(setups=("BREAKOUT",))
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        apply_affinity_multiplier=False, apply_hard_blocks=False,
+    )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
 
@@ -318,3 +340,176 @@ def test_pure_replay_resets_fired_today_at_date_boundary(monkeypatch):
         f"expected 2 trades (day-1 + day-2); got {len(result.trades)}. "
         "fired-today set may not be resetting at midnight."
     )
+
+
+# ── Regime affinity multiplier ───────────────────────────────────────────
+
+
+def _brain_with_regime(regime: str, ts: str = "2026-04-15T15:30:00+05:30") -> BrainTimeline:
+    """Build a one-snapshot BrainTimeline pinned to a specific regime."""
+    return BrainTimeline([
+        BrainSnapshot(
+            asof_ts=ts, run_date=ts[:10],
+            regime=regime, risk_mode="NORMAL",
+            market_confidence=70, breadth_score=55, trend_score=50,
+            breadth_confidence=55, volatility_stress_score=30, data_quality_score=85,
+        )
+    ])
+
+
+def test_affinity_multiplier_boosts_aligned_setup(monkeypatch):
+    """RANGE × VWAP_REVERSAL × BUY = 1.3x. A raw score of 60 (below the
+    72 threshold) should clear after the multiplier (60×1.3=78)."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=60.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("VWAP_REVERSAL",),
+        min_signal_score=72,
+        apply_affinity_multiplier=True,
+        apply_hard_blocks=False,    # not testing hard-blocks here
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("RANGE"), warmup_bars=warmup,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    eng = BacktestEngine(account=acc, strategy=strat)
+    result = eng.run(bars)
+
+    # Without affinity boost the raw score 60 < 72 → no trade. With the
+    # 1.3× boost adjusted = 78 ≥ 72 → trade fires.
+    assert len(result.trades) == 1, (
+        "affinity multiplier should have lifted score 60×1.3=78 over the "
+        "72 threshold; check the matrix or the multiplier wiring."
+    )
+
+
+def test_affinity_multiplier_dampens_mismatched_setup(monkeypatch):
+    """TREND_DOWN × MOMENTUM × BUY = 0.3x. Raw score 90 should drop to 27
+    and fail the 72 threshold."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=90.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("MOMENTUM",),
+        min_signal_score=72,
+        apply_affinity_multiplier=True,
+        apply_hard_blocks=False,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("TREND_DOWN"), warmup_bars=warmup,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    eng = BacktestEngine(account=acc, strategy=strat)
+    result = eng.run(bars)
+
+    # Buying MOMENTUM in TREND_DOWN gets damped to 0.3× → 90×0.3=27 < 72.
+    # Without the multiplier this would have fired on a 90-score signal.
+    assert len(result.trades) == 0
+
+
+def test_affinity_disabled_uses_raw_score(monkeypatch):
+    """With apply_affinity_multiplier=False the raw score is compared
+    directly to the threshold — even mismatched (regime, setup) pairs
+    fire if the raw score qualifies."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("MOMENTUM",),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,    # disabled
+        apply_hard_blocks=False,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("TREND_DOWN"), warmup_bars=warmup,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    eng = BacktestEngine(account=acc, strategy=strat)
+    result = eng.run(bars)
+
+    # Without affinity the raw 85 ≥ 72 fires regardless of mismatched regime.
+    assert len(result.trades) == 1
+
+
+# ── Regime hard-blocks ───────────────────────────────────────────────────
+
+
+def test_hard_block_drops_breakout_in_chop(monkeypatch):
+    """CHOP regime hard-blocks BREAKOUT — even a 100-score signal must not fire."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=100.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        apply_affinity_multiplier=False,    # isolate hard-block effect
+        apply_hard_blocks=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    eng = BacktestEngine(account=acc, strategy=strat)
+    result = eng.run(bars)
+
+    assert len(result.trades) == 0, (
+        "BREAKOUT in CHOP must be hard-blocked by pure-replay (matches live "
+        "scan_service policy gate)."
+    )
+
+
+def test_hard_block_disabled_lets_blocked_setup_through(monkeypatch):
+    """With apply_hard_blocks=False, BREAKOUT in CHOP fires anyway —
+    useful for counterfactual 'what if we removed this gate' studies."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        apply_affinity_multiplier=False,    # raw score path
+        apply_hard_blocks=False,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    eng = BacktestEngine(account=acc, strategy=strat)
+    result = eng.run(bars)
+
+    assert len(result.trades) == 1
+
+
+def test_hard_block_does_not_affect_unrelated_setup_in_same_regime(monkeypatch):
+    """CHOP hard-blocks BREAKOUT but allows VWAP_REVERSAL — verify only
+    the blocked setup is dropped, not all signals in that regime."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    # Both setups would qualify on raw score; only BREAKOUT should be blocked.
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT", "VWAP_REVERSAL"),
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    eng = BacktestEngine(account=acc, strategy=strat)
+    result = eng.run(bars)
+
+    # Exactly one trade — VWAP_REVERSAL fires, BREAKOUT is hard-blocked.
+    assert len(result.trades) == 1
+    assert result.trades[0].setup == "VWAP_REVERSAL"
