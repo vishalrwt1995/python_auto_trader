@@ -31,6 +31,7 @@ from autotrader.backtest.data import (
     ScanDecisionRow,
     brain_lookup,
     load_candles_bulk_bq,
+    load_candles_bulk_gcs,
     load_market_brain,
     load_scan_decisions,
 )
@@ -87,6 +88,18 @@ class RunSpec:
     # ── Override hooks (None = defaults) ─────────────────────────────
     cost_cfg: CostConfig | None = None
     slippage: SlippageModel | None = None
+
+    # ── Candle source ────────────────────────────────────────────────
+    # "gcs" reads from `cache/score_1d/...` and `cache/candles/{tf}/...`,
+    # the same canonical store the live system reads at scan time. This
+    # is the default — backtests are faithful to live by construction
+    # and don't depend on the best-effort BQ dual-write coverage.
+    # "bq" falls back to the BigQuery `candles_1d` / `candles_5m` tables
+    # (useful for SQL-driven analytics or when the GCS bucket is unreachable).
+    candle_source: str = "gcs"           # "gcs" | "bq"
+    gcs_bucket: str = "grow-profit-machine-autotrader-data"
+    gcs_exchange: str = "NSE"
+    gcs_segment: str = "CASH"
 
     # ── Pure-replay specific (only honoured by run_pure_replay) ──────
     # Calendar days of history loaded BEFORE `since` so indicators are
@@ -149,16 +162,15 @@ def run_live_replay(spec: RunSpec) -> BacktestResult:
     syms = _derive_symbols(spec.symbols, decisions)
     log.info("symbols_resolved n=%d", len(syms))
 
-    bars_by_sym = load_candles_bulk_bq(
-        project=spec.project, dataset=spec.dataset,
-        symbols=syms, timeframe=spec.timeframe,
+    bars_by_sym = _load_candles(
+        spec, symbols=syms, timeframe=spec.timeframe,
         since=spec.since, until=spec.until,
     )
     bars: list[Bar] = []
     for sym in syms:
         bars.extend(bars_by_sym.get(sym, []))
-    log.info("candles_loaded total_bars=%d symbols_with_bars=%d",
-             len(bars), len(bars_by_sym))
+    log.info("candles_loaded source=%s total_bars=%d symbols_with_bars=%d",
+             spec.candle_source, len(bars), len(bars_by_sym))
     if not bars:
         return _empty_result(spec, "no candles in window for resolved symbols")
 
@@ -198,6 +210,7 @@ def run_live_replay(spec: RunSpec) -> BacktestResult:
         "since": spec.since,
         "until": spec.until,
         "timeframe": spec.timeframe,
+        "candle_source": spec.candle_source,
         "n_decisions": str(len(decisions)),
         "n_symbols": str(len(syms)),
         "qualified_only": str(spec.qualified_only),
@@ -271,14 +284,13 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
     warmup_since = _shift_iso_date(spec.since, -spec.warmup_days)
 
     # 3. Bulk-load bars over the extended window.
-    bars_by_sym = load_candles_bulk_bq(
-        project=spec.project, dataset=spec.dataset,
-        symbols=syms, timeframe=spec.timeframe,
+    bars_by_sym = _load_candles(
+        spec, symbols=syms, timeframe=spec.timeframe,
         since=warmup_since, until=spec.until,
     )
     total_bars = sum(len(v) for v in bars_by_sym.values())
-    log.info("pure_replay_candles_loaded total_bars=%d symbols_with_bars=%d warmup_since=%s",
-             total_bars, len(bars_by_sym), warmup_since)
+    log.info("pure_replay_candles_loaded source=%s total_bars=%d symbols_with_bars=%d warmup_since=%s",
+             spec.candle_source, total_bars, len(bars_by_sym), warmup_since)
     if total_bars == 0:
         return _empty_result(spec, "no candles in extended window")
 
@@ -321,15 +333,14 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
     if spec.load_daily_bars:
         try:
             daily_since = _shift_iso_date(spec.since, -spec.daily_warmup_days)
-            daily_bars_raw = load_candles_bulk_bq(
-                project=spec.project, dataset=spec.dataset,
-                symbols=syms, timeframe="1d",
+            daily_bars = _load_candles(
+                spec, symbols=syms, timeframe="1d",
                 since=daily_since, until=spec.until,
             )
-            daily_bars = daily_bars_raw
             log.info(
-                "pure_replay_daily_loaded symbols_with_bars=%d total_bars=%d since=%s",
-                len(daily_bars), sum(len(v) for v in daily_bars.values()), daily_since,
+                "pure_replay_daily_loaded source=%s symbols_with_bars=%d total_bars=%d since=%s",
+                spec.candle_source, len(daily_bars),
+                sum(len(v) for v in daily_bars.values()), daily_since,
             )
         except Exception as e:
             log.warning("pure_replay_daily_load_failed err=%s — daily-bias path will no-op", e)
@@ -386,6 +397,7 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         "until": spec.until,
         "warmup_since": warmup_since,
         "timeframe": spec.timeframe,
+        "candle_source": spec.candle_source,
         "n_symbols": str(len(syms)),
         "n_warmup_bars": str(sum(len(v) for v in warmup_bars.values())),
         "n_in_window_bars": str(len(in_window_bars)),
@@ -409,6 +421,34 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         result.metrics.get("sharpe", 0),
     )
     return result
+
+
+def _load_candles(
+    spec: RunSpec,
+    *,
+    symbols: list[str],
+    timeframe: str,
+    since: str,
+    until: str,
+) -> dict[str, list[Bar]]:
+    """Dispatch to the configured candle source. Default GCS — same JSON
+    files the live system reads → backtests are faithful by construction."""
+    src = (spec.candle_source or "gcs").lower()
+    if src == "bq":
+        return load_candles_bulk_bq(
+            project=spec.project, dataset=spec.dataset,
+            symbols=symbols, timeframe=timeframe,
+            since=since, until=until,
+        )
+    if src == "gcs":
+        return load_candles_bulk_gcs(
+            symbols=symbols, timeframe=timeframe,
+            since=since, until=until,
+            bucket=spec.gcs_bucket,
+            exchange=spec.gcs_exchange,
+            segment=spec.gcs_segment,
+        )
+    raise ValueError(f"unsupported candle_source: {spec.candle_source!r} (expected 'gcs' or 'bq')")
 
 
 def _shift_iso_date(d: str, days: int) -> str:

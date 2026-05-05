@@ -255,88 +255,178 @@ def load_calibration_data(
     since: str,
     until: str,
     match_window_seconds: int = 90,
+    gcs_bucket: str = "grow-profit-machine-autotrader-data",
+    gcs_exchange: str = "NSE",
+    gcs_segment: str = "CASH",
 ) -> list[CalibrationFill]:
-    """Pull (trade, scan_decision, 5m bar) join from BigQuery.
+    """Pull trade + scan_decision pairs from BQ, then look up the
+    enclosing 5m bar from the GCS cache (the canonical store the live
+    system writes at scan time).
 
-    The match between a trade and the scan_decision that triggered it is
-    fuzzy: the scanner emits a decision at scan_ts and the broker fills
-    some seconds later. We accept any decision-trade pair within
-    `match_window_seconds` of each other on the same (symbol, side).
+    Why GCS for the 5m bars? The BQ `candles_5m` table is a best-effort
+    dual-write with incomplete coverage on traded symbols/dates — in
+    practice 0/73 of trade-symbol-dates had bars in BQ when this script
+    was first run. GCS has every (symbol, date) the universe writer
+    touched, including all traded symbols on their trade days. Reading
+    from GCS makes calibration faithful to the same data the live
+    scoring engine saw.
 
-    Trades that don't match any decision (manual entries, post-flag-flip
-    re-routes) are dropped. So are decisions without a matching trade.
+    The trade↔decision match is fuzzy: scanner emits a decision at
+    scan_ts and the broker fills some seconds later. We accept any
+    decision-trade pair within `match_window_seconds` of each other on
+    the same (symbol, side).
 
     Returns: list of CalibrationFill, ready to feed `calibrate_from_fills`.
     """
-    from autotrader.backtest.data import _query  # internal helper
+    from autotrader.backtest.data import (
+        _gcs_path_for,
+        _query,
+    )
+    from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 
-    sql = f"""
-        WITH scans AS (
-            SELECT
-                symbol, direction AS side,
-                scan_ts, ltp,
-                FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S+05:30', scan_ts, 'Asia/Kolkata') AS scan_ts_iso
-            FROM `{project}.{dataset}.scan_decisions`
-            WHERE run_date BETWEEN '{since}' AND '{until}'
-              AND qualified = TRUE
-              AND ltp > 0
-        ),
-        trades AS (
-            SELECT
-                symbol, side,
-                entry_ts, entry_price,
-                FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S+05:30', entry_ts, 'Asia/Kolkata') AS entry_ts_iso,
-                trade_date
-            FROM `{project}.{dataset}.trades`
-            WHERE trade_date BETWEEN '{since}' AND '{until}'
-              AND entry_price > 0
-        ),
-        bars AS (
-            SELECT
-                symbol, candle_ts,
-                high AS bar_high, low AS bar_low,
-                TIMESTAMP_SECONDS(
-                    CAST(FLOOR(UNIX_SECONDS(candle_ts) / 300) * 300 AS INT64)
-                ) AS bucket_ts
-            FROM `{project}.{dataset}.candles_5m`
-            WHERE trade_date BETWEEN '{since}' AND '{until}'
-        )
+    # ── 1. Scans from BQ (cheap; just filtered by run_date) ──────────
+    scans_sql = f"""
         SELECT
-            t.symbol AS symbol,
-            t.side AS side,
-            t.entry_ts_iso AS entry_ts,
-            s.ltp AS theoretical_price,
-            t.entry_price AS actual_price,
-            b.bar_high AS bar_high,
-            b.bar_low AS bar_low
-        FROM trades t
-        JOIN scans s
-          ON s.symbol = t.symbol AND s.side = t.side
-         AND ABS(TIMESTAMP_DIFF(s.scan_ts, t.entry_ts, SECOND)) <= {match_window_seconds}
-        JOIN bars b
-          ON b.symbol = t.symbol
-         AND b.bucket_ts = TIMESTAMP_SECONDS(
-              CAST(FLOOR(UNIX_SECONDS(t.entry_ts) / 300) * 300 AS INT64)
-            )
+            symbol, direction AS side,
+            UNIX_SECONDS(scan_ts) AS scan_epoch,
+            ltp
+        FROM `{project}.{dataset}.scan_decisions`
+        WHERE run_date BETWEEN '{since}' AND '{until}'
+          AND qualified = TRUE
+          AND ltp > 0
     """
-    rows = _query(project, sql)
-    log.info("calibration_rows_loaded n=%d", len(rows))
+    scan_rows = _query(project, scans_sql)
+    log.info("calibration_scans_loaded n=%d", len(scan_rows))
+
+    # ── 2. Trades from BQ ────────────────────────────────────────────
+    trades_sql = f"""
+        SELECT
+            symbol, side,
+            UNIX_SECONDS(entry_ts) AS entry_epoch,
+            FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S+05:30', entry_ts, 'Asia/Kolkata') AS entry_ts_iso,
+            entry_price
+        FROM `{project}.{dataset}.trades`
+        WHERE trade_date BETWEEN '{since}' AND '{until}'
+          AND entry_price > 0
+    """
+    trade_rows = _query(project, trades_sql)
+    log.info("calibration_trades_loaded n=%d", len(trade_rows))
+
+    if not trade_rows or not scan_rows:
+        return []
+
+    # ── 3. Match trades ↔ scans (Python) ─────────────────────────────
+    # Index scans by (symbol, side) → list of (epoch, ltp) sorted by epoch.
+    scans_by_key: dict[tuple[str, str], list[tuple[int, float]]] = {}
+    for r in scan_rows:
+        key = (str(r["symbol"]).upper(), str(r["side"]).upper())
+        scans_by_key.setdefault(key, []).append((int(r["scan_epoch"]), float(r["ltp"])))
+    for v in scans_by_key.values():
+        v.sort()
+
+    matched: list[dict[str, Any]] = []
+    for tr in trade_rows:
+        key = (str(tr["symbol"]).upper(), str(tr["side"]).upper())
+        cands = scans_by_key.get(key, ())
+        if not cands:
+            continue
+        entry_epoch = int(tr["entry_epoch"])
+        # Pick the closest scan within window.
+        best: tuple[int, float] | None = None
+        best_dt = match_window_seconds + 1
+        for s_epoch, ltp in cands:
+            dt = abs(s_epoch - entry_epoch)
+            if dt <= match_window_seconds and dt < best_dt:
+                best_dt = dt
+                best = (s_epoch, ltp)
+        if best is None:
+            continue
+        matched.append({
+            "symbol": key[0],
+            "side": key[1],
+            "entry_epoch": entry_epoch,
+            "entry_ts_iso": str(tr["entry_ts_iso"]),
+            "theoretical_price": best[1],
+            "actual_price": float(tr["entry_price"]),
+        })
+    log.info("calibration_trades_matched n=%d (of %d trades)",
+             len(matched), len(trade_rows))
+    if not matched:
+        return []
+
+    # ── 4. Resolve enclosing 5m bar from GCS, per matched fill ───────
+    # Cache 5m candle JSONs per symbol so we don't re-fetch.
+    gcs = GoogleCloudStorageStore(bucket_name=gcs_bucket)
+    symbol_bar_cache: dict[str, list[tuple[int, float, float]]] = {}
+    # cache value: list of (bucket_epoch, high, low) sorted by bucket_epoch
+
+    def _load_bars(sym: str) -> list[tuple[int, float, float]]:
+        if sym in symbol_bar_cache:
+            return symbol_bar_cache[sym]
+        path = _gcs_path_for("5m", sym, gcs_exchange, gcs_segment)
+        try:
+            raw = gcs.read_candles(path)
+        except Exception:
+            log.warning("calibration_bar_read_failed sym=%s path=%s", sym, path,
+                        exc_info=True)
+            raw = []
+        bucket_list: list[tuple[int, float, float]] = []
+        for c in raw:
+            if not isinstance(c, (list, tuple)) or len(c) < 6:
+                continue
+            try:
+                # Live cache stores bar-open ts (already a 5-min boundary in
+                # IST). Convert to epoch-seconds via Python datetime.
+                ts_str = str(c[0])
+                # Normalize "+05:30" → "+0530" for fromisoformat compat on 3.9.
+                from datetime import datetime as _dt
+                _dt_obj = _dt.fromisoformat(ts_str)
+                bucket_epoch = int(_dt_obj.timestamp())
+                bucket_list.append((bucket_epoch, float(c[2]), float(c[3])))
+            except (ValueError, TypeError, KeyError):
+                continue
+        bucket_list.sort()
+        symbol_bar_cache[sym] = bucket_list
+        return bucket_list
 
     out: list[CalibrationFill] = []
-    for r in rows:
+    n_no_bar = 0
+    for m in matched:
+        bars = _load_bars(m["symbol"])
+        if not bars:
+            n_no_bar += 1
+            continue
+        # 5m bucket boundary = floor(entry_epoch / 300) * 300.
+        entry_epoch = m["entry_epoch"]
+        bucket_epoch = (entry_epoch // 300) * 300
+        # Linear scan is fine; per-symbol bar lists are small (~94 days * 75 bars/day).
+        bar_high: float | None = None
+        bar_low: float | None = None
+        for be, hi, lo in bars:
+            if be == bucket_epoch:
+                bar_high, bar_low = hi, lo
+                break
+            if be > bucket_epoch:
+                break
+        if bar_high is None or bar_low is None:
+            n_no_bar += 1
+            continue
         try:
             out.append(CalibrationFill(
-                symbol=str(r["symbol"]).upper(),
-                side=str(r["side"]).upper(),
-                entry_ts=str(r["entry_ts"]),
-                theoretical_price=float(r["theoretical_price"]),
-                actual_price=float(r["actual_price"]),
-                bar_high=float(r["bar_high"]),
-                bar_low=float(r["bar_low"]),
+                symbol=m["symbol"],
+                side=m["side"],
+                entry_ts=m["entry_ts_iso"],
+                theoretical_price=float(m["theoretical_price"]),
+                actual_price=float(m["actual_price"]),
+                bar_high=float(bar_high),
+                bar_low=float(bar_low),
             ))
-        except (TypeError, ValueError, KeyError) as e:
-            log.warning("calibration_row_skipped reason=%s row=%s", e, r)
+        except (TypeError, ValueError) as e:
+            log.warning("calibration_row_skipped reason=%s sym=%s", e, m["symbol"])
             continue
+
+    log.info("calibration_fills_built n=%d (matched=%d, missing_bar=%d)",
+             len(out), len(matched), n_no_bar)
     return out
 
 

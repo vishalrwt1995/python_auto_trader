@@ -1,23 +1,32 @@
 """Historical data loaders for the backtester.
 
-Three sources, in order of preference:
-  1. **BigQuery `candles_5m` / `candles_1d`** — primary (clustered by symbol,
-     partitioned by trade_date). Cheap when filtered by date + symbol.
-  2. **GCS candle cache** (`history/{tf}/{exchange}/{segment}/{sym}.json`) —
-     fallback when BQ doesn't have a window (older than 5m retention) or
-     is unavailable in the test environment.
-  3. **Live Upstox API** — last-resort when neither cache has the bar.
-     Only used when explicitly opted in via `allow_live_fetch=True`.
+Two candle sources, with **GCS preferred** because it is the canonical
+store the live system reads from at scan time:
 
-The backtester never falls through to live fetch by default — historical
-runs must be reproducible, and a live fetch hides drift.
+  1. **GCS candle cache** — `load_candles_bulk_gcs()`
+       1d : `cache/score_1d/{ex}/{seg}/{sym}.json`     (full history)
+       5m : `cache/candles/5m/{ex}/{seg}/{sym}.json`   (rolling ~5 months)
+       15m: `cache/candles/15m/{ex}/{seg}/{sym}.json`  (rolling)
+     Same JSON the live `score_signal()` reads → backtests are faithful by
+     construction. No BQ archival lag, no streaming-insert window limits.
 
-Data window today (verified 2026-05-04 in BQ):
-    candles_1d           : 2016-04-27 → 2026-04-30 (10 years)
-    candles_5m           : 2026-01-30 → 2026-04-30 (~3 months)
-    scan_decisions       : 2026-04-10 → 2026-05-04 (90-day TTL)
-    market_brain_history : 2026-04-02 → 2026-05-04
-    trades               : 2026-04-16 → 2026-05-04
+  2. **BigQuery `candles_5m` / `candles_1d`** — `load_candles_bulk_bq()`
+     Best-effort dual-write of the GCS cache; partitioned + clustered for
+     SQL joins (e.g. slippage calibration). Coverage is incomplete for some
+     symbols / dates, so prefer GCS for replay.
+
+The backtester never falls through to live Upstox fetch — historical runs
+must be reproducible.
+
+Data windows (verified 2026-05-05):
+    GCS score_1d         : 2000-02-22 → today (full)
+    GCS candles/5m       : ~2025-12-04 → today (last ~5 months, rolling)
+    GCS candles/15m      : ~2026-04-02 → today
+    BQ candles_1d        : 2016-04-27 → 2026-04-30 (incomplete coverage)
+    BQ candles_5m        : 2026-01-30 → 2026-04-30 (incomplete coverage)
+    BQ scan_decisions    : 2026-04-10 → 2026-05-04 (90-day TTL)
+    BQ market_brain      : 2026-04-02 → 2026-05-04
+    BQ trades            : 2026-04-16 → 2026-05-04
 """
 from __future__ import annotations
 
@@ -242,6 +251,178 @@ def load_candles_bulk_bq(
     return dict(out)
 
 
+# ── GCS candle loader (canonical source — preferred over BQ) ──────────────
+
+
+_DEFAULT_GCS_BUCKET = "grow-profit-machine-autotrader-data"
+
+
+def _gcs_path_for(timeframe: str, symbol: str, exchange: str, segment: str) -> str:
+    """Mirror live writers in `universe_service`:
+        1d  → cache/score_1d/{ex}/{seg}/{sym}.json
+        5m  → cache/candles/5m/{ex}/{seg}/{sym}.json
+        15m → cache/candles/15m/{ex}/{seg}/{sym}.json
+    """
+    sym = symbol.strip().upper()
+    ex = exchange.strip().upper()
+    seg = segment.strip().upper()
+    tf = timeframe.lower()
+    if tf == "1d":
+        return f"cache/score_1d/{ex}/{seg}/{sym}.json"
+    if tf in ("5m", "15m"):
+        return f"cache/candles/{tf}/{ex}/{seg}/{sym}.json"
+    raise ValueError(f"unsupported timeframe for GCS loader: {tf}")
+
+
+def _aggregate_5m_to_15m(bars_5m: list[Bar]) -> list[Bar]:
+    """Aggregate 5m bars into 15m by IST 15-minute bucket. Used as a
+    fallback when the 15m cache file is missing for a symbol."""
+    if not bars_5m:
+        return []
+    by_bucket: dict[str, list[Bar]] = defaultdict(list)
+    for b in bars_5m:
+        # Bucket key: floor minute to nearest 15m. Bar.ts is "YYYY-MM-DDTHH:MM:SS+05:30"
+        try:
+            hh, mm = int(b.ts[11:13]), int(b.ts[14:16])
+        except (ValueError, IndexError):
+            continue
+        bucket_min = (mm // 15) * 15
+        bucket = f"{b.ts[:11]}{hh:02d}:{bucket_min:02d}:00+05:30"
+        by_bucket[bucket].append(b)
+    out: list[Bar] = []
+    for bucket_ts in sorted(by_bucket.keys()):
+        members = sorted(by_bucket[bucket_ts], key=lambda x: x.ts)
+        out.append(Bar(
+            symbol=members[0].symbol,
+            ts=bucket_ts,
+            open=members[0].open,
+            high=max(m.high for m in members),
+            low=min(m.low for m in members),
+            close=members[-1].close,
+            volume=sum(m.volume for m in members),
+            timeframe="15m",
+        ))
+    return out
+
+
+def load_candles_bulk_gcs(
+    *,
+    symbols: list[str],
+    timeframe: str,                # "5m" | "15m" | "1d"
+    since: str,                    # YYYY-MM-DD inclusive (compared on ts[:10])
+    until: str,                    # YYYY-MM-DD inclusive
+    bucket: str = _DEFAULT_GCS_BUCKET,
+    exchange: str = "NSE",
+    segment: str = "CASH",
+    concurrency: int = 32,
+    aggregate_15m_from_5m: bool = True,
+) -> dict[str, list[Bar]]:
+    """Bulk-load candles from GCS for many symbols.
+
+    Reads the same JSON files the live system writes (`cache/score_1d/...`
+    and `cache/candles/{tf}/...`), filters to the requested date window in
+    Python, and returns the same shape as `load_candles_bulk_bq()`.
+
+    For 15m: if the per-symbol 15m cache file is missing, falls back to
+    aggregating from 5m (matches the BQ loader's behavior).
+
+    Concurrency: ThreadPoolExecutor with `concurrency` workers — GCS reads
+    are network-bound, so high parallelism is fine.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from autotrader.adapters.gcs_store import GoogleCloudStorageStore
+
+    tf = timeframe.lower()
+    if tf not in ("5m", "15m", "1d"):
+        raise ValueError(f"unsupported timeframe: {tf}")
+    if not symbols:
+        return {}
+
+    gcs = GoogleCloudStorageStore(bucket_name=bucket)
+    syms_clean = sorted({s.strip().upper() for s in symbols if s and s.strip()})
+
+    def _fetch_one(sym: str) -> tuple[str, list[Bar]]:
+        primary = _gcs_path_for(tf, sym, exchange, segment)
+        try:
+            raw = gcs.read_candles(primary)
+        except Exception:
+            log.warning("gcs_candles_read_failed sym=%s tf=%s path=%s",
+                        sym, tf, primary, exc_info=True)
+            raw = []
+
+        if not raw and tf == "15m" and aggregate_15m_from_5m:
+            # Fallback: aggregate from 5m
+            try:
+                five_min_bars = _read_window_as_bars(
+                    gcs, sym, "5m", since, until, exchange, segment,
+                )
+                return sym, _aggregate_5m_to_15m(five_min_bars)
+            except Exception:
+                log.warning("gcs_15m_aggregate_failed sym=%s",
+                            sym, exc_info=True)
+                return sym, []
+
+        return sym, _filter_and_box(raw, sym, tf, since, until)
+
+    out: dict[str, list[Bar]] = {}
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futs = [pool.submit(_fetch_one, s) for s in syms_clean]
+        for fut in as_completed(futs):
+            sym, bars = fut.result()
+            if bars:
+                out[sym] = bars
+    return out
+
+
+def _read_window_as_bars(
+    gcs: Any,
+    symbol: str,
+    timeframe: str,
+    since: str,
+    until: str,
+    exchange: str,
+    segment: str,
+) -> list[Bar]:
+    path = _gcs_path_for(timeframe, symbol, exchange, segment)
+    raw = gcs.read_candles(path)
+    return _filter_and_box(raw, symbol, timeframe, since, until)
+
+
+def _filter_and_box(
+    raw: list,
+    symbol: str,
+    timeframe: str,
+    since: str,
+    until: str,
+) -> list[Bar]:
+    """Convert raw `[ts, o, h, l, c, v]` rows from GCS into Bar list,
+    filtered to [since, until] inclusive on the date portion of ts."""
+    out: list[Bar] = []
+    for c in raw:
+        if not isinstance(c, (list, tuple)) or len(c) < 6:
+            continue
+        ts = str(c[0])
+        d = ts[:10]
+        if d < since or d > until:
+            continue
+        try:
+            out.append(Bar(
+                symbol=symbol,
+                ts=ts,
+                open=float(c[1]),
+                high=float(c[2]),
+                low=float(c[3]),
+                close=float(c[4]),
+                volume=float(c[5]),
+                timeframe=timeframe,
+            ))
+        except (TypeError, ValueError):
+            continue
+    out.sort(key=lambda b: b.ts)
+    return out
+
+
 # ── Decision / signal loaders ─────────────────────────────────────────────
 
 
@@ -437,6 +618,7 @@ __all__ = [
     "CandleQuery",
     "load_candles_bq",
     "load_candles_bulk_bq",
+    "load_candles_bulk_gcs",
     "ScanDecisionRow",
     "load_scan_decisions",
     "BrainSnapshot",
