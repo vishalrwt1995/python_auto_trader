@@ -102,6 +102,20 @@ class RunSpec:
     # symbols seen in [since, until]. Falls through to all symbols in
     # spec.symbols if scan_decisions is empty.
     pure_universe_from_scan: bool = True
+    # When True, load 1d candles for the symbol set and pass them to the
+    # strategy so `score_signal` Layer-5 (daily-trend alignment, ±15 pts)
+    # and `check_swing_entry` can fire. compute_daily_bias needs ≥50 daily
+    # bars; the runner pulls 90 calendar days back from `since` to be safe
+    # (≈63 trading days, well over the threshold even after gaps).
+    load_daily_bars: bool = True
+    daily_warmup_days: int = 90
+    # Pure-replay scoring/threshold flags — each maps 1:1 to a
+    # PureReplayConfig flag with the same name. Defaults match live; set
+    # False for diagnostic A/B runs that isolate a single live behaviour.
+    apply_brain_haircut: bool = True
+    apply_dynamic_min_score: bool = True
+    apply_swing_entry_gate: bool = True
+    apply_daily_bias: bool = True
 
 
 # ── Live-replay run ────────────────────────────────────────────────────────
@@ -298,6 +312,29 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
     brain = brain_lookup(brain_snaps)
     log.info("pure_replay_brain_loaded n=%d", len(brain_snaps))
 
+    # 5b. Load 1d candles for daily-bias scoring + swing-entry gate.
+    # Pulled separately because the 5m table only retains 3 months while
+    # the 1d table goes back ~10 years; daily bias needs ≥50 bars and a
+    # 90-calendar-day lookback comfortably covers that even on holiday-
+    # heavy windows (≈63 trading days).
+    daily_bars: dict[str, list[Bar]] = {}
+    if spec.load_daily_bars:
+        try:
+            daily_since = _shift_iso_date(spec.since, -spec.daily_warmup_days)
+            daily_bars_raw = load_candles_bulk_bq(
+                project=spec.project, dataset=spec.dataset,
+                symbols=syms, timeframe="1d",
+                since=daily_since, until=spec.until,
+            )
+            daily_bars = daily_bars_raw
+            log.info(
+                "pure_replay_daily_loaded symbols_with_bars=%d total_bars=%d since=%s",
+                len(daily_bars), sum(len(v) for v in daily_bars.values()), daily_since,
+            )
+        except Exception as e:
+            log.warning("pure_replay_daily_load_failed err=%s — daily-bias path will no-op", e)
+            daily_bars = {}
+
     # 6. Build account + strategy + engine.
     account_cfg = SimAccountConfig(
         starting_cash=spec.starting_cash,
@@ -313,12 +350,17 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         ),
         direction_filter=spec.direction_filter,
         max_concurrent=spec.max_concurrent,
+        apply_brain_haircut=spec.apply_brain_haircut,
+        apply_dynamic_min_score=spec.apply_dynamic_min_score,
+        apply_swing_entry_gate=spec.apply_swing_entry_gate,
+        apply_daily_bias=spec.apply_daily_bias,
     )
     strategy = PureReplayStrategy(
         cfg=pr_cfg,
         strategy_settings=StrategySettings(),
         brain=brain,
         warmup_bars=warmup_bars,
+        daily_bars=daily_bars,
     )
 
     engine = BacktestEngine(

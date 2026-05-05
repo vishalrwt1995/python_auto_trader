@@ -64,7 +64,8 @@ def _patch_score_pipeline(
     monkeypatch.setattr(rp, "compute_indicators", lambda candles, cfg: ind or _FakeInd())
     monkeypatch.setattr(rp, "determine_direction", lambda i, r, setup="": direction)
     monkeypatch.setattr(rp, "score_signal",
-                        lambda symbol, direction, ind, regime, cfg, setup="":
+                        lambda symbol, direction, ind, regime, cfg,
+                               daily_bias=None, setup="":
                         _qualified_score(score))
 
     # calc_atr is imported lazily inside `_maybe_signal`; patch the
@@ -345,12 +346,15 @@ def test_pure_replay_resets_fired_today_at_date_boundary(monkeypatch):
 # ── Regime affinity multiplier ───────────────────────────────────────────
 
 
-def _brain_with_regime(regime: str, ts: str = "2026-04-15T15:30:00+05:30") -> BrainTimeline:
+def _brain_with_regime(
+    regime: str, ts: str = "2026-04-15T15:30:00+05:30",
+    risk_mode: str = "NORMAL",
+) -> BrainTimeline:
     """Build a one-snapshot BrainTimeline pinned to a specific regime."""
     return BrainTimeline([
         BrainSnapshot(
             asof_ts=ts, run_date=ts[:10],
-            regime=regime, risk_mode="NORMAL",
+            regime=regime, risk_mode=risk_mode,
             market_confidence=70, breadth_score=55, trend_score=50,
             breadth_confidence=55, volatility_stress_score=30, data_quality_score=85,
         )
@@ -513,3 +517,318 @@ def test_hard_block_does_not_affect_unrelated_setup_in_same_regime(monkeypatch):
     # Exactly one trade — VWAP_REVERSAL fires, BREAKOUT is hard-blocked.
     assert len(result.trades) == 1
     assert result.trades[0].setup == "VWAP_REVERSAL"
+
+
+# ── Brain-state helper + adjust_signal haircut ───────────────────────────
+
+
+def test_make_brain_state_with_none_returns_neutral_defaults():
+    """Without a snapshot, fall back to NORMAL/RANGE so adjust_signal becomes
+    a no-op multiplier (1.0) — never accidentally penalise an empty timeline."""
+    state = rp._make_brain_state(None, "2026-04-16T09:30:00+05:30")
+    assert state.risk_mode == "NORMAL"
+    assert state.regime == "RANGE"
+
+
+def test_make_brain_state_threads_archived_fields():
+    snap = BrainSnapshot(
+        asof_ts="2026-04-16T09:30:00+05:30", run_date="2026-04-16",
+        regime="CHOP", risk_mode="DEFENSIVE",
+        market_confidence=44, breadth_score=33, trend_score=22,
+        breadth_confidence=55, volatility_stress_score=80, data_quality_score=90,
+    )
+    state = rp._make_brain_state(snap, "ignored")
+    assert state.regime == "CHOP"
+    assert state.risk_mode == "DEFENSIVE"
+    assert state.market_confidence == 44
+    assert state.volatility_stress_score == 80
+
+
+def test_brain_haircut_dampens_defensive_risk_mode(monkeypatch):
+    """DEFENSIVE risk_mode applies ×0.82 to score. Raw 80 → adjusted 66 < 72,
+    so a signal that would qualify under NORMAL must be filtered here.
+
+    This isolates the haircut from affinity (disabled) and from the dynamic
+    threshold lookup (we pin a static 72 via cfg.min_signal_score).
+    """
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=80.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("VWAP_REVERSAL",),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("RANGE", risk_mode="DEFENSIVE"),
+        warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 0
+
+
+def test_brain_haircut_disabled_passes_marginal_score(monkeypatch):
+    """Same setup as above but with apply_brain_haircut=False — raw 80 ≥ 72
+    fires regardless of DEFENSIVE risk_mode. Confirms the flag is the only
+    thing keeping the trade out."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=80.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("VWAP_REVERSAL",),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("RANGE", risk_mode="DEFENSIVE"),
+        warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 1
+
+
+def test_brain_haircut_chop_panic_extra_penalty(monkeypatch):
+    """CHOP/PANIC regimes get an extra ×0.88 on top of the risk_mode multiplier.
+    NORMAL × CHOP: ×1.0 × 0.88 = ×0.88. Raw 80 → 70 < 72, blocked.
+    NORMAL × RANGE: ×1.0 × 1.0 = ×1.0. Raw 80 → 80 ≥ 72, fires."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=80.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("VWAP_REVERSAL",),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,    # don't double-block via hard-block
+        apply_brain_haircut=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    # CHOP path → blocked by haircut.
+    strat_chop = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc_chop = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    res_chop = BacktestEngine(account=acc_chop, strategy=strat_chop).run(bars)
+    assert len(res_chop.trades) == 0
+
+
+# ── Dynamic min_signal_score ─────────────────────────────────────────────
+
+
+def test_resolve_min_score_swing_uses_swing_default():
+    """Swing path bypasses risk_mode lookup — fixed at swing_default."""
+    state = rp._make_brain_state(
+        BrainSnapshot(
+            asof_ts="x", run_date="x", regime="RANGE", risk_mode="DEFENSIVE",
+            market_confidence=50, breadth_score=50, trend_score=50,
+            breadth_confidence=50, volatility_stress_score=50, data_quality_score=50,
+        ), "x",
+    )
+    out = rp._resolve_min_score(
+        is_swing=True, brain_state=state, static_default=72, swing_default=75,
+    )
+    assert out == 75   # swing_default, not the DEFENSIVE-65 lookup
+
+
+def test_resolve_min_score_intraday_uses_risk_mode_table():
+    """Intraday: AGGRESSIVE → 75, NORMAL → 72, DEFENSIVE → 65, LOCKDOWN → 58."""
+    for risk_mode, expected in [
+        ("AGGRESSIVE", 75), ("NORMAL", 72),
+        ("DEFENSIVE", 65), ("LOCKDOWN", 58),
+    ]:
+        state = rp._make_brain_state(
+            BrainSnapshot(
+                asof_ts="x", run_date="x", regime="RANGE", risk_mode=risk_mode,
+                market_confidence=50, breadth_score=50, trend_score=50,
+                breadth_confidence=50, volatility_stress_score=50, data_quality_score=50,
+            ), "x",
+        )
+        out = rp._resolve_min_score(
+            is_swing=False, brain_state=state,
+            static_default=72, swing_default=75,
+        )
+        assert out == expected, f"{risk_mode}: expected {expected}, got {out}"
+
+
+def test_dynamic_min_score_lets_defensive_marginal_through(monkeypatch):
+    """DEFENSIVE risk_mode lowers the bar from 72 → 65. A raw-66 score
+    fails the static 72 but clears the dynamic 65 threshold.
+
+    Affinity + brain haircut disabled to isolate the threshold logic.
+    """
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=66.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("VWAP_REVERSAL",),
+        min_signal_score=None,         # use dynamic
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,     # don't haircut score below threshold
+        apply_dynamic_min_score=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("RANGE", risk_mode="DEFENSIVE"),
+        warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 1
+
+
+def test_dynamic_min_score_aggressive_raises_bar(monkeypatch):
+    """AGGRESSIVE risk_mode raises threshold to 75. Raw 73 clears the static
+    72 default but fails the AGGRESSIVE-75 dynamic threshold."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=73.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("VWAP_REVERSAL",),
+        min_signal_score=None,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_dynamic_min_score=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("RANGE", risk_mode="AGGRESSIVE"),
+        warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 0
+
+
+def test_dynamic_min_score_static_override_wins(monkeypatch):
+    """If cfg.min_signal_score is set, it wins over dynamic — AGGRESSIVE's
+    raised bar should NOT apply when the caller explicitly pins 60."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=65.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("VWAP_REVERSAL",),
+        min_signal_score=60,           # explicit override
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_dynamic_min_score=True,  # would compute 75 if consulted
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("RANGE", risk_mode="AGGRESSIVE"),
+        warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 1
+
+
+# ── Daily-bias + swing-entry gate ────────────────────────────────────────
+
+
+def test_swing_entry_gate_blocks_without_daily_bias(monkeypatch):
+    """Swing requires daily_bias to clear `check_swing_entry`. Without
+    daily_bars loaded, the gate auto-rejects ('swing_no_daily_data') and
+    no swing trade fires regardless of how high the score is."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=95.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        min_signal_score=72,
+        is_swing=True,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_swing_entry_gate=True,
+        apply_daily_bias=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    # No daily_bars passed — gate should reject.
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("TREND_UP"), warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 0
+
+
+def test_swing_entry_gate_disabled_lets_signal_through(monkeypatch):
+    """With apply_swing_entry_gate=False, swing fires even without daily
+    bias — diagnostic mode for measuring what the gate filters out."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        min_signal_score=72,
+        is_swing=True,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_swing_entry_gate=False,
+        apply_daily_bias=False,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("TREND_UP"), warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 1
+
+
+def test_swing_entry_gate_fires_when_daily_bias_passes(monkeypatch):
+    """When daily-bias check passes (mock returns OK), swing trade fires.
+    Patches `check_swing_entry` directly so we don't need to synthesize
+    50 daily candles satisfying the BREAKOUT-swing daily-ADX≥25 gate."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+    monkeypatch.setattr(
+        rp, "check_swing_entry",
+        lambda strategy, direction, ind, daily_bias, regime="": (True, ""),
+    )
+    # Stub the bias lookup so the strategy's internal cache thinks daily
+    # data is present (truthy non-None). check_swing_entry is what matters.
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        min_signal_score=72,
+        is_swing=True,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_swing_entry_gate=True,
+        apply_daily_bias=False,    # don't try to compute real bias
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("TREND_UP"), warmup_bars=warmup,
+    )
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 1
+
+
+def test_daily_bias_cache_returns_none_with_empty_candles():
+    """With no daily bars loaded for the symbol, the helper short-circuits
+    to None instead of calling compute_daily_bias on an empty list."""
+    strat = rp.PureReplayStrategy(cfg=rp.PureReplayConfig(), warmup_bars={"ACME": []})
+    out = strat._daily_bias_for("ACME", "2026-04-16T09:30:00+05:30")
+    assert out is None
+
+
+def test_daily_bias_cache_returns_none_with_too_few_candles():
+    """≤50 daily bars → compute_daily_bias undefined; helper short-circuits.
+    Builds 30 dummy daily bars dated strictly before the query date."""
+    daily = [
+        Bar(symbol="ACME", ts=f"2026-03-{d:02d}T15:30:00+05:30",
+            open=100.0, high=101.0, low=99.0, close=100.5,
+            volume=1000.0, timeframe="1d")
+        for d in range(1, 31)
+    ]
+    strat = rp.PureReplayStrategy(
+        cfg=rp.PureReplayConfig(), daily_bars={"ACME": daily},
+    )
+    out = strat._daily_bias_for("ACME", "2026-04-16T09:30:00+05:30")
+    assert out is None     # only 30 candles, need ≥50

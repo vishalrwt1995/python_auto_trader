@@ -23,21 +23,32 @@ What this DOES re-compute
 
 What this does NOT re-compute (deferred / honesty disclosure)
 -------------------------------------------------------------
-* **Brain confidence adjustment** (`market_brain_service.adjust_signal`)
-  — depends on full BrainState, not just the regime. Sim only has the
-  archived `market_brain_history` (regime + risk_mode + a few scalars).
-* **Daily bias swing-mode adjustments** — would need 1d candles loaded
-  in parallel; sim today loads only one timeframe. Future work.
+* **Daily-bias swing adjustments** — wired (see `_load_daily_bias`
+  + `cfg.apply_daily_bias` below). Daily candles are loaded once at
+  warm-up and `compute_daily_bias` runs as-of each session date so
+  scoring's Layer-5 alignment fires the same way live does.
 * **Per-strategy entry gates** (`check_strategy_entry`, `check_swing_entry`)
   — these gates ALSO live in `domain.scoring`. They are pure functions
-  but operate on `IndicatorSnapshot`, so we can wire them in cheaply.
-  We do call them; if they reject, we mark the decision blocked.
-* **News / options gates** — out of scope per audit (no historical
-  options chain or news_store).
+  but operate on `IndicatorSnapshot`, so we wire them in cheaply.
+  Pure-replay calls `check_swing_entry` when `cfg.is_swing=True` (hard
+  gate matching live); intraday entry gates are scoring-internal already.
+* **Brain confidence adjustment** (`market_policy_service.adjust_signal`)
+  — wired (see `cfg.apply_brain_haircut`). The live function reads only
+  `risk_mode` + `regime`, both archived in `market_brain_history`, so
+  pure-replay reproduces the haircut exactly via the same call.
+* **Dynamic `min_signal_score`** — wired (see `cfg.apply_dynamic_min_score`).
+  Replicates the `_SCORE_THRESHOLDS` lookup from `trading_service.py:970-1008`
+  keyed by `BrainSnapshot.risk_mode`.
+* **News gate** — already faithful: live has `use_news_signals_v1=False`
+  hardcoded (`scan_service`), so news never gates a live entry. Sim
+  matches live by also not gating.
+* **Options PCR fine-tuning** — APPROXIMATE. Live's score gets ±5 points
+  from real-time PCR (`score_signal` Layer-7); historical option chain
+  isn't archived, so pure-replay scores without it. The PCR signal is
+  ≤5% of the 100-point scale, so the residual approximation is bounded
+  but real — calibrate against live fills (see `slippage_calibration`)
+  to absorb any systematic bias.
 * **Universe selection** — sim runs over the symbols you give it.
-* **Dynamic min_signal_score** — scan_service computes a per-tick
-  min_score that floats with regime/brain. Sim uses the static default
-  (`StrategySettings.min_signal_score = 72`) unless you override.
 
 Wiring
 ------
@@ -72,6 +83,7 @@ from autotrader.domain.models import (
     Candle,
     FreshnessSnapshot,
     IndicatorSnapshot,
+    MarketBrainState,
     PcrSnapshot,
     NiftySnapshot,
     NiftyStructureSnapshot,
@@ -84,7 +96,12 @@ from autotrader.domain.regime_affinity import (
     regime_hard_blocks_strategy,
     regime_strategy_multiplier,
 )
-from autotrader.domain.scoring import determine_direction, score_signal
+from autotrader.domain.scoring import (
+    check_swing_entry,
+    determine_direction,
+    score_signal,
+)
+from autotrader.services.market_policy_service import MarketPolicyService
 from autotrader.settings import StrategySettings
 
 log = logging.getLogger(__name__)
@@ -130,6 +147,29 @@ class PureReplayConfig:
     # (matches live's policy-block in scan_service). Disable to study what
     # those filtered setups would have done if allowed.
     apply_hard_blocks: bool = True
+    # When True, apply `MarketPolicyService.adjust_signal` after the affinity
+    # multiplier — this is the second stage live applies in `trading_service.
+    # py:850-857`. The haircut depends on `risk_mode` (×0.60–1.08) and
+    # `regime` (×0.88 in CHOP/PANIC), both archived in market_brain_history,
+    # so pure-replay reproduces it exactly. Disable for A/B comparisons.
+    apply_brain_haircut: bool = True
+    # When True, replicate live's per-tick `min_signal_score` lookup keyed by
+    # `risk_mode` (`trading_service.py:970-1008`). Defaults: AGGRESSIVE=75,
+    # NORMAL=72, DEFENSIVE=65, LOCKDOWN=58. When False, the static
+    # `cfg.min_signal_score` (or `StrategySettings.min_signal_score`) is used
+    # for every bar regardless of brain state.
+    apply_dynamic_min_score: bool = True
+    # When True, swing trades (`is_swing=True`) are also gated by
+    # `domain.scoring.check_swing_entry` against the daily-bias snapshot.
+    # Live applies this gate unconditionally for swing in `trading_service`.
+    # Disable to measure what swing trades that fail the daily-bias gate
+    # would have done if allowed (diagnostic only — live never disables it).
+    apply_swing_entry_gate: bool = True
+    # When True, score_signal receives the daily-bias snapshot for Layer-5
+    # (daily-trend alignment, ±15 pts). Required for swing because
+    # check_swing_entry rejects without daily_bias. Set False to measure
+    # the residual scoring contribution from the daily timeframe.
+    apply_daily_bias: bool = True
 
 
 @dataclass
@@ -145,11 +185,82 @@ class _PendingPositionMeta:
     score: float
     raw_score: float = 0.0          # pre-affinity, for diagnostics
     affinity_mult: float = 1.0      # what was applied (1.0 = none)
+    affinity_score: float = 0.0     # post-affinity, pre-brain-haircut
+    threshold: int = 0              # min_score this fill cleared (dynamic-aware)
+    risk_mode: str = "NORMAL"       # brain risk_mode at signal time
 
 
 def _bar_to_candle(b: Bar) -> Candle:
     """Convert a backtest Bar to the indicator module's Candle tuple."""
     return (b.ts, b.open, b.high, b.low, b.close, b.volume)
+
+
+# Mirrors `_SCORE_THRESHOLDS` in `services/trading_service.py:970-1008`.
+# Keep in sync — a divergence here means pure-replay quietly fires more or
+# fewer signals than live in the same regime, which is exactly what we
+# claim the sim doesn't do.
+_RISK_MODE_MIN_SCORE: dict[str, int] = {
+    "AGGRESSIVE": 75,
+    "NORMAL":     72,
+    "DEFENSIVE":  65,
+    "LOCKDOWN":   58,
+}
+# Empty in live as of 2026-04-22 — kept here as a documented hook so that
+# if `_REGIME_MIN_SCORE` is ever re-populated upstream, the corresponding
+# pure-replay change is a one-line edit, not a re-architecture.
+_REGIME_MIN_SCORE: dict[str, int] = {}
+
+
+def _make_brain_state(snap: Any, ts: str) -> MarketBrainState:
+    """Build a `MarketBrainState` from a `BrainSnapshot` (or None).
+
+    `MarketPolicyService.adjust_signal` reads only `risk_mode` + `regime`,
+    both archived in `market_brain_history`, so the rest of the fields fall
+    back to their dataclass defaults. This is intentionally a thin shim:
+    if live's `adjust_signal` ever grows to depend on more state, this
+    function is the single place to thread the new field through (or to
+    surface the gap as `UNVERIFIED`).
+    """
+    if snap is None:
+        return MarketBrainState(asof_ts=ts)
+    return MarketBrainState(
+        asof_ts=snap.asof_ts,
+        regime=snap.regime,
+        risk_mode=snap.risk_mode,
+        market_confidence=snap.market_confidence,
+        breadth_score=snap.breadth_score,
+        trend_score=snap.trend_score,
+        breadth_confidence=snap.breadth_confidence,
+        volatility_stress_score=snap.volatility_stress_score,
+        data_quality_score=snap.data_quality_score,
+    )
+
+
+def _resolve_min_score(
+    *,
+    is_swing: bool,
+    brain_state: MarketBrainState | None,
+    static_default: int,
+    swing_default: int,
+) -> int:
+    """Replicate the dynamic min-score lookup live runs every scan tick.
+
+    See `services/trading_service.py:984-1008`:
+      * Swing: fixed `swing_min_signal_score` (no risk_mode haircut — swing
+        already has a high static bar and we compare the *affinity*-adjusted
+        score, not the brain-haircut score, in live).
+      * Intraday: lookup `risk_mode` in `_SCORE_THRESHOLDS`, then prefer
+        `_REGIME_MIN_SCORE[regime]` if it's lower (regime-discount lane).
+    """
+    if is_swing:
+        return swing_default
+    risk_mode = brain_state.risk_mode if brain_state else "NORMAL"
+    base = _RISK_MODE_MIN_SCORE.get(risk_mode, static_default)
+    if brain_state is not None:
+        regime_floor = _REGIME_MIN_SCORE.get(brain_state.regime)
+        if regime_floor is not None and regime_floor < base:
+            base = regime_floor
+    return base
 
 
 def _make_regime_snapshot(brain: BrainTimeline, ts: str) -> RegimeSnapshot:
@@ -204,12 +315,30 @@ class PureReplayStrategy:
         strategy_settings: StrategySettings | None = None,
         brain: BrainTimeline | None = None,
         warmup_bars: dict[str, list[Bar]] | None = None,
+        daily_bars: dict[str, list[Bar]] | None = None,
     ) -> None:
         self.cfg = cfg or PureReplayConfig()
         self.s_cfg = strategy_settings or StrategySettings()
         self.brain = brain or BrainTimeline([])
         self._history: dict[str, Deque[Candle]] = {}
         self._pending_meta: dict[str, _PendingPositionMeta] = {}
+        # Stateless service — methods read only their args; instantiating once
+        # avoids re-allocation per bar.
+        self._policy = MarketPolicyService()
+        # Per-symbol daily-candle store for `compute_daily_bias`. We keep the
+        # raw lists (not pre-computed DailyBias) and re-run the function as-of
+        # each session date — `compute_daily_bias` slices on the trailing
+        # window internally and is cheap enough to call per-symbol per-day.
+        self._daily_candles: dict[str, list[list]] = {}
+        if daily_bars:
+            for sym, bars in daily_bars.items():
+                self._daily_candles[sym.upper()] = [
+                    [b.ts, b.open, b.high, b.low, b.close, b.volume]
+                    for b in bars
+                ]
+        # Cached `DailyBias` per (symbol, date) — invalidated when the date
+        # rolls. Live recomputes every scan; we do once per day per symbol.
+        self._daily_bias_cache: dict[tuple[str, str], Any] = {}
         # Track signals already fired today per (symbol, setup, direction) to
         # avoid double-firing every bar after we cross the threshold. Cleared
         # at midnight (date change in bar.ts).
@@ -301,6 +430,35 @@ class PureReplayStrategy:
 
     # ── Helpers ──────────────────────────────────────────────────────
 
+    def _daily_bias_for(self, sym: str, bar_ts: str):
+        """Return cached `DailyBias` for (sym, bar_date), recomputing on
+        first miss. Returns None if there are no daily candles loaded for
+        the symbol or `compute_daily_bias` rejects (≤50 bars / NaNs).
+        Importing inside the method keeps the dependency lazy — backtests
+        that don't pass `daily_bars=` never need to import daily_bias."""
+        bar_date = bar_ts[:10]
+        cache_key = (sym, bar_date)
+        if cache_key in self._daily_bias_cache:
+            return self._daily_bias_cache[cache_key]
+
+        candles = self._daily_candles.get(sym)
+        if not candles:
+            self._daily_bias_cache[cache_key] = None
+            return None
+
+        # Cut off candles strictly before today's session — daily bar for
+        # the current trading date is incomplete during the day, and
+        # leaking it would be look-ahead.
+        usable = [c for c in candles if str(c[0])[:10] < bar_date]
+        if len(usable) < 50:
+            self._daily_bias_cache[cache_key] = None
+            return None
+
+        from autotrader.domain.daily_bias import compute_daily_bias
+        bias = compute_daily_bias(usable)
+        self._daily_bias_cache[cache_key] = bias
+        return bias
+
     def _maybe_signal(
         self,
         ctx: StrategyContext,
@@ -313,6 +471,8 @@ class PureReplayStrategy:
             return
 
         regime = _make_regime_snapshot(self.brain, ctx.bar.ts)
+        brain_snap = self.brain.asof(ctx.bar.ts)
+        brain_state = _make_brain_state(brain_snap, ctx.bar.ts)
 
         # Hard-block gate — matches the policy-block live applies in
         # `scan_service`. Mismatched (regime, strategy) pairs (e.g.
@@ -328,12 +488,18 @@ class PureReplayStrategy:
         if self.cfg.direction_filter and direction != self.cfg.direction_filter:
             return
 
+        # Daily bias for Layer-5 alignment + swing entry gate. Computed
+        # once per (symbol, date) and cached. Live recomputes per scan but
+        # the result is deterministic on close-to-close so caching is safe.
+        daily_bias = self._daily_bias_for(sym, ctx.bar.ts) if self.cfg.apply_daily_bias else None
+
         sig: SignalScore = score_signal(
             symbol=sym,
             direction=direction,
             ind=ind,
             regime=regime,
             cfg=self.s_cfg,
+            daily_bias=daily_bias,
             setup=setup,
         )
         raw_score = float(sig.score)
@@ -345,17 +511,54 @@ class PureReplayStrategy:
             affinity_mult = regime_strategy_multiplier(
                 regime.regime, setup, direction,
             )
-            adjusted_score = max(0, min(100, int(round(raw_score * affinity_mult))))
+            affinity_score = max(0, min(100, int(round(raw_score * affinity_mult))))
         else:
             affinity_mult = 1.0
-            adjusted_score = int(round(raw_score))
+            affinity_score = int(round(raw_score))
 
-        threshold = (
-            self.cfg.min_signal_score
-            if self.cfg.min_signal_score is not None
-            else self.s_cfg.min_signal_score
-        )
-        if adjusted_score < threshold:
+        # Brain-state haircut — the second stage of live's score adjustment
+        # in `trading_service.py:850-857`. Risk-mode ×0.60..1.08, then a
+        # ×0.88 penalty if regime is CHOP/PANIC. Reads only `risk_mode` +
+        # `regime` from MarketBrainState, both archived.
+        # Note: live applies haircut to BOTH intraday and swing scores
+        # (the swing path then ignores the haircut score for thresholding,
+        # but the intraday path uses it). We mirror that: compute it
+        # always; only consult it for intraday in the threshold check.
+        if self.cfg.apply_brain_haircut:
+            adjusted_score = self._policy.adjust_signal(affinity_score, brain_state)
+        else:
+            adjusted_score = affinity_score
+
+        # Swing-specific hard gate. Live calls `check_swing_entry` from
+        # trading_service before sizing. Without daily_bias the gate
+        # auto-rejects ("swing_no_daily_data"), matching live behaviour.
+        if self.cfg.is_swing and self.cfg.apply_swing_entry_gate:
+            ok, reason = check_swing_entry(setup, direction, ind, daily_bias, regime.regime)
+            if not ok:
+                if self.cfg.debug_orders:
+                    log.info(
+                        "pure_replay_swing_gate_blocked sym=%s setup=%s dir=%s reason=%s",
+                        sym, setup, direction, reason,
+                    )
+                return
+
+        # Threshold selection — dynamic by risk_mode (live behaviour) or
+        # the static override the caller pinned via `cfg.min_signal_score`.
+        # Swing uses `affinity_score` (no brain haircut) per live; intraday
+        # uses the brain-haircut `adjusted_score`.
+        if self.cfg.min_signal_score is not None:
+            threshold = self.cfg.min_signal_score
+        elif self.cfg.apply_dynamic_min_score:
+            threshold = _resolve_min_score(
+                is_swing=self.cfg.is_swing,
+                brain_state=brain_state,
+                static_default=self.s_cfg.min_signal_score,
+                swing_default=self.s_cfg.swing_min_signal_score,
+            )
+        else:
+            threshold = self.s_cfg.min_signal_score
+        score_for_threshold = affinity_score if self.cfg.is_swing else adjusted_score
+        if score_for_threshold < threshold:
             return
 
         # One-shot per (date, symbol, setup, direction) to avoid
@@ -407,14 +610,17 @@ class PureReplayStrategy:
             setup=setup, is_swing=self.cfg.is_swing,
             regime=regime.regime, score=adjusted_score,
             raw_score=raw_score, affinity_mult=affinity_mult,
+            affinity_score=affinity_score, threshold=threshold,
+            risk_mode=brain_state.risk_mode,
         )
         self._fired_today.add(fkey)
         if self.cfg.debug_orders:
             log.info(
                 "pure_replay_signal sym=%s setup=%s dir=%s raw=%.1f mult=%.2f "
-                "adj=%d qty=%d ltp=%.2f atr=%.2f",
+                "aff=%d adj=%d thr=%d risk=%s qty=%d ltp=%.2f atr=%.2f",
                 sym, setup, direction, raw_score, affinity_mult,
-                adjusted_score, qty, ind.close, atr,
+                affinity_score, adjusted_score, threshold, brain_state.risk_mode,
+                qty, ind.close, atr,
             )
 
 
