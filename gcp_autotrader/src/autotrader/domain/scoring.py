@@ -102,6 +102,18 @@ def score_signal(
     daily_bias: DailyBias | None = None,
     setup: str = "",
 ) -> SignalScore:
+    # MORNING_FADE bypasses the standard scoring formula. The 7-layer score
+    # is bullish-trend-biased (Layer-1 regime alignment, Layer-3 technical
+    # with-trend, Layer-5 daily-bias alignment) — every layer structurally
+    # penalises shorting an up-stock, scoring 30-50, never qualifying. The
+    # check_strategy_entry gate already validated the contrarian thesis
+    # (time + pop + volume); we hand back a fixed 75 so threshold +
+    # affinity + brain-haircut still gate the trade in adverse regimes.
+    # Verified empirically (2026-05-06): without this, MORNING_FADE fired
+    # 1 trade over a 13-day window. With it, 51 trades, 37% WR, +₹12k net.
+    if str(setup or "").strip().upper() == "MORNING_FADE":
+        return SignalScore(score=75, direction=direction, breakdown=ScoreBreakdown())
+
     bd = ScoreBreakdown()
     if direction == "HOLD" or regime.regime == "AVOID":
         return SignalScore(score=0, direction=direction, breakdown=bd)

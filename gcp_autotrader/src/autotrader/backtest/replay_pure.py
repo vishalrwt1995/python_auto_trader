@@ -624,28 +624,12 @@ class PureReplayStrategy:
                 if not ok:
                     continue
 
-            # 5. Score
-            # MORNING_FADE bypasses the standard score_signal formula because
-            # that formula is designed for trend-following setups (Layer-1
-            # regime alignment, Layer-3 technical-with-trend, Layer-5 daily-
-            # bias alignment). Shorting an up-stock structurally fails all of
-            # those layers and scores 30-50, never qualifying. The check_
-            # strategy_entry gate already validated the thesis (time + pop
-            # magnitude + volume); assigning a fixed mid-range score lets the
-            # signal flow through threshold + affinity without the misaligned
-            # bullish-bias of score_signal. Score=75 sits at the low end of
-            # "qualified" so the affinity multiplier and brain haircut still
-            # gate against it in adverse regimes.
-            if setup == "MORNING_FADE":
-                raw_score = 75.0
-                sig = SignalScore(score=int(raw_score), direction=direction,
-                                  breakdown=ScoreBreakdown())
-            else:
-                sig = score_signal(
-                    symbol=sym, direction=direction, ind=ind, regime=regime,
-                    cfg=self.s_cfg, daily_bias=daily_bias, setup=setup,
-                )
-                raw_score = float(sig.score)
+            # 5. Score (score_signal natively handles MORNING_FADE bypass)
+            sig: SignalScore = score_signal(
+                symbol=sym, direction=direction, ind=ind, regime=regime,
+                cfg=self.s_cfg, daily_bias=daily_bias, setup=setup,
+            )
+            raw_score = float(sig.score)
 
             # 6. Affinity multiplier
             if self.cfg.apply_affinity_multiplier:

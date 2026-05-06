@@ -612,6 +612,46 @@ class TradingService:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")
                 return {"skipped": "watchlist_empty"}
 
+            # 2026-05-06: MORNING_FADE overlay. For every intraday watchlist
+            # row, inject a parallel row with strategy="MORNING_FADE". The
+            # existing scan loop processes both rows naturally — the original
+            # row scores its assigned strategy, the companion row scores
+            # MORNING_FADE. The MORNING_FADE gate (check_strategy_entry)
+            # only matches in the 09:45-10:15 IST window with a >1.5% pop
+            # + volume, so 99% of MORNING_FADE companions fail the gate
+            # cheaply. The 1% that fire produce the regime-appropriate
+            # short-the-pop signals validated in pure-replay (51 trades,
+            # 37% WR, +₹12k net over Apr 16-May 4).
+            #
+            # Live integration parity: the universe_service does NOT yet
+            # tag MORNING_FADE candidates, so this overlay is the only path
+            # for the strategy to reach orders in production. When/if the
+            # universe service starts assigning MORNING_FADE directly, the
+            # injection here can be made a no-op via a flag.
+            from dataclasses import replace as _dc_replace
+            from autotrader.time_utils import ist_minutes as _ist_min_now
+            _ist_now_min = _ist_min_now()
+            # Window: open injection from market open through 10:15 IST.
+            # The gate enforces 09:45-10:15, but pre-09:45 bars still flow
+            # through the loop and exit cheaply on the time gate.
+            # Only inject when we'll plausibly fire in this scan tick — saves
+            # a per-symbol indicator computation outside the window.
+            if 555 <= _ist_now_min <= 615:
+                _mf_companions: list[Any] = []
+                for w in subset:
+                    if getattr(w, "wl_type", "intraday") == "swing":
+                        continue   # swing watchlist rows aren't intraday-fadeable
+                    _existing_strat = str(w.strategy or "").strip().upper()
+                    if _existing_strat == "MORNING_FADE":
+                        continue   # already a MORNING_FADE row, don't double up
+                    _mf_companions.append(_dc_replace(w, strategy="MORNING_FADE"))
+                if _mf_companions:
+                    logger.info(
+                        "morning_fade_overlay_injected n=%d ist_min=%d (window 555-615)",
+                        len(_mf_companions), _ist_now_min,
+                    )
+                    subset = list(subset) + _mf_companions
+
             # Portfolio risk: pre-build sector map of open positions for concentration check
             _portfolio_sectors = self._build_portfolio_sector_map()
             _MAX_SAME_SECTOR = 2   # hard cap: max positions from one sector
