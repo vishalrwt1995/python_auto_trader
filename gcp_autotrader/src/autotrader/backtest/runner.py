@@ -129,6 +129,10 @@ class RunSpec:
     apply_dynamic_min_score: bool = True
     apply_swing_entry_gate: bool = True
     apply_daily_bias: bool = True
+    # Strategy-specific entry gate (live's `check_strategy_entry`). Default
+    # True to match live; disable only for diagnostic A/B comparisons of
+    # what the system would have done without per-setup hard gates.
+    apply_strategy_entry_gate: bool = True
 
 
 # ── Live-replay run ────────────────────────────────────────────────────────
@@ -357,7 +361,12 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         per_trade_risk_inr=spec.per_trade_risk_inr,
         min_signal_score=spec.min_signal_score,
         setups=tuple(s.upper() for s in spec.setups) if spec.setups else (
-            "BREAKOUT", "VWAP_TREND", "VWAP_REVERSAL"
+            # Mirror the universe of setups live's scanner can assign at
+            # watchlist build time. Pure-replay evaluates all of them and
+            # fires the highest-scoring one per bar (see
+            # `PureReplayStrategy._maybe_signal_best`).
+            "BREAKOUT", "VWAP_TREND", "VWAP_REVERSAL",
+            "MOMENTUM", "OPEN_DRIVE",
         ),
         direction_filter=spec.direction_filter,
         max_concurrent=spec.max_concurrent,
@@ -365,6 +374,7 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         apply_dynamic_min_score=spec.apply_dynamic_min_score,
         apply_swing_entry_gate=spec.apply_swing_entry_gate,
         apply_daily_bias=spec.apply_daily_bias,
+        apply_strategy_entry_gate=spec.apply_strategy_entry_gate,
     )
     strategy = PureReplayStrategy(
         cfg=pr_cfg,

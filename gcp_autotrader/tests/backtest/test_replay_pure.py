@@ -67,6 +67,14 @@ def _patch_score_pipeline(
                         lambda symbol, direction, ind, regime, cfg,
                                daily_bias=None, setup="":
                         _qualified_score(score))
+    # `_maybe_signal_best` calls `check_strategy_entry` to mirror live's
+    # per-strategy hard gate. The real function reads `ind.adx`, `ind.vwap`,
+    # `ind.rsi.curr` — fields the test's `_FakeInd` doesn't carry. Stub it
+    # to pass-through in the same way the other scoring entry-points are
+    # stubbed; the swing-entry helper is patched separately on tests that
+    # exercise it.
+    monkeypatch.setattr(rp, "check_strategy_entry",
+                        lambda strategy, direction, ind, regime="": (True, ""))
 
     # calc_atr is imported lazily inside `_maybe_signal`; patch the
     # canonical module so the lazy `from … import calc_atr, normalize_candles`
@@ -832,3 +840,182 @@ def test_daily_bias_cache_returns_none_with_too_few_candles():
     )
     out = strat._daily_bias_for("ACME", "2026-04-16T09:30:00+05:30")
     assert out is None     # only 30 candles, need ≥50
+
+
+# ── Strategy-entry gate (mirrors live trading_service.py:1159) ──────────
+
+
+def test_strategy_entry_gate_blocks_when_check_returns_false(monkeypatch):
+    """`check_strategy_entry` returning (False, reason) must drop the
+    candidate even if score, direction, regime affinity, and threshold
+    all qualify. This is the per-strategy hard gate that distinguishes
+    BREAKOUT (volume surge + 52w-high) from VWAP_REVERSAL (RSI extreme +
+    VWAP-extension) — without it, the simulator over-fires by 3-12×.
+    """
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+    # Override the pass-through stub from _patch_score_pipeline with a
+    # gate that always blocks.
+    monkeypatch.setattr(
+        rp, "check_strategy_entry",
+        lambda strategy, direction, ind, regime="": (False, "no_volume_surge"),
+    )
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_strategy_entry_gate=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 0, (
+        "check_strategy_entry returning False must block the signal "
+        "(matches live's gate at trading_service.py:1159)"
+    )
+
+
+def test_strategy_entry_gate_disabled_lets_signal_through(monkeypatch):
+    """With apply_strategy_entry_gate=False the gate is skipped — useful
+    for diagnostic 'what did the per-strategy gate filter out?' studies."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+    # This stub would block, but the flag should bypass it.
+    monkeypatch.setattr(
+        rp, "check_strategy_entry",
+        lambda strategy, direction, ind, regime="": (False, "would_block"),
+    )
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_strategy_entry_gate=False,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 1
+
+
+def test_strategy_entry_gate_filters_some_setups_not_others(monkeypatch):
+    """Gate blocks BREAKOUT but allows VWAP_REVERSAL — verify the surviving
+    setup fires and the blocked one is dropped. This is the realistic
+    multi-setup scenario where each strategy has its own per-bar gate."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    def selective_gate(strategy, direction, ind, regime=""):
+        if strategy == "BREAKOUT":
+            return False, "no_breakout_conditions"
+        return True, ""
+    monkeypatch.setattr(rp, "check_strategy_entry", selective_gate)
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT", "VWAP_REVERSAL"),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_strategy_entry_gate=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+
+    assert len(result.trades) == 1
+    assert result.trades[0].setup == "VWAP_REVERSAL", (
+        "BREAKOUT must be blocked by its gate; VWAP_REVERSAL must survive."
+    )
+
+
+# ── Best-of-N candidate selection ─────────────────────────────────────────
+
+
+def test_best_setup_wins_when_multiple_candidates_qualify(monkeypatch):
+    """When several setups all clear every gate on the same bar, the
+    highest-scoring one wins — matches live's "single signal per name"
+    semantics where the watchlist pre-assigns ONE strategy per stock.
+
+    With raw scores BREAKOUT=70, VWAP_REVERSAL=85 (raw post-affinity),
+    the strategy must pick VWAP_REVERSAL. We synthesize different scores
+    by patching score_signal to return different values per setup.
+    """
+    # We can't use _patch_score_pipeline directly because it stubs
+    # score_signal to return a constant — set up the indicator/direction
+    # stubs by hand and a setup-aware score_signal.
+    from autotrader.domain.models import ScoreBreakdown, SignalScore
+
+    monkeypatch.setattr(rp, "compute_indicators", lambda candles, cfg: _FakeInd())
+    monkeypatch.setattr(rp, "determine_direction", lambda i, r, setup="": "BUY")
+    monkeypatch.setattr(
+        rp, "check_strategy_entry",
+        lambda strategy, direction, ind, regime="": (True, ""),
+    )
+    import autotrader.domain.indicators as ind_mod
+    monkeypatch.setattr(ind_mod, "calc_atr", lambda candles, n=14: 1.0)
+    monkeypatch.setattr(ind_mod, "normalize_candles", lambda c: c)
+
+    score_per_setup = {"BREAKOUT": 75.0, "VWAP_REVERSAL": 90.0, "MOMENTUM": 80.0}
+    monkeypatch.setattr(
+        rp, "score_signal",
+        lambda symbol, direction, ind, regime, cfg, daily_bias=None, setup="":
+            SignalScore(
+                score=score_per_setup.get(setup, 70.0),
+                direction=direction,
+                breakdown=ScoreBreakdown(),
+            ),
+    )
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT", "VWAP_REVERSAL", "MOMENTUM"),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_strategy_entry_gate=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+
+    assert len(result.trades) == 1
+    assert result.trades[0].setup == "VWAP_REVERSAL", (
+        f"highest-scoring setup should win; got {result.trades[0].setup}"
+    )
+
+
+def test_best_setup_picks_only_one_even_when_all_qualify(monkeypatch):
+    """No matter how many setups qualify on the same bar, only ONE order
+    fires per (date, symbol, direction). This is the structural guarantee
+    that pure-replay matches live's pyramid guard ('one position per
+    name+side') without relying on the per-symbol watchlist."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT", "VWAP_TREND", "VWAP_REVERSAL", "MOMENTUM", "OPEN_DRIVE"),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_strategy_entry_gate=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(cfg=cfg, warmup_bars=warmup)
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+
+    # All 5 setups would qualify (same stub score 85 ≥ 72), but only one
+    # trade must fire because best-of-N selection picks a single winner.
+    assert len(result.trades) == 1

@@ -97,6 +97,7 @@ from autotrader.domain.regime_affinity import (
     regime_strategy_multiplier,
 )
 from autotrader.domain.scoring import (
+    check_strategy_entry,
     check_swing_entry,
     determine_direction,
     score_signal,
@@ -122,8 +123,19 @@ class PureReplayConfig:
     # Override the static min_signal_score from StrategySettings. None = use
     # `StrategySettings.min_signal_score`.
     min_signal_score: int | None = None
-    # Restrict to certain setups (None = test all setups in the universe).
-    setups: tuple[str, ...] = ("BREAKOUT", "VWAP_TREND", "VWAP_REVERSAL")
+    # Setups to consider on each bar. Live builds a watchlist with ONE
+    # strategy per stock, then scans only that strategy. Pure-replay can't
+    # replicate the watchlist (we don't archive it bar-by-bar), so instead
+    # we evaluate every listed setup, run each through its strategy-entry
+    # gate, score the survivors, and fire the highest-scoring one (matching
+    # live's "best signal wins per name+direction" semantics imposed by the
+    # pyramid guard). The full list mirrors the universe of setups the live
+    # scanner can assign at watchlist build time, minus PHASE1_* (which
+    # depend on offline phase-1 picks not archived per bar).
+    setups: tuple[str, ...] = (
+        "BREAKOUT", "VWAP_TREND", "VWAP_REVERSAL",
+        "MOMENTUM", "OPEN_DRIVE",
+    )
     # Restrict directions: None = both, "BUY" or "SELL" to limit.
     direction_filter: str | None = None
     # Default ATR multiple for SL distance. Same default as live.
@@ -170,6 +182,13 @@ class PureReplayConfig:
     # check_swing_entry rejects without daily_bias. Set False to measure
     # the residual scoring contribution from the daily timeframe.
     apply_daily_bias: bool = True
+    # When True, gate every candidate signal through `check_strategy_entry`
+    # — the strategy-specific hard gate live runs at `trading_service.py:1159`
+    # right before sizing. Without it, BREAKOUT fires on bars without a
+    # volume surge, VWAP_REVERSAL fires near VWAP, etc., and the simulator
+    # over-trades by ~3-12× depending on setup. Disable only for diagnostic
+    # A/B (e.g. "what would the system have done with no per-strategy gate?").
+    apply_strategy_entry_gate: bool = True
 
 
 @dataclass
@@ -376,9 +395,15 @@ class PureReplayStrategy:
         if len(dq) < 80:
             return  # not enough warm-up
 
-        # Per-setup loop — one symbol can be a candidate for multiple setups.
-        for setup in self.cfg.setups:
-            self._maybe_signal(ctx, sym, setup, list(dq))
+        # Live builds a watchlist with ONE strategy per stock and scans
+        # only that strategy. We don't archive the watchlist per bar, so
+        # we evaluate every configured setup and fire only the best-scoring
+        # one — matching live's "single signal per name per bar" semantics
+        # (the pyramid guard inside `_emit_signal` enforces it as a backstop
+        # but candidate-selection here keeps cost down and avoids ordering
+        # artifacts where setup A always wins setup B by virtue of loop
+        # position rather than score).
+        self._maybe_signal_best(ctx, sym, list(dq))
 
     def on_fill(self, ctx: StrategyContext, fill: Fill) -> None:
         tag = fill.parent_tag
@@ -459,13 +484,19 @@ class PureReplayStrategy:
         self._daily_bias_cache[cache_key] = bias
         return bias
 
-    def _maybe_signal(
+    def _maybe_signal_best(
         self,
         ctx: StrategyContext,
         sym: str,
-        setup: str,
         candles: list[Candle],
     ) -> None:
+        """Evaluate every configured setup, pick the highest-scoring one
+        that survives every gate (hard-block, direction, strategy-entry,
+        swing-entry, threshold), and emit it. Matches live's per-name
+        semantics: live builds a watchlist with one strategy per stock, so
+        per-name there's never more than one candidate. We approximate that
+        by scoring all candidates and selecting the winner.
+        """
         ind = compute_indicators(candles, self.s_cfg)
         if ind is None:
             return
@@ -474,78 +505,11 @@ class PureReplayStrategy:
         brain_snap = self.brain.asof(ctx.bar.ts)
         brain_state = _make_brain_state(brain_snap, ctx.bar.ts)
 
-        # Hard-block gate — matches the policy-block live applies in
-        # `scan_service`. Mismatched (regime, strategy) pairs (e.g.
-        # BREAKOUT in CHOP) get rejected before scoring.
-        if self.cfg.apply_hard_blocks and regime_hard_blocks_strategy(
-            regime.regime, setup
-        ):
-            return
-
-        direction = determine_direction(ind, regime, setup=setup)
-        if direction == "HOLD":
-            return
-        if self.cfg.direction_filter and direction != self.cfg.direction_filter:
-            return
-
-        # Daily bias for Layer-5 alignment + swing entry gate. Computed
-        # once per (symbol, date) and cached. Live recomputes per scan but
-        # the result is deterministic on close-to-close so caching is safe.
+        # Daily bias is per-(symbol, date) — compute once for the bar.
         daily_bias = self._daily_bias_for(sym, ctx.bar.ts) if self.cfg.apply_daily_bias else None
 
-        sig: SignalScore = score_signal(
-            symbol=sym,
-            direction=direction,
-            ind=ind,
-            regime=regime,
-            cfg=self.s_cfg,
-            daily_bias=daily_bias,
-            setup=setup,
-        )
-        raw_score = float(sig.score)
-
-        # Regime-strategy affinity multiplier — same call live makes in
-        # `trading_service._maybe_open` (line 850). Mismatched setups get
-        # damped (down to 0.2x); aligned ones get a boost (up to 1.4x).
-        if self.cfg.apply_affinity_multiplier:
-            affinity_mult = regime_strategy_multiplier(
-                regime.regime, setup, direction,
-            )
-            affinity_score = max(0, min(100, int(round(raw_score * affinity_mult))))
-        else:
-            affinity_mult = 1.0
-            affinity_score = int(round(raw_score))
-
-        # Brain-state haircut — the second stage of live's score adjustment
-        # in `trading_service.py:850-857`. Risk-mode ×0.60..1.08, then a
-        # ×0.88 penalty if regime is CHOP/PANIC. Reads only `risk_mode` +
-        # `regime` from MarketBrainState, both archived.
-        # Note: live applies haircut to BOTH intraday and swing scores
-        # (the swing path then ignores the haircut score for thresholding,
-        # but the intraday path uses it). We mirror that: compute it
-        # always; only consult it for intraday in the threshold check.
-        if self.cfg.apply_brain_haircut:
-            adjusted_score = self._policy.adjust_signal(affinity_score, brain_state)
-        else:
-            adjusted_score = affinity_score
-
-        # Swing-specific hard gate. Live calls `check_swing_entry` from
-        # trading_service before sizing. Without daily_bias the gate
-        # auto-rejects ("swing_no_daily_data"), matching live behaviour.
-        if self.cfg.is_swing and self.cfg.apply_swing_entry_gate:
-            ok, reason = check_swing_entry(setup, direction, ind, daily_bias, regime.regime)
-            if not ok:
-                if self.cfg.debug_orders:
-                    log.info(
-                        "pure_replay_swing_gate_blocked sym=%s setup=%s dir=%s reason=%s",
-                        sym, setup, direction, reason,
-                    )
-                return
-
-        # Threshold selection — dynamic by risk_mode (live behaviour) or
-        # the static override the caller pinned via `cfg.min_signal_score`.
-        # Swing uses `affinity_score` (no brain haircut) per live; intraday
-        # uses the brain-haircut `adjusted_score`.
+        # Resolve threshold once (independent of setup — depends only on
+        # is_swing + risk_mode). Pre-fix this was duplicated per-setup.
         if self.cfg.min_signal_score is not None:
             threshold = self.cfg.min_signal_score
         elif self.cfg.apply_dynamic_min_score:
@@ -557,14 +521,88 @@ class PureReplayStrategy:
             )
         else:
             threshold = self.s_cfg.min_signal_score
-        score_for_threshold = affinity_score if self.cfg.is_swing else adjusted_score
-        if score_for_threshold < threshold:
+
+        # ── Gather candidates ──────────────────────────────────────────
+        candidates: list[tuple[int, str, str, float, float, int, int]] = []
+        # tuple: (score_for_threshold, setup, direction, raw_score,
+        #         affinity_mult, affinity_score, adjusted_score)
+        for setup in self.cfg.setups:
+            # 1. Hard-block (regime × strategy)
+            if self.cfg.apply_hard_blocks and regime_hard_blocks_strategy(
+                regime.regime, setup
+            ):
+                continue
+
+            # 2. Direction vote
+            direction = determine_direction(ind, regime, setup=setup)
+            if direction == "HOLD":
+                continue
+            if self.cfg.direction_filter and direction != self.cfg.direction_filter:
+                continue
+
+            # 3. Strategy-specific hard gate (mirrors live trading_service.py:1159).
+            # This is the gate that distinguishes BREAKOUT (needs ADX≥20 + near
+            # 52w-high + vol_ratio≥1.2) from VWAP_REVERSAL (needs RSI extreme +
+            # vwap_dev≥1%) etc. Without it, every setup that survives the
+            # direction vote fires, which over-trades by 3-12× depending on
+            # the setup.
+            if self.cfg.apply_strategy_entry_gate:
+                ok, reason = check_strategy_entry(setup, direction, ind, regime=regime.regime)
+                if not ok:
+                    if self.cfg.debug_orders:
+                        log.debug(
+                            "pure_replay_strategy_gate_blocked sym=%s setup=%s dir=%s reason=%s",
+                            sym, setup, direction, reason,
+                        )
+                    continue
+
+            # 4. Swing-specific gate (intraday is a no-op in this branch).
+            if self.cfg.is_swing and self.cfg.apply_swing_entry_gate:
+                ok, _reason = check_swing_entry(setup, direction, ind, daily_bias, regime.regime)
+                if not ok:
+                    continue
+
+            # 5. Score
+            sig: SignalScore = score_signal(
+                symbol=sym, direction=direction, ind=ind, regime=regime,
+                cfg=self.s_cfg, daily_bias=daily_bias, setup=setup,
+            )
+            raw_score = float(sig.score)
+
+            # 6. Affinity multiplier
+            if self.cfg.apply_affinity_multiplier:
+                affinity_mult = regime_strategy_multiplier(regime.regime, setup, direction)
+                affinity_score = max(0, min(100, int(round(raw_score * affinity_mult))))
+            else:
+                affinity_mult = 1.0
+                affinity_score = int(round(raw_score))
+
+            # 7. Brain-state haircut (intraday only consults this for threshold)
+            if self.cfg.apply_brain_haircut:
+                adjusted_score = self._policy.adjust_signal(affinity_score, brain_state)
+            else:
+                adjusted_score = affinity_score
+
+            score_for_threshold = affinity_score if self.cfg.is_swing else adjusted_score
+            if score_for_threshold < threshold:
+                continue
+
+            candidates.append((
+                score_for_threshold, setup, direction, raw_score,
+                affinity_mult, affinity_score, adjusted_score,
+            ))
+
+        if not candidates:
             return
 
-        # One-shot per (date, symbol, setup, direction) to avoid
-        # re-firing every subsequent bar after the threshold is crossed.
-        # The pyramid guard in _maybe_open is a stricter superset check
-        # (one open at a time per name+side) but this gates emit too.
+        # ── Pick best-scoring candidate ────────────────────────────────
+        # Sort by score_for_threshold desc; ties broken by raw_score desc.
+        candidates.sort(key=lambda c: (c[0], c[3]), reverse=True)
+        score_for_threshold, setup, direction, raw_score, \
+            affinity_mult, affinity_score, adjusted_score = candidates[0]
+
+        # ── Per-bar gates that don't change with setup ────────────────
+        # One-shot per (date, symbol, setup, direction).
         fkey = (ctx.bar.ts[:10], sym, setup, direction)
         if fkey in self._fired_today:
             return
@@ -575,15 +613,12 @@ class PureReplayStrategy:
             if in_flight >= self.cfg.max_concurrent:
                 return
 
-        # Pyramid guard.
+        # Pyramid guard — never two open trades on same (symbol, side).
         for p in ctx.account.positions.values():
             if p.symbol == sym and p.side == direction:
                 return
 
-        # Position sizing using the indicator's ATR.
-        atr = max(ind.high - ind.low, 0.01)  # placeholder — see note below
-        # compute_indicators returns ATR(14) but doesn't expose it on the
-        # IndicatorSnapshot — re-compute from the most recent 14 bars.
+        # Position sizing using ATR.
         from autotrader.domain.indicators import calc_atr, normalize_candles
         atr = calc_atr(normalize_candles(candles), 14)
         if atr <= 0:
@@ -617,10 +652,10 @@ class PureReplayStrategy:
         if self.cfg.debug_orders:
             log.info(
                 "pure_replay_signal sym=%s setup=%s dir=%s raw=%.1f mult=%.2f "
-                "aff=%d adj=%d thr=%d risk=%s qty=%d ltp=%.2f atr=%.2f",
+                "aff=%d adj=%d thr=%d risk=%s qty=%d ltp=%.2f atr=%.2f n_cands=%d",
                 sym, setup, direction, raw_score, affinity_mult,
                 affinity_score, adjusted_score, threshold, brain_state.risk_mode,
-                qty, ind.close, atr,
+                qty, ind.close, atr, len(candidates),
             )
 
 
