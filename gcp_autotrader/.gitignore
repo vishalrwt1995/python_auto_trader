@@ -12,6 +12,11 @@ venv/
 # Backtest output (per-run, large CSVs)
 backtests/
 
+# Runtime artefacts: smoke reports, profile dumps, calibration metrics.
+# These are reproducible from the scripts in scripts/redesign/ and the
+# config in src/autotrader/backtest/calibrated/, so don't pollute git.
+out/
+
 # OS
 .DS_Store
 

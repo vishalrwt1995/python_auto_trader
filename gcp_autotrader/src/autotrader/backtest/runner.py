@@ -30,6 +30,7 @@ from autotrader.backtest.costs import CostConfig
 from autotrader.backtest.data import (
     ScanDecisionRow,
     brain_lookup,
+    build_watchlist_per_day,
     load_candles_bulk_bq,
     load_candles_bulk_gcs,
     load_market_brain,
@@ -133,6 +134,13 @@ class RunSpec:
     # True to match live; disable only for diagnostic A/B comparisons of
     # what the system would have done without per-setup hard gates.
     apply_strategy_entry_gate: bool = True
+    # When True, distil `scan_decisions` rows into a `(date, symbol) → setup`
+    # map and pass it to PureReplayStrategy so it picks the SAME strategy
+    # live actually scanned per stock per day. This is the parity-critical
+    # wiring — without it, pure-replay tries every setup against every
+    # stock and over-fires by 2-4×. Disable only for "what if we ran every
+    # setup against every stock?" counterfactual studies.
+    apply_watchlist_per_day: bool = True
 
 
 # ── Live-replay run ────────────────────────────────────────────────────────
@@ -266,16 +274,26 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
     log.info("pure_replay_starting label=%s since=%s until=%s tf=%s warmup_days=%d",
              spec.label, spec.since, spec.until, spec.timeframe, spec.warmup_days)
 
-    # 1. Resolve symbol universe.
+    # 1. Resolve symbol universe AND watchlist mapping.
+    # Both come from the same `scan_decisions` pull; loading once and
+    # reusing avoids a second BQ round-trip. When the user supplies an
+    # explicit symbol list AND wants the watchlist mapping, we still need
+    # the decisions (just filtered by the user's symbol set).
+    decisions: list[ScanDecisionRow] = []
     syms: list[str]
-    if spec.symbols:
-        syms = sorted({s.upper().strip() for s in spec.symbols})
-    elif spec.pure_universe_from_scan:
+    need_decisions = spec.apply_watchlist_per_day or (
+        not spec.symbols and spec.pure_universe_from_scan
+    )
+    if need_decisions:
         decisions = load_scan_decisions(
             project=spec.project, dataset=spec.dataset,
             since=spec.since, until=spec.until,
-            qualified_only=False, setups=None, symbols=None,
+            qualified_only=False, setups=None,
+            symbols=spec.symbols,  # filter to user's set if provided
         )
+    if spec.symbols:
+        syms = sorted({s.upper().strip() for s in spec.symbols})
+    elif spec.pure_universe_from_scan:
         syms = sorted({d.symbol.upper().strip() for d in decisions})
         log.info("pure_replay_symbols_from_scan n=%d", len(syms))
     else:
@@ -283,6 +301,17 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
 
     if not syms:
         return _empty_result(spec, "empty symbol universe")
+
+    # Build watchlist mapping if requested. Empty when feature is off OR
+    # when scan_decisions returned nothing (cold backfill scenario).
+    watchlist_per_day: dict[tuple[str, str], str] = {}
+    if spec.apply_watchlist_per_day and decisions:
+        watchlist_per_day = build_watchlist_per_day(decisions)
+        log.info(
+            "pure_replay_watchlist_per_day n_entries=%d uniq_setups=%d",
+            len(watchlist_per_day),
+            len({v for v in watchlist_per_day.values()}),
+        )
 
     # 2. Compute warmup window.
     warmup_since = _shift_iso_date(spec.since, -spec.warmup_days)
@@ -375,6 +404,7 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         apply_swing_entry_gate=spec.apply_swing_entry_gate,
         apply_daily_bias=spec.apply_daily_bias,
         apply_strategy_entry_gate=spec.apply_strategy_entry_gate,
+        apply_watchlist_per_day=spec.apply_watchlist_per_day,
     )
     strategy = PureReplayStrategy(
         cfg=pr_cfg,
@@ -382,6 +412,7 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         brain=brain,
         warmup_bars=warmup_bars,
         daily_bars=daily_bars,
+        watchlist_per_day=watchlist_per_day,
     )
 
     engine = BacktestEngine(
@@ -415,6 +446,8 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         "min_signal_score": str(spec.min_signal_score) if spec.min_signal_score is not None else "(default)",
         "max_concurrent": str(spec.max_concurrent),
         "per_trade_risk_inr": str(spec.per_trade_risk_inr),
+        "watchlist_per_day_entries": str(len(watchlist_per_day)),
+        "watchlist_per_day_enabled": str(spec.apply_watchlist_per_day),
     })
 
     if spec.out_dir:

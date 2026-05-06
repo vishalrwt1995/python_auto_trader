@@ -44,11 +44,34 @@ log = logging.getLogger(__name__)
 
 
 def _bq_client(project: str) -> Any:
-    """Lazily construct a BQ client. Raises if google-cloud-bigquery is missing —
-    backtests need real data, this is not an optional dep."""
+    """Lazily construct a BQ client and resize its underlying urllib3 pool.
+
+    Why the resize
+    --------------
+    The default urllib3 connection pool inside `AuthorizedSession` is 10.
+    Backtests do dozens of concurrent BQ + GCS calls (candle loaders,
+    scan_decisions, market_brain, daily candles), and oauth refreshes
+    spike fan-out further. Hitting the 10-conn limit produces noisy
+    "Connection pool is full, discarding connection: oauth2.googleapis.com"
+    warnings + a fresh TLS handshake per discarded conn = wasted seconds
+    and confused logs. 64 covers our peak fan-out with headroom.
+
+    Raises if google-cloud-bigquery is missing — backtests need real data.
+    """
     from google.cloud import bigquery  # type: ignore[import-untyped]
 
-    return bigquery.Client(project=project)
+    client = bigquery.Client(project=project)
+    try:
+        from requests.adapters import HTTPAdapter
+        session = client._http  # AuthorizedSession (subclass of Session)
+        adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+    except Exception:
+        # Best-effort: an SDK rev that hides _http or refactors transports
+        # will fall back to the old warnings without breaking the query.
+        pass
+    return client
 
 
 def _query(project: str, sql: str) -> list[dict[str, Any]]:
@@ -614,6 +637,72 @@ def load_trades_truth(
     return _query(project, sql)
 
 
+# Setups produced by a SEPARATE scanner from the watchlist-driven main loop.
+# They land in `scan_decisions` with the same schema but represent a different
+# code path (the phase-1 picks scanner) and shouldn't be treated as watchlist
+# strategy assignments. Including them poisons the per-day mapping with
+# strategies live never actually trades on those (date, symbol)s.
+_NON_WATCHLIST_SETUP_PREFIXES: tuple[str, ...] = ("PHASE1_", "SHORT_")
+
+
+def build_watchlist_per_day(
+    decisions: list[ScanDecisionRow],
+) -> dict[tuple[str, str], str]:
+    """Distil `scan_decisions` rows into a `(run_date, symbol) → setup` map.
+
+    Why this exists
+    ---------------
+    Live's watchlist is read from Firestore on every scan tick (every 5min)
+    and the strategy assignment can drift mid-day if Firestore is updated.
+    The watchlist itself is NOT archived to BQ — but every scan tick that
+    reads it persists `setup` on its `scan_decisions` row, so we can
+    reconstruct the dominant per-day mapping by majority-voting those rows.
+
+    Strategy
+    --------
+    1. Filter out PHASE1_* and SHORT_* setups — they're written by a
+       separate scanner (phase-1 picks) that doesn't follow the watchlist's
+       strategy assignment.
+    2. Filter out AUTO / empty placeholders — these mean the Firestore row
+       didn't specify a strategy; pure-replay should fall back to best-of-N
+       rather than restrict to a fake "AUTO" setup.
+    3. For each (date, symbol), pick the MOST-FREQUENT setup across all
+       scan ticks that day. This matches live's actual behavior: the
+       strategy that gets the most scan-tick airtime is the one the trader
+       actually fires when the score qualifies.
+    4. Ties broken alphabetically for determinism (so reruns of the same
+       backtest produce identical mappings).
+
+    Returns
+    -------
+    `{(YYYY-MM-DD, SYMBOL): SETUP}`. Empty if `decisions` is empty.
+
+    Pure-replay uses this to restrict candidate setups per stock per day,
+    closing the parity gap that arises when pure-replay tries every setup
+    against every stock instead of the watchlist-assigned one.
+    """
+    from collections import Counter
+
+    counts: dict[tuple[str, str], Counter] = {}
+    for d in decisions:
+        setup = (d.setup or "").strip().upper()
+        if not setup or setup == "AUTO":
+            continue
+        if setup.startswith(_NON_WATCHLIST_SETUP_PREFIXES):
+            continue
+        key = (d.run_date, d.symbol.upper())
+        counts.setdefault(key, Counter())[setup] += 1
+
+    out: dict[tuple[str, str], str] = {}
+    for key, counter in counts.items():
+        # `most_common` returns items sorted by count desc; we then re-sort
+        # the top-tier ties alphabetically for determinism.
+        top_count = counter.most_common(1)[0][1]
+        tied = sorted(s for s, c in counter.items() if c == top_count)
+        out[key] = tied[0]
+    return out
+
+
 __all__ = [
     "CandleQuery",
     "load_candles_bq",
@@ -621,6 +710,7 @@ __all__ = [
     "load_candles_bulk_gcs",
     "ScanDecisionRow",
     "load_scan_decisions",
+    "build_watchlist_per_day",
     "BrainSnapshot",
     "BrainTimeline",
     "load_market_brain",

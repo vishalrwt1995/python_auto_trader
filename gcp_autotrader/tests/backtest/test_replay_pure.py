@@ -995,6 +995,340 @@ def test_best_setup_wins_when_multiple_candidates_qualify(monkeypatch):
     )
 
 
+# ── Watchlist per-day setup restriction ─────────────────────────────────
+
+
+def test_watchlist_restricts_candidates_to_assigned_setup(monkeypatch):
+    """When watchlist_per_day has an entry for (date, symbol), pure-replay
+    must only evaluate the live-assigned setup — not the full cfg.setups
+    list. This is the parity-critical wiring: live picks ONE strategy per
+    stock at watchlist build, and pure-replay needs to mirror that.
+
+    With BREAKOUT scoring 90 and VWAP_REVERSAL scoring 75, best-of-N would
+    pick BREAKOUT. The watchlist says VWAP_REVERSAL — so VWAP_REVERSAL
+    must fire even though it's the lower-scoring candidate.
+    """
+    from autotrader.domain.models import ScoreBreakdown, SignalScore
+
+    monkeypatch.setattr(rp, "compute_indicators", lambda candles, cfg: _FakeInd())
+    monkeypatch.setattr(rp, "determine_direction", lambda i, r, setup="": "BUY")
+    monkeypatch.setattr(
+        rp, "check_strategy_entry",
+        lambda strategy, direction, ind, regime="": (True, ""),
+    )
+    import autotrader.domain.indicators as ind_mod
+    monkeypatch.setattr(ind_mod, "calc_atr", lambda candles, n=14: 1.0)
+    monkeypatch.setattr(ind_mod, "normalize_candles", lambda c: c)
+
+    # Setup-aware score: BREAKOUT would beat VWAP_REVERSAL on best-of-N.
+    score_per_setup = {"BREAKOUT": 90.0, "VWAP_REVERSAL": 75.0}
+    monkeypatch.setattr(
+        rp, "score_signal",
+        lambda symbol, direction, ind, regime, cfg, daily_bias=None, setup="":
+            SignalScore(
+                score=score_per_setup.get(setup, 0.0),
+                direction=direction, breakdown=ScoreBreakdown(),
+            ),
+    )
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT", "VWAP_REVERSAL"),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_watchlist_per_day=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    # Watchlist says VWAP_REVERSAL on Apr 16.
+    watchlist = {("2026-04-16", "ACME"): "VWAP_REVERSAL"}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, warmup_bars=warmup, watchlist_per_day=watchlist,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+
+    assert len(result.trades) == 1
+    assert result.trades[0].setup == "VWAP_REVERSAL", (
+        "Watchlist per-day must restrict candidates to the live-assigned "
+        "setup, not let best-of-N override it."
+    )
+
+
+def test_watchlist_drops_signal_when_no_entry_for_date_symbol(monkeypatch):
+    """When watchlist_per_day is populated but has no entry for the bar's
+    (date, symbol), the signal is DROPPED — not fired via best-of-N
+    fallback. The watchlist's silence on a stock means live did not scan
+    that stock that day; pure-replay mirrors that by not trading.
+
+    Pre-fix this fell back to best-of-N and manufactured trades for
+    (date, symbol)s live deliberately skipped, blowing the trade count
+    to 1.7× live's actual count.
+    """
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT", "VWAP_REVERSAL"),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_watchlist_per_day=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    # Watchlist has an entry for a DIFFERENT symbol — no entry for ACME.
+    watchlist = {("2026-04-16", "OTHER_SYMBOL"): "MOMENTUM"}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, warmup_bars=warmup, watchlist_per_day=watchlist,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+
+    # No trade — ACME wasn't on the watchlist that day. Disable
+    # apply_watchlist_per_day to enable best-of-N fallback for diagnostics.
+    assert len(result.trades) == 0
+
+
+def test_watchlist_empty_map_skips_gate_entirely(monkeypatch):
+    """When watchlist_per_day is empty (e.g. no scan_decisions in the
+    window — cold backfill), the gate must be skipped and best-of-N
+    re-asserts itself — otherwise EVERY signal in a fresh-data backtest
+    would be silently dropped."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_watchlist_per_day=True,    # gate enabled but map is empty
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, warmup_bars=warmup, watchlist_per_day={},   # explicitly empty
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+    assert len(result.trades) == 1
+
+
+def test_watchlist_disabled_via_flag(monkeypatch):
+    """With apply_watchlist_per_day=False, the watchlist is ignored even
+    if populated — useful for counterfactual 'what if every setup ran on
+    every stock?' studies."""
+    from autotrader.domain.models import ScoreBreakdown, SignalScore
+
+    monkeypatch.setattr(rp, "compute_indicators", lambda candles, cfg: _FakeInd())
+    monkeypatch.setattr(rp, "determine_direction", lambda i, r, setup="": "BUY")
+    monkeypatch.setattr(
+        rp, "check_strategy_entry",
+        lambda strategy, direction, ind, regime="": (True, ""),
+    )
+    import autotrader.domain.indicators as ind_mod
+    monkeypatch.setattr(ind_mod, "calc_atr", lambda candles, n=14: 1.0)
+    monkeypatch.setattr(ind_mod, "normalize_candles", lambda c: c)
+
+    score_per_setup = {"BREAKOUT": 90.0, "VWAP_REVERSAL": 75.0}
+    monkeypatch.setattr(
+        rp, "score_signal",
+        lambda symbol, direction, ind, regime, cfg, daily_bias=None, setup="":
+            SignalScore(
+                score=score_per_setup.get(setup, 0.0),
+                direction=direction, breakdown=ScoreBreakdown(),
+            ),
+    )
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT", "VWAP_REVERSAL"),
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_watchlist_per_day=False,    # disabled
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    watchlist = {("2026-04-16", "ACME"): "VWAP_REVERSAL"}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, warmup_bars=warmup, watchlist_per_day=watchlist,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+
+    # Best-of-N reasserts itself: BREAKOUT (90) beats VWAP_REVERSAL (75)
+    # because the watchlist-restriction path was bypassed.
+    assert len(result.trades) == 1
+    assert result.trades[0].setup == "BREAKOUT"
+
+
+def test_watchlist_uses_setup_not_in_cfg_setups(monkeypatch):
+    """If the watchlist names a setup outside cfg.setups (config drift
+    between live and replay), pure-replay should still evaluate it —
+    the watchlist is the source of truth, not cfg.setups. Otherwise
+    we'd silently drop signals for any stock whose live-assigned setup
+    we forgot to list."""
+    _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
+
+    cfg = rp.PureReplayConfig(
+        setups=("BREAKOUT",),    # narrow list
+        min_signal_score=72,
+        apply_affinity_multiplier=False,
+        apply_hard_blocks=False,
+        apply_brain_haircut=False,
+        apply_watchlist_per_day=True,
+    )
+    warmup = {"ACME": _make_warmup_bars("ACME", 90)}
+    # Watchlist names MOMENTUM — NOT in cfg.setups.
+    watchlist = {("2026-04-16", "ACME"): "MOMENTUM"}
+    strat = rp.PureReplayStrategy(
+        cfg=cfg, warmup_bars=warmup, watchlist_per_day=watchlist,
+    )
+
+    bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
+    acc = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    result = BacktestEngine(account=acc, strategy=strat).run(bars)
+
+    assert len(result.trades) == 1
+    assert result.trades[0].setup == "MOMENTUM", (
+        "Watchlist must override cfg.setups when the live-assigned setup "
+        "isn't in the config — otherwise we silently drop live's choice."
+    )
+
+
+def test_build_watchlist_per_day_collapses_duplicates():
+    """Dups with the same setup collapse silently."""
+    from autotrader.backtest.data import (
+        ScanDecisionRow, build_watchlist_per_day,
+    )
+
+    def _row(date, sym, setup):
+        return ScanDecisionRow(
+            scan_ts=f"{date}T09:30:00+05:30", run_date=date, symbol=sym,
+            setup=setup, direction="BUY", raw_score=80, adjusted_score=85,
+            min_score=72, qualified=True, blocked_reason="", ltp=100.0,
+            atr=1.0, atr_mult=1.74, rsi=55.0, vwap=100.0,
+            regime="RANGE", risk_mode="NORMAL",
+            wl_type="intraday", daily_trend="NEUTRAL",
+        )
+
+    rows = [
+        _row("2026-04-16", "RELIANCE", "BREAKOUT"),
+        _row("2026-04-16", "RELIANCE", "BREAKOUT"),    # dup, same setup
+        _row("2026-04-16", "TCS", "VWAP_REVERSAL"),
+        _row("2026-04-17", "RELIANCE", "MOMENTUM"),    # diff date, OK
+    ]
+    out = build_watchlist_per_day(rows)
+    assert out[("2026-04-16", "RELIANCE")] == "BREAKOUT"
+    assert out[("2026-04-16", "TCS")] == "VWAP_REVERSAL"
+    assert out[("2026-04-17", "RELIANCE")] == "MOMENTUM"
+    assert len(out) == 3
+
+
+def test_build_watchlist_per_day_majority_vote_on_conflict():
+    """When multiple setups are seen for the same (date, symbol), the most
+    frequent wins. Live's watchlist can refresh mid-day from Firestore;
+    the dominant setup is the one that gets the most scan-tick airtime."""
+    from autotrader.backtest.data import (
+        ScanDecisionRow, build_watchlist_per_day,
+    )
+
+    def _row(setup):
+        return ScanDecisionRow(
+            scan_ts="2026-04-16T09:30:00+05:30", run_date="2026-04-16",
+            symbol="ACME", setup=setup, direction="BUY", raw_score=80,
+            adjusted_score=85, min_score=72, qualified=True,
+            blocked_reason="", ltp=100.0, atr=1.0, atr_mult=1.74,
+            rsi=55.0, vwap=100.0, regime="RANGE", risk_mode="NORMAL",
+            wl_type="intraday", daily_trend="NEUTRAL",
+        )
+    # 5 ticks: 3× VWAP_TREND, 1× BREAKOUT, 1× VWAP_REVERSAL → VWAP_TREND wins
+    rows = [_row("VWAP_TREND")] * 3 + [_row("BREAKOUT")] + [_row("VWAP_REVERSAL")]
+    out = build_watchlist_per_day(rows)
+    assert out[("2026-04-16", "ACME")] == "VWAP_TREND"
+
+
+def test_build_watchlist_per_day_excludes_phase1_and_short():
+    """PHASE1_* and SHORT_* come from a separate scanner — their rows must
+    not contribute to the watchlist mapping. If PHASE1_MOMENTUM has 5
+    ticks and BREAKOUT has only 2, BREAKOUT still wins because PHASE1_*
+    is filtered out before voting."""
+    from autotrader.backtest.data import (
+        ScanDecisionRow, build_watchlist_per_day,
+    )
+
+    def _row(setup):
+        return ScanDecisionRow(
+            scan_ts="2026-04-16T09:30:00+05:30", run_date="2026-04-16",
+            symbol="ACME", setup=setup, direction="BUY", raw_score=80,
+            adjusted_score=85, min_score=72, qualified=True,
+            blocked_reason="", ltp=100.0, atr=1.0, atr_mult=1.74,
+            rsi=55.0, vwap=100.0, regime="RANGE", risk_mode="NORMAL",
+            wl_type="intraday", daily_trend="NEUTRAL",
+        )
+    rows = (
+        [_row("PHASE1_MOMENTUM")] * 5
+        + [_row("BREAKOUT")] * 2
+        + [_row("SHORT_BREAKDOWN")]    # also excluded
+    )
+    out = build_watchlist_per_day(rows)
+    # BREAKOUT wins despite having fewer rows — PHASE1_* + SHORT_* skipped.
+    assert out[("2026-04-16", "ACME")] == "BREAKOUT"
+
+
+def test_build_watchlist_per_day_excludes_only_phase1_means_empty():
+    """If a (date, symbol) has ONLY phase-1 / short rows (no main-scanner
+    setup), the watchlist map has no entry — pure-replay falls back to
+    best-of-N for that stock."""
+    from autotrader.backtest.data import (
+        ScanDecisionRow, build_watchlist_per_day,
+    )
+    rows = [
+        ScanDecisionRow(
+            scan_ts="2026-04-16T09:30:00+05:30", run_date="2026-04-16",
+            symbol="ACME", setup="PHASE1_MOMENTUM", direction="BUY",
+            raw_score=80, adjusted_score=85, min_score=72, qualified=True,
+            blocked_reason="", ltp=100.0, atr=1.0, atr_mult=1.74,
+            rsi=55.0, vwap=100.0, regime="RANGE", risk_mode="NORMAL",
+            wl_type="intraday", daily_trend="NEUTRAL",
+        ),
+    ]
+    out = build_watchlist_per_day(rows)
+    assert ("2026-04-16", "ACME") not in out
+    assert len(out) == 0
+
+
+def test_build_watchlist_per_day_skips_auto_placeholder():
+    """`setup='AUTO'` rows must NOT populate the watchlist — AUTO is a
+    placeholder that means 'live didn't have a setup field on the
+    Firestore watchlist row'. Pure-replay should fall back to best-of-N
+    for those (date, symbol)s rather than restrict to a fake 'AUTO'
+    setup that no real strategy implements."""
+    from autotrader.backtest.data import (
+        ScanDecisionRow, build_watchlist_per_day,
+    )
+    rows = [
+        ScanDecisionRow(
+            scan_ts="2026-04-16T09:30:00+05:30", run_date="2026-04-16",
+            symbol="ACME", setup="AUTO", direction="BUY", raw_score=80,
+            adjusted_score=85, min_score=72, qualified=True,
+            blocked_reason="", ltp=100.0, atr=1.0, atr_mult=1.74,
+            rsi=55.0, vwap=100.0, regime="RANGE", risk_mode="NORMAL",
+            wl_type="intraday", daily_trend="NEUTRAL",
+        ),
+    ]
+    out = build_watchlist_per_day(rows)
+    assert ("2026-04-16", "ACME") not in out
+    assert len(out) == 0
+
+
 def test_best_setup_picks_only_one_even_when_all_qualify(monkeypatch):
     """No matter how many setups qualify on the same bar, only ONE order
     fires per (date, symbol, direction). This is the structural guarantee

@@ -189,6 +189,16 @@ class PureReplayConfig:
     # over-trades by ~3-12× depending on setup. Disable only for diagnostic
     # A/B (e.g. "what would the system have done with no per-strategy gate?").
     apply_strategy_entry_gate: bool = True
+    # When True and `watchlist_per_day` is populated, restrict candidate
+    # setups on each bar to the ONE strategy live actually assigned to the
+    # stock that day (read back from `scan_decisions.setup`). This closes
+    # the "100% MOMENTUM" parity gap that arises when pure-replay tries
+    # every setup against every stock instead of the watchlist-assigned one.
+    # When the map has no entry for a (date, symbol), pure-replay falls back
+    # to evaluating all setups in `cfg.setups` and firing the highest-scoring
+    # candidate (the pre-watchlist behavior) — useful for symbols added to
+    # the watchlist after `since` or for counterfactual runs.
+    apply_watchlist_per_day: bool = True
 
 
 @dataclass
@@ -335,10 +345,19 @@ class PureReplayStrategy:
         brain: BrainTimeline | None = None,
         warmup_bars: dict[str, list[Bar]] | None = None,
         daily_bars: dict[str, list[Bar]] | None = None,
+        watchlist_per_day: dict[tuple[str, str], str] | None = None,
     ) -> None:
         self.cfg = cfg or PureReplayConfig()
         self.s_cfg = strategy_settings or StrategySettings()
         self.brain = brain or BrainTimeline([])
+        # `(run_date, symbol) → setup` map distilled from live scan_decisions.
+        # When non-empty + cfg.apply_watchlist_per_day, pure-replay restricts
+        # candidate setups to the live-assigned one per stock per day so the
+        # simulator matches live's "one strategy per stock" semantics. Empty
+        # = fall back to evaluating every setup in cfg.setups (best-of-N).
+        self._watchlist_per_day: dict[tuple[str, str], str] = (
+            watchlist_per_day or {}
+        )
         self._history: dict[str, Deque[Candle]] = {}
         self._pending_meta: dict[str, _PendingPositionMeta] = {}
         # Stateless service — methods read only their args; instantiating once
@@ -522,11 +541,35 @@ class PureReplayStrategy:
         else:
             threshold = self.s_cfg.min_signal_score
 
+        # ── Resolve candidate setup list ───────────────────────────────
+        # If watchlist gating is on AND we have a non-empty mapping, the
+        # presence/absence of an entry for (date, symbol) is the source of
+        # truth:
+        #   * entry exists → restrict candidates to that one setup (live
+        #     scanned this stock today with that strategy assignment)
+        #   * no entry     → drop the signal entirely (live did NOT scan
+        #     this stock today; pure-replay must not invent a trade)
+        # Falling back to best-of-N here is the trap: it manufactures
+        # trades for (date, symbol)s live deliberately skipped. Pre-fix
+        # the fallback let MOMENTUM fire on every unscanned stock and
+        # blew the trade count to 1.7× live.
+        # Set apply_watchlist_per_day=False to disable the gate entirely
+        # for "what would have happened if every stock was on watchlist"
+        # counterfactual studies.
+        bar_date = ctx.bar.ts[:10]
+        if self.cfg.apply_watchlist_per_day and self._watchlist_per_day:
+            wl_setup = self._watchlist_per_day.get((bar_date, sym))
+            if wl_setup is None:
+                return  # live didn't scan this stock today
+            setups_to_try: tuple[str, ...] = (wl_setup,)
+        else:
+            setups_to_try = self.cfg.setups
+
         # ── Gather candidates ──────────────────────────────────────────
         candidates: list[tuple[int, str, str, float, float, int, int]] = []
         # tuple: (score_for_threshold, setup, direction, raw_score,
         #         affinity_mult, affinity_score, adjusted_score)
-        for setup in self.cfg.setups:
+        for setup in setups_to_try:
             # 1. Hard-block (regime × strategy)
             if self.cfg.apply_hard_blocks and regime_hard_blocks_strategy(
                 regime.regime, setup
