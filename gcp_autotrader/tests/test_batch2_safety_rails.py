@@ -122,6 +122,22 @@ def test_entry_window_closed_at_14_00():
         assert time_utils.is_entry_window_open_ist() is False
 
 
+def test_entry_window_closed_before_09_45():
+    """Lower-bound (added 2026-05-06): entries before 09:45 IST blocked.
+
+    Live data 2026-04-16 → 2026-05-04 shows the first 30 min of trading
+    is chaotic (no settled VWAP, opening-range incomplete, wide spreads).
+    The 09-10am block was the worst per-trade P&L block. 09:45+ removes
+    the noisiest slice without slashing volume.
+    """
+    with patch.object(time_utils, "now_ist", return_value=_fake_now(9, 30)):
+        assert time_utils.is_entry_window_open_ist() is False
+    with patch.object(time_utils, "now_ist", return_value=_fake_now(9, 44)):
+        assert time_utils.is_entry_window_open_ist() is False
+    with patch.object(time_utils, "now_ist", return_value=_fake_now(9, 45)):
+        assert time_utils.is_entry_window_open_ist() is True
+
+
 def test_market_open_still_15_30():
     """Regression: tightening the entry cutoff must NOT change market-open
     window. Exits, stops, and target checks run until 15:30."""

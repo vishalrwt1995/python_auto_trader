@@ -358,7 +358,13 @@ class AppSettings:
                 use_option_analytics_v1=_env_bool("USE_OPTION_ANALYTICS_V1", False),
                 use_news_signals_v1=_env_bool("USE_NEWS_SIGNALS_V1", False),
                 use_portfolio_stream_v1=_env_bool("USE_PORTFOLIO_STREAM_V1", False),
-                use_attribution_log_v1=_env_bool("USE_ATTRIBUTION_LOG_V1", False),
+                # 2026-05-06: Default flipped to True. The attribution table
+                # is the only place MAE/MFE per trade is captured. With it OFF,
+                # every diagnostic question ("did this trade ever go +0.5R
+                # before reverting?", "what's the median pull-back-to-entry
+                # ratio for losers?") is unanswerable. Flag stays togglable
+                # via env so canary runbook can still validate it cleanly.
+                use_attribution_log_v1=_env_bool("USE_ATTRIBUTION_LOG_V1", True),
             ),
             strategy=strategy,
             regime_thresholds=RegimeThresholds(

@@ -159,6 +159,16 @@ def regime_strategy_multiplier(
 # of score. This is a stronger gate than the affinity multiplier — the multiplier
 # can still let a 90-score signal sneak through at 0.3× = 27, but hard-block
 # eliminates the strategy entirely so we don't waste a slot.
+#
+# 2026-05-06: BREAKOUT added to ALL regime hard-blocks (was already blocked in
+# CHOP/RANGE/PANIC; adding to TREND_UP/TREND_DOWN). Live data 2026-04-16 →
+# 2026-05-04: BREAKOUT BUY went 0/9 (zero wins, total P&L −₹392). Even in the
+# regimes where the affinity matrix favoured it (TREND_UP=1.3×, RANGE_BULL=1.1×),
+# real follow-through was absent. Until a root-cause is identified — e.g.
+# narrowing-breadth fakeouts, the volume-surge gate is too lax, or the 52w-high
+# proximity is wrong for current market structure — BREAKOUT is parked across
+# the board. Re-enable on a regime-by-regime basis when a controlled re-test
+# (paper or canary) shows positive expectancy.
 _HARD_BLOCKS: dict[str, set[str]] = {
     # CHOP: block high-risk momentum strategies. Keep VWAP_REVERSAL and
     # VWAP_TREND — individual stocks can still trend/reverse even on choppy
@@ -183,6 +193,11 @@ _HARD_BLOCKS: dict[str, set[str]] = {
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
         "MOMENTUM",    # chasing strength into a panic = catching a knife
     },
+    # TREND_UP / TREND_DOWN: BREAKOUT parked here too (0/9 live WR, see comment
+    # block above). Other strategies still allowed — TREND regimes are where
+    # VWAP_TREND and MOMENTUM are designed to shine.
+    "TREND_UP":   {"BREAKOUT"},
+    "TREND_DOWN": {"BREAKOUT"},
 }
 
 

@@ -83,7 +83,15 @@ def is_entry_window_open_ist() -> bool:
     # window and leaves room for intraday continuation/reversal. Post-mortem
     # showed 04-16/04-20/04-21 had multiple late-afternoon entries exiting
     # EOD_CLOSE flat-to-losing (see trades table exit_reason distribution).
-    return is_market_open_ist() and ist_minutes() <= 810
+    #
+    # 2026-05-06: Added a LOWER bound at 09:45 IST (585 min). The opening
+    # 30 min is the noisy "auction-discovery" period — VWAP isn't reliable
+    # (only 6 5-min bars), opening-range hasn't formed, and wide bid/ask
+    # spreads inflate slippage. Live data 2026-04-16 → 2026-05-04: hour 09
+    # had 1 trade (lost) and hour 10 had 23 trades at 30% WR (the worst
+    # block of the day). 09:45+ removes the chaotic first half-hour without
+    # excluding 10:xx entirely (which would slash trade volume by a third).
+    return is_market_open_ist() and ist_minutes() >= 585 and ist_minutes() <= 810
 
 
 def parse_any_ts(value: str | int | float | None) -> datetime | None:

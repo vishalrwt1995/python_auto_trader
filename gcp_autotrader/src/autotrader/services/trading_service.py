@@ -761,6 +761,27 @@ class TradingService:
             for w in subset:
                 _is_swing = getattr(w, "wl_type", "intraday") == "swing"
                 _sym_upper = str(w.symbol).strip().upper()
+                # Veto incompatible (wl_type, strategy) combos at the code level.
+                # The watchlist comes from Firestore where humans (or upstream
+                # jobs) can mis-tag a stock — e.g. wl_type=swing + strategy=MOMENTUM
+                # produces an 11-day hold (MOTHERSON bug, 2026-04-22 → 2026-05-04)
+                # because MAX_HOLD for swing is 11 days but MOMENTUM is an intraday
+                # pattern with no daily-trend basis to hold for. Any swing trade
+                # must use a daily-trend strategy. Any intraday-only strategy
+                # forced into swing routing is silently retagged to intraday.
+                _strategy_upper = str(w.strategy or "").strip().upper()
+                _intraday_only_strategies = {
+                    "MOMENTUM", "OPEN_DRIVE", "VWAP_REVERSAL", "VWAP_TREND",
+                    "MEAN_REVERSION",
+                }
+                if _is_swing and _strategy_upper in _intraday_only_strategies:
+                    logger.warning(
+                        "watchlist_invalid_swing_strategy symbol=%s strategy=%s "
+                        "— swing channel only supports daily-trend strategies; "
+                        "treating as intraday for this scan tick.",
+                        w.symbol, _strategy_upper,
+                    )
+                    _is_swing = False
                 instrument_key = key_by_symbol.get(_sym_upper, "")
                 candles = primary_candles_map.get(_sym_upper, [])
                 # ── Daily bias (multi-timeframe confirmation) ──────────────
@@ -1006,6 +1027,24 @@ class TradingService:
                     _regime_min = _REGIME_MIN_SCORE.get(_brain_regime)
                     if _regime_min is not None and _regime_min < dynamic_min_score:
                         dynamic_min_score = _regime_min
+                    # 2026-05-06: Adaptive discount for "stressed range" regimes.
+                    # Live observation 2026-04-30 → 2026-05-06: 4 consecutive
+                    # trading days with 0 qualified entries (1500-1700 scans/day,
+                    # ~65% blocked on score_below_min). Brain state was identical:
+                    # regime=RANGE, breadth=91 (very narrow), trend=18 (weak).
+                    # In this state — bullish breadth amplifying SELL haircuts
+                    # AND weak trend amplifying BUY haircuts — every layer of
+                    # the score cancels out, parking signals in the 62-68 band.
+                    # Drop the bar by 5 so the top-decile of intra-band signals
+                    # can still fire as discovery trades. Brain-haircut still
+                    # applies, so wave-of-low-quality trades remains capped.
+                    if (
+                        brain_state is not None
+                        and _brain_regime in ("RANGE", "CHOP")
+                        and getattr(brain_state, "breadth_score", 0) > 85
+                        and getattr(brain_state, "trend_score", 50) < 30
+                    ):
+                        dynamic_min_score = max(60, dynamic_min_score - 5)
 
                 setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
                 liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85

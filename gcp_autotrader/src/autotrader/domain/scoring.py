@@ -17,6 +17,15 @@ def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: s
 
     _setup_upper = str(setup or "").strip().upper()
     _is_mr = _setup_upper in ("MEAN_REVERSION", "VWAP_REVERSAL")
+    # Some setups are inherently single-sided. Pre-fix this check was missing,
+    # which let the vote tally flip the "direction" of a setup whose name
+    # already encodes its side. Result: scan_decisions rows like
+    # `setup=SHORT_BREAKDOWN, direction=BUY` — nonsense that wasted scan
+    # cycles and produced confusing audit data.
+    # BREAKOUT, MOMENTUM, OPEN_DRIVE, PULLBACK = long-only by design.
+    # SHORT_BREAKDOWN, SHORT_PULLBACK, SHORT_MOMENTUM = short-only.
+    _long_only = _setup_upper in ("BREAKOUT", "MOMENTUM", "OPEN_DRIVE", "PULLBACK")
+    _short_only = _setup_upper.startswith("SHORT_")
 
     bull += 3 if ind.supertrend.dir == 1 else 0
     bear += 3 if ind.supertrend.dir != 1 else 0
@@ -57,8 +66,16 @@ def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: s
         bear += 2
 
     if bull > bear + 2:
+        # Single-sided setup veto: a long-only setup that votes BUY is fine,
+        # but if a short-only setup somehow accumulates more bull votes
+        # (because of regime bias), we return HOLD rather than fire a wrong-
+        # side trade. Same for the inverse.
+        if _short_only:
+            return "HOLD"
         return "BUY"
     if bear > bull + 2:
+        if _long_only:
+            return "HOLD"
         return "SELL"
     return "HOLD"
 
@@ -426,7 +443,54 @@ def check_strategy_entry(
             return False, "strategy_phase1_reversal_insufficient_volume"
         return True, ""
 
-    # OPEN_DRIVE, AUTO, DEFAULT, etc. — no extra gate
+    if s == "MOMENTUM":
+        # 2026-05-06: previously had NO gate — fell through to "pass". Live
+        # 2026-04-16 → 2026-05-04: 31 of 36 pure-replay trades were MOMENTUM,
+        # win rate 9.7%, total −₹70,516. Without gates, MOMENTUM fires on any
+        # signal that clears the score threshold, including weak ones with no
+        # actual momentum behind them.
+        # Gates below mirror what an experienced intraday trader requires
+        # before chasing strength: real trend (ADX), real volume (>avg),
+        # right side of VWAP, and RSI in the momentum zone (not overbought,
+        # not yet exhausted, not in pullback).
+        if ind.adx < 20:
+            return False, "strategy_momentum_adx_too_low"
+        if ind.volume.ratio < 1.3:
+            return False, "strategy_momentum_insufficient_volume"
+        if is_buy:
+            if ind.close <= ind.vwap:
+                return False, "strategy_momentum_buy_below_vwap"
+            if not (55 <= ind.rsi.curr <= 75):
+                return False, "strategy_momentum_buy_rsi_outside_zone"
+            if ind.ema_fast.curr <= ind.ema_med.curr:
+                return False, "strategy_momentum_buy_ema_not_stacked"
+        else:
+            if ind.close >= ind.vwap:
+                return False, "strategy_momentum_sell_above_vwap"
+            if not (25 <= ind.rsi.curr <= 45):
+                return False, "strategy_momentum_sell_rsi_outside_zone"
+            if ind.ema_fast.curr >= ind.ema_med.curr:
+                return False, "strategy_momentum_sell_ema_not_stacked"
+        return True, ""
+
+    if s == "OPEN_DRIVE":
+        # First-30-min strong directional setup. Without a time-of-day check
+        # here (we don't have current_ts in this function), at minimum require
+        # real volume + ADX so a stale stock can't fire on the OPEN_DRIVE
+        # template hours after the open. Time-of-day is enforced upstream by
+        # `is_entry_window_open_ist` — entries are only allowed 09:45–13:30,
+        # which is wider than ideal but rules out the overnight stale path.
+        if ind.adx < 18:
+            return False, "strategy_open_drive_adx_too_low"
+        if ind.volume.ratio < 1.2:
+            return False, "strategy_open_drive_insufficient_volume"
+        if is_buy and ind.close <= ind.vwap:
+            return False, "strategy_open_drive_buy_below_vwap"
+        if not is_buy and ind.close >= ind.vwap:
+            return False, "strategy_open_drive_sell_above_vwap"
+        return True, ""
+
+    # AUTO, DEFAULT, etc. — no extra gate
     return True, ""
 
 
