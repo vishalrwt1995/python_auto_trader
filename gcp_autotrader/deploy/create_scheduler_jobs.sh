@@ -58,13 +58,25 @@ create_job "autotrader-universe-v2-refresh-0615" "15 6 * * 1-5" "$UNIVERSE_PIPEL
 # coverage drifted: ~99% Fridays → ~69% Mondays, never fully recovering.
 # Root cause was the absence of any post-market run to capture today's just-
 # closed candle. Adding 1600 IST (30 min after 15:30 close) means the morning
-# jobs only do a small delta refresh, so 0705 finishes fast and 0740's lock
-# acquisition succeeds.
+# jobs only do a small delta refresh, so 0705 finishes fast.
+#
+# Two-fix combination:
+#   1. NEW 1600 IST post-market run — captures today's just-closed candle
+#      while API cap is fresh.
+#   2. Renamed 0740 → 0820 — gives 0705 a 75-min buffer (vs the previous
+#      35-min buffer that was insufficient on Mondays after long weekends).
+#      Still fits BEFORE the 08:30 score-refresh which depends on fresh cache.
 CLOSE_UPDATE_URI_RETRY="$SERVICE_URL/jobs/score-cache-update-close?api_cap=1800&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=1800&intraday_lookback_trading_days=60"
 CLOSE_UPDATE_URI_TERMINAL="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=false&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
 create_job "autotrader-score-cache-update-close-1600" "0 16 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
 create_job "autotrader-score-cache-update-close-0705" "5 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
-create_job "autotrader-score-cache-update-close-0740" "40 7 * * 1-5" "$CLOSE_UPDATE_URI_TERMINAL"
+create_job "autotrader-score-cache-update-close-0820" "20 8 * * 1-5" "$CLOSE_UPDATE_URI_TERMINAL"
+
+# Cleanup the old 0740 job that was renamed to 0820 above (deletion is idempotent).
+gcloud scheduler jobs delete "autotrader-score-cache-update-close-0740" \
+  --project "$PROJECT_ID" \
+  --location "$REGION" \
+  --quiet || true
 
 # Score refresh after latest daily candle update window:
 # - computes v1 scoring
