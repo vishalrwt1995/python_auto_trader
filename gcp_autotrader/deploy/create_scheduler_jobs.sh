@@ -49,12 +49,20 @@ create_job "autotrader-upstox-token-request" "35 3 * * 1-5" "$SERVICE_URL/jobs/u
 UNIVERSE_PIPELINE_URI="$SERVICE_URL/jobs/universe-v2-refresh?replace=false&build_limit=0&candle_api_cap=1800&run_full_backfill=true&write_v2_eligibility=false&run_intraday_appended_backfill=true&intraday_api_cap=1800&intraday_lookback_trading_days=60"
 create_job "autotrader-universe-v2-refresh-0615" "15 6 * * 1-5" "$UNIVERSE_PIPELINE_URI" "{}" "30m"
 
-# Morning latest 1D/5m update — simplified to 2 passes (was 4):
-# Upstox standard API limit: 2000 req/30-min. ~500 symbols x 2 calls = ~1000 per pass, fits in one run.
-# Pass 1 (07:05): main fetch with retries — processes all symbols, retries stale terminals.
-# Pass 2 (07:40): terminalize only — marks no-progress symbols so score/watchlist don't stall.
+# Daily 1D/5m candle finalize — 3 passes to match Upstox 2000-req/30-min limit
+# while covering the full ~2600-stock universe with headroom.
+#
+# 2026-05-06 post-mortem: pre-fix had only 0705 + 0740 (both PRE-market). The
+# 0740 pass consistently hit LOCK_BUSY because 0705 took 54+ min on Mondays
+# (its 1800 api_cap fully consumed backfilling the Fri-Sun gap). Universe
+# coverage drifted: ~99% Fridays → ~69% Mondays, never fully recovering.
+# Root cause was the absence of any post-market run to capture today's just-
+# closed candle. Adding 1600 IST (30 min after 15:30 close) means the morning
+# jobs only do a small delta refresh, so 0705 finishes fast and 0740's lock
+# acquisition succeeds.
 CLOSE_UPDATE_URI_RETRY="$SERVICE_URL/jobs/score-cache-update-close?api_cap=1800&lookback_days=700&min_bars=320&retry_stale_terminal_today=true&run_intraday_update=true&intraday_api_cap=1800&intraday_lookback_trading_days=60"
 CLOSE_UPDATE_URI_TERMINAL="$SERVICE_URL/jobs/score-cache-update-close?api_cap=600&lookback_days=700&min_bars=320&retry_stale_terminal_today=false&run_intraday_update=true&intraday_api_cap=600&intraday_lookback_trading_days=60"
+create_job "autotrader-score-cache-update-close-1600" "0 16 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
 create_job "autotrader-score-cache-update-close-0705" "5 7 * * 1-5" "$CLOSE_UPDATE_URI_RETRY"
 create_job "autotrader-score-cache-update-close-0740" "40 7 * * 1-5" "$CLOSE_UPDATE_URI_TERMINAL"
 
