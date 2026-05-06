@@ -25,6 +25,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "PHASE1_MOMENTUM": 1.2,
         "PHASE1_REVERSAL": 0.6,   # oversold-bounce picks are wrong in a bull market
         "MOMENTUM": 1.4,          # swing relative-strength leaders — ideal setup for trending markets
+        "MORNING_FADE": 0.3,      # fading the pop in a strong uptrend = catching knives
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -40,6 +41,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "PHASE1_MOMENTUM": 0.8,
         "PHASE1_REVERSAL": 1.2,   # oversold bounces are the primary edge in a downtrend
         "MOMENTUM": 0.3,          # buying strength in a downtrend almost always fails
+        "MORNING_FADE": 1.0,      # bear regime + morning pop = decent fade, but mean-reversion is weaker than RANGE
         "AUTO": 0.9,
         "DEFAULT": 0.9,
     },
@@ -55,6 +57,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "PHASE1_MOMENTUM": 0.7,
         "PHASE1_REVERSAL": 1.0,   # decent — individual oversold stocks can bounce in a range
         "MOMENTUM": 1.1,          # leaders can outperform even in a ranging index
+        "MORNING_FADE": 1.4,      # ideal regime — RANGE means morning pops mean-revert
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -70,6 +73,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "PHASE1_MOMENTUM": 0.4,
         "PHASE1_REVERSAL": 0.9,   # choppy index can still produce oversold individual-stock bounces
         "MOMENTUM": 0.4,          # momentum persistence breaks down in chop
+        "MORNING_FADE": 1.3,      # CHOP = pure mean-reverting; fades work great
         "AUTO": 0.7,
         "DEFAULT": 0.7,
     },
@@ -85,6 +89,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "PHASE1_MOMENTUM": 0.3,
         "PHASE1_REVERSAL": 0.9,   # capitulation + oversold = strong reversal candidate
         "MOMENTUM": 0.2,          # strongest stocks fall hardest in panics
+        "MORNING_FADE": 0.6,      # PANIC opens often gap down, not up — fade rarely triggers, low conviction when it does
         "AUTO": 0.5,
         "DEFAULT": 0.5,
     },
@@ -100,6 +105,7 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "PHASE1_MOMENTUM": 1.1,
         "PHASE1_REVERSAL": 1.1,   # recovery is the ideal environment for oversold-stock bounces
         "MOMENTUM": 1.3,          # early-recovery leaders tend to extend
+        "MORNING_FADE": 0.7,      # RECOVERY = continuation regime; fading the pop fights the trend
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
@@ -196,7 +202,8 @@ _HARD_BLOCKS: dict[str, set[str]] = {
     # TREND_UP / TREND_DOWN: BREAKOUT parked here too (0/9 live WR, see comment
     # block above). Other strategies still allowed — TREND regimes are where
     # VWAP_TREND and MOMENTUM are designed to shine.
-    "TREND_UP":   {"BREAKOUT"},
+    # MORNING_FADE blocked in TREND_UP — fading strong rallies is a knife-catch.
+    "TREND_UP":   {"BREAKOUT", "MORNING_FADE"},
     "TREND_DOWN": {"BREAKOUT"},
 }
 

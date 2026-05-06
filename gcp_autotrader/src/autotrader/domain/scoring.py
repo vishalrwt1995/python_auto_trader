@@ -12,10 +12,22 @@ if TYPE_CHECKING:
 def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: str = "") -> Direction:
     if regime.regime == "AVOID":
         return "HOLD"
+
+    _setup_upper = str(setup or "").strip().upper()
+
+    # MORNING_FADE is contrarian by design: it shorts stocks that are UP
+    # >1.5% by 09:45 IST. The standard bull/bear vote will see a strong-up
+    # stock and return BUY, which the short-only veto then converts to HOLD,
+    # producing zero signals (verified empirically 2026-05-06: 13-day window
+    # with only the time+pop+volume gate produced 1 trade because the rest
+    # were filtered by direction vote). Force SELL so check_strategy_entry
+    # can decide on the actual fade-thesis gates instead.
+    if _setup_upper == "MORNING_FADE":
+        return "SELL"
+
     bull = 0
     bear = 0
 
-    _setup_upper = str(setup or "").strip().upper()
     _is_mr = _setup_upper in ("MEAN_REVERSION", "VWAP_REVERSAL")
     # Some setups are inherently single-sided. Pre-fix this check was missing,
     # which let the vote tally flip the "direction" of a setup whose name
@@ -25,7 +37,7 @@ def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: s
     # BREAKOUT, MOMENTUM, OPEN_DRIVE, PULLBACK = long-only by design.
     # SHORT_BREAKDOWN, SHORT_PULLBACK, SHORT_MOMENTUM = short-only.
     _long_only = _setup_upper in ("BREAKOUT", "MOMENTUM", "OPEN_DRIVE", "PULLBACK")
-    _short_only = _setup_upper.startswith("SHORT_")
+    _short_only = _setup_upper.startswith("SHORT_") or _setup_upper == "MORNING_FADE"
 
     bull += 3 if ind.supertrend.dir == 1 else 0
     bear += 3 if ind.supertrend.dir != 1 else 0
@@ -300,6 +312,40 @@ def score_signal(
     return SignalScore(score=final_score, direction=direction, breakdown=bd)
 
 
+def _session_open_price(ind: IndicatorSnapshot) -> float:
+    """Return today's session-open price from the candle window.
+
+    The IndicatorSnapshot.open field is the CURRENT 5m bar's open, not the
+    day-session open. For setups that need "intraday return so far"
+    (MORNING_FADE et al.) we walk back through ind.candles to the first
+    bar of today's date.
+    """
+    if not ind.candles:
+        return 0.0
+    last_ts = str(ind.candles[-1][0])
+    today_date = last_ts[:10]
+    for c in ind.candles:
+        if str(c[0])[:10] == today_date:
+            try:
+                return float(c[1])    # candle tuple: (ts, open, h, l, c, vol)
+            except (TypeError, ValueError, IndexError):
+                return 0.0
+    return 0.0
+
+
+def _ist_minutes_from_ts(ts: str) -> int:
+    """Extract HH:MM from an ISO-8601 IST timestamp and return minutes
+    since midnight. Used by setups with a time-of-day gate (e.g.
+    MORNING_FADE which only fires in the first 30 min after market open).
+    Returns 0 if parsing fails."""
+    try:
+        time_part = ts.split("T")[1]
+        h, m = time_part.split(":")[:2]
+        return int(h) * 60 + int(m)
+    except Exception:
+        return 0
+
+
 def check_strategy_entry(
     strategy: str,
     direction: str,
@@ -488,6 +534,40 @@ def check_strategy_entry(
             return False, "strategy_open_drive_buy_below_vwap"
         if not is_buy and ind.close >= ind.vwap:
             return False, "strategy_open_drive_sell_above_vwap"
+        return True, ""
+
+    if s == "MORNING_FADE":
+        # 2026-05-06: NEW setup. Live audit (Apr 16 → May 4, 73 trades, all
+        # net-negative) showed the existing 5 continuation setups had no
+        # edge in the current mean-reverting regime. Wider-universe ORB
+        # experiment: 78% of stocks that pop >1.5% in the first 30 min
+        # reverse to a 1% stop. MORNING_FADE captures the inverse trade.
+        #
+        # First-pass gates (ADX<22 + RSI>60 + dist_52w>1) compounded to
+        # ZERO signals over a 13-day window — proven by 2026-05-06 backtest.
+        # Loosened to the THESIS gates only: time + pop magnitude + volume.
+        # Add back trend/momentum filters once we have data showing which
+        # of them actually predict win-rate.
+        if is_buy:
+            return False, "strategy_morning_fade_short_only"
+        bar_ts = str(ind.candles[-1][0]) if ind.candles else ""
+        bar_min = _ist_minutes_from_ts(bar_ts)
+        # Time gate: 09:45 (585) to 10:15 (615) IST. Six 5m bars after open
+        # is the earliest meaningful signal. 10:15 cap because after that
+        # the "morning pop" is no longer recent enough to fade.
+        if not (585 <= bar_min <= 615):
+            return False, "strategy_morning_fade_outside_time_window"
+        day_open = _session_open_price(ind)
+        if day_open <= 0:
+            return False, "strategy_morning_fade_no_session_open"
+        # Must be up >1.5% from session open (the "pop" we're fading).
+        pct_up = (ind.close - day_open) / day_open * 100.0
+        if pct_up < 1.5:
+            return False, "strategy_morning_fade_no_pop"
+        # Volume confirmation — at least average volume so we're not fading
+        # an illiquid stock where the pop has no participation.
+        if ind.volume.ratio < 1.0:
+            return False, "strategy_morning_fade_no_volume_participation"
         return True, ""
 
     # AUTO, DEFAULT, etc. — no extra gate

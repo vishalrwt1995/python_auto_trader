@@ -1076,6 +1076,7 @@ def test_watchlist_drops_signal_when_no_entry_for_date_symbol(monkeypatch):
         apply_hard_blocks=False,
         apply_brain_haircut=False,
         apply_watchlist_per_day=True,
+        morning_fade_overlay=False,    # disable overlay so test isolates the drop semantics
     )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     # Watchlist has an entry for a DIFFERENT symbol — no entry for ACME.

@@ -199,6 +199,13 @@ class PureReplayConfig:
     # candidate (the pre-watchlist behavior) — useful for symbols added to
     # the watchlist after `since` or for counterfactual runs.
     apply_watchlist_per_day: bool = True
+    # When True, evaluate MORNING_FADE as an overlay on every (date, symbol)
+    # regardless of watchlist assignment. Live's universe_service doesn't yet
+    # tag stocks as MORNING_FADE candidates (it's a new setup, 2026-05-06),
+    # so to backtest the strategy at all we need pure-replay to try it on
+    # any stock that meets its time + price + volume gates. Disable to study
+    # MORNING_FADE only on stocks the watchlist would have surfaced.
+    morning_fade_overlay: bool = True
 
 
 @dataclass
@@ -559,9 +566,21 @@ class PureReplayStrategy:
         bar_date = ctx.bar.ts[:10]
         if self.cfg.apply_watchlist_per_day and self._watchlist_per_day:
             wl_setup = self._watchlist_per_day.get((bar_date, sym))
-            if wl_setup is None:
+            if wl_setup is None and not self.cfg.morning_fade_overlay:
                 return  # live didn't scan this stock today
-            setups_to_try: tuple[str, ...] = (wl_setup,)
+            setups_list: list[str] = []
+            if wl_setup is not None:
+                setups_list.append(wl_setup)
+            # MORNING_FADE overlay: always tried regardless of watchlist
+            # mapping, because the strategy fires on a price+time pattern,
+            # not a watchlist label. Its time-gate (09:45-10:15 IST) and
+            # price-gate (>1.5% pop with volume) make it self-selecting —
+            # 99% of bars will fail the gate, so the overlay cost is tiny.
+            if self.cfg.morning_fade_overlay and "MORNING_FADE" not in setups_list:
+                setups_list.append("MORNING_FADE")
+            if not setups_list:
+                return
+            setups_to_try: tuple[str, ...] = tuple(setups_list)
         else:
             setups_to_try = self.cfg.setups
 
@@ -606,11 +625,27 @@ class PureReplayStrategy:
                     continue
 
             # 5. Score
-            sig: SignalScore = score_signal(
-                symbol=sym, direction=direction, ind=ind, regime=regime,
-                cfg=self.s_cfg, daily_bias=daily_bias, setup=setup,
-            )
-            raw_score = float(sig.score)
+            # MORNING_FADE bypasses the standard score_signal formula because
+            # that formula is designed for trend-following setups (Layer-1
+            # regime alignment, Layer-3 technical-with-trend, Layer-5 daily-
+            # bias alignment). Shorting an up-stock structurally fails all of
+            # those layers and scores 30-50, never qualifying. The check_
+            # strategy_entry gate already validated the thesis (time + pop
+            # magnitude + volume); assigning a fixed mid-range score lets the
+            # signal flow through threshold + affinity without the misaligned
+            # bullish-bias of score_signal. Score=75 sits at the low end of
+            # "qualified" so the affinity multiplier and brain haircut still
+            # gate against it in adverse regimes.
+            if setup == "MORNING_FADE":
+                raw_score = 75.0
+                sig = SignalScore(score=int(raw_score), direction=direction,
+                                  breakdown=ScoreBreakdown())
+            else:
+                sig = score_signal(
+                    symbol=sym, direction=direction, ind=ind, regime=regime,
+                    cfg=self.s_cfg, daily_bias=daily_bias, setup=setup,
+                )
+                raw_score = float(sig.score)
 
             # 6. Affinity multiplier
             if self.cfg.apply_affinity_multiplier:
