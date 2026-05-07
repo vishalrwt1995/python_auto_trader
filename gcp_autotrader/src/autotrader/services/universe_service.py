@@ -4793,47 +4793,56 @@ class UniverseService:
             else:
                 final_score = (0.40 * mean_rev) + (0.25 * breakout) + (0.20 * momentum) + (0.15 * pullback)
 
-            setup_scores = {"BREAKOUT": breakout, "PULLBACK": pullback, "MEAN_REVERSION": mean_rev, "MOMENTUM": momentum}
-            # Regime-aware tie-break. When the top two scores are within 10%,
-            # prefer the regime-aligned label so the setup actually matches the
-            # market posture. Prior behaviour used dict insertion order, which
-            # silently biased towards BREAKOUT in RISK_OFF/RANGE.
-            _regime_preference = {
-                "TREND": ("MOMENTUM", "BREAKOUT", "PULLBACK"),
-                "RANGE": ("VWAP_TREND", "MEAN_REVERSION", "PULLBACK", "MOMENTUM"),
-                "RISK_OFF": ("MEAN_REVERSION", "PULLBACK"),
-            }.get(regime_v2["regimeDaily"], ("MEAN_REVERSION", "MOMENTUM", "BREAKOUT"))
-            _sorted = sorted(setup_scores.items(), key=lambda kv: kv[1], reverse=True)
-            _top_label, _top_score = _sorted[0]
-            _second_label, _second_score = _sorted[1]
-            if _top_score > 0 and (_top_score - _second_score) / _top_score < 0.10:
-                # Within 10% — apply regime tie-break.
-                if _top_label not in _regime_preference and _second_label in _regime_preference:
-                    setup_label = _second_label
-                else:
-                    setup_label = _top_label
-            else:
-                setup_label = _top_label
-            trade_direction = "BUY"
+            # ── Multi-setup emission (2026-05-07) ─────────────────────────────
+            #
+            # Prior behaviour: winner-takes-all + regime tie-break picked ONE
+            # setup_label per stock, then computed a regime-weighted final_score
+            # that blended all four components. Result on 2026-05-07: every
+            # single one of 24 swing rows in TREND_UP came out as BREAKOUT BUY
+            # because BREAKOUT scored highest universally in a strong tape, and
+            # all 24 were then hard-blocked downstream (BREAKOUT in TREND_UP is
+            # parked due to 0/9 live WR). Net swing trades: 0 over 14 days.
+            #
+            # New behaviour: emit ONE watchlist row per setup whose component
+            # score clears the swing threshold. A stock that fits both PULLBACK
+            # and MEAN_REVERSION patterns appears as two rows; the trading
+            # service then evaluates each setup against its own gates (regime
+            # hard-blocks, per-strategy min, breadth, sl_too_wide, etc.). The
+            # downstream swing_target trim sorts across all (symbol, setup)
+            # rows by score and keeps the top N — so a strong multi-pattern
+            # stock legitimately occupies more slots than a weak single-pattern
+            # stock, which is the desired outcome.
+            #
+            # MOMENTUM is intentionally NOT emitted as swing — trading_service
+            # vetoes (wl_type=swing, strategy=MOMENTUM) because the MOMENTUM
+            # strategy code path uses bar-count timing logic that's intraday-
+            # calibrated. Lifting that veto requires a strategy-side refactor,
+            # not a watchlist change. Component score is still computed (and
+            # preserved on each row for debugging) so it can be re-enabled in
+            # one place once the strategy is parameterized.
+            _long_candidates: list[tuple[str, str, float]] = [
+                ("BREAKOUT", "BUY", breakout),
+                ("PULLBACK", "BUY", pullback),
+                ("MEAN_REVERSION", "BUY", mean_rev),
+            ]
 
             # Fix 3: short-side scoring in bearish regimes (PANIC / TREND_DOWN)
             #
             # Batch 3.3 (2026-04-22): also permit short-side scoring for stocks
             # that are individually bearish (ema50 < ema200 AND close < ema50),
             # regardless of overall regime — EXCEPT in TREND_UP where the tide
-            # would lift even weak stocks. Previously, a stock with a clean
-            # multi-week daily downtrend could never surface as SHORT_PULLBACK /
-            # SHORT_BREAKDOWN in RANGE/CHOP/RECOVERY because this gate short-
-            # circuited short scoring entirely. The downstream breadth filter in
+            # would lift even weak stocks. The downstream breadth filter in
             # trading_service (nifty_breadth_too_bullish_for_shorts) already
-            # protects against shorting into a strongly-bid tape; gating here as
-            # well was belt-and-suspenders that silently killed valid swing shorts.
+            # protects against shorting into a strongly-bid tape.
             _stock_bearish_structure = (
                 ema50 > 0 and ema200 > 0 and ema50 < ema200 and close < ema50
             )
             _allow_short_scoring = is_bearish_regime or (
                 _stock_bearish_structure and canonical_regime != "TREND_UP"
             )
+            short_breakout = 0.0
+            short_pullback = 0.0
+            _short_candidates: list[tuple[str, str, float]] = []
             if _allow_short_scoring:
                 z_short = 0.60 * (-z_sector) + 0.40 * (-z_universe)
                 rs_short = self._norm_minmax_clip(max(-3.0, min(3.0, z_short)), -3.0, 3.0)
@@ -4852,34 +4861,77 @@ class UniverseService:
                 vol_expansion = min(1.0, float(r.get("volRatio") or 0.0) / 2.0)
                 short_breakout = self._clip01((0.30 * rs_short) + (0.25 * breakdown_component) + (0.15 * vol_expansion) + (0.15 * trend_short) + (0.15 * adx_component)) * 100.0
                 short_pullback = self._clip01((0.40 * short_trend_str) + (0.40 * short_pb_component) + (0.20 * vol_expansion)) * 100.0
-                if canonical_regime == "PANIC":
-                    short_final = (0.65 * short_breakout) + (0.25 * short_pullback) + (0.10 * mean_rev)
-                else:
-                    short_final = (0.50 * short_breakout) + (0.35 * short_pullback) + (0.15 * mean_rev)
-                if short_final > final_score:
-                    final_score = short_final
-                    setup_label = "SHORT_BREAKDOWN" if short_breakout >= short_pullback else "SHORT_PULLBACK"
-                    trade_direction = "SELL"
-                    setup_scores = {"SHORT_BREAKDOWN": short_breakout, "SHORT_PULLBACK": short_pullback, "MEAN_REVERSION": mean_rev}
+                _short_candidates = [
+                    ("SHORT_BREAKDOWN", "SELL", short_breakout),
+                    ("SHORT_PULLBACK", "SELL", short_pullback),
+                ]
 
-            # Fix 7: 20% penalty for stocks with a recent large-gap event (proxy for earnings)
+            _candidates: list[tuple[str, str, float]] = _long_candidates + _short_candidates
+
+            # Fix 7: 20% penalty for stocks with a recent large-gap event (proxy
+            # for earnings). Apply consistently across all candidates.
             if bool(r.get("recentEventFlag")):
-                final_score *= 0.80
+                _candidates = [(lbl, dir_, sc * 0.80) for (lbl, dir_, sc) in _candidates]
 
-            swing_scored.append(
-                {
-                    **r,
-                    "score": float(round(max(0.0, min(100.0, final_score)), 2)),
-                    "setupLabel": setup_label,
-                    "tradeDirection": trade_direction,
-                    "breakout": breakout,
-                    "pullback": pullback,
-                    "meanRev": mean_rev,
-                    "momentum": momentum,
-                    "adx14Score": float(round(adx_component * 100.0, 1)),
-                    "recentEventFlag": bool(r.get("recentEventFlag")),
+            # Emit one swing watchlist row per candidate clearing the floor.
+            # Use the swing min_score as the emit threshold so we don't flood
+            # the universe with marginal-score rows that would just get filtered
+            # out by the same threshold a few lines below.
+            _emit_floor = float(min_score_eff)
+            _any_emitted = False
+            for _label, _direction, _component_score in _candidates:
+                _score = round(max(0.0, min(100.0, _component_score)), 2)
+                if _score < _emit_floor:
+                    continue
+                _any_emitted = True
+                swing_scored.append(
+                    {
+                        **r,
+                        "score": float(_score),
+                        "setupLabel": _label,
+                        "tradeDirection": _direction,
+                        "breakout": breakout,
+                        "pullback": pullback,
+                        "meanRev": mean_rev,
+                        "momentum": momentum,
+                        "shortBreakout": short_breakout,
+                        "shortPullback": short_pullback,
+                        "adx14Score": float(round(adx_component * 100.0, 1)),
+                        "recentEventFlag": bool(r.get("recentEventFlag")),
+                    }
+                )
+
+            # If NOTHING cleared the floor for this stock, fall back to the
+            # historical winner-takes-all behaviour with the regime-weighted
+            # final_score so the row's not silently dropped from the universe
+            # snapshot. This keeps the watchlist's view of "what the universe
+            # could trade" stable for diagnostics, even if no setup is
+            # tradeable for this stock right now.
+            if not _any_emitted:
+                _setup_scores = {
+                    "BREAKOUT": breakout, "PULLBACK": pullback,
+                    "MEAN_REVERSION": mean_rev, "MOMENTUM": momentum,
                 }
-            )
+                _top_label, _top_score = max(_setup_scores.items(), key=lambda kv: kv[1])
+                _fallback_score = round(max(0.0, min(100.0, _top_score)), 2)
+                if bool(r.get("recentEventFlag")):
+                    _fallback_score = round(_fallback_score * 0.80, 2)
+                swing_scored.append(
+                    {
+                        **r,
+                        "score": float(_fallback_score),
+                        "setupLabel": _top_label,
+                        "tradeDirection": "BUY",
+                        "breakout": breakout,
+                        "pullback": pullback,
+                        "meanRev": mean_rev,
+                        "momentum": momentum,
+                        "shortBreakout": short_breakout,
+                        "shortPullback": short_pullback,
+                        "adx14Score": float(round(adx_component * 100.0, 1)),
+                        "recentEventFlag": bool(r.get("recentEventFlag")),
+                    }
+                )
 
         swing_scored = [r for r in swing_scored if float(r.get("score") or 0.0) >= float(min_score_eff)]
         if market_policy is not None and self.market_brain_service is not None:

@@ -809,10 +809,22 @@ class TradingService:
                 # pattern with no daily-trend basis to hold for. Any swing trade
                 # must use a daily-trend strategy. Any intraday-only strategy
                 # forced into swing routing is silently retagged to intraday.
+                #
+                # 2026-05-07: removed MEAN_REVERSION from this set. Daily-frame
+                # mean-reversion (RSI<35 + close near 20-day-low + vol_sanity)
+                # is a legitimate swing edge — buying oversold stocks at support
+                # and holding 3-5 days for the bounce is one of the highest-WR
+                # setups in Indian markets historically. The watchlist generator
+                # has been computing a swing-appropriate mean_rev score on daily
+                # candles all along (universe_service.py:4729-4759); silently
+                # retagging it to intraday wasted the scoring effort and was
+                # one of the reasons swing fired 0 trades over 14 days.
+                # OPEN_DRIVE / VWAP_* stay intraday-only — they encode the
+                # opening-auction / VWAP-cross intraday clock structure and
+                # cannot be evaluated on daily candles.
                 _strategy_upper = str(w.strategy or "").strip().upper()
                 _intraday_only_strategies = {
                     "MOMENTUM", "OPEN_DRIVE", "VWAP_REVERSAL", "VWAP_TREND",
-                    "MEAN_REVERSION",
                 }
                 if _is_swing and _strategy_upper in _intraday_only_strategies:
                     logger.warning(
