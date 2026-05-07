@@ -91,7 +91,7 @@ class RunSpec:
     slippage: SlippageModel | None = None
 
     # ── Candle source ────────────────────────────────────────────────
-    # "gcs" reads from `cache/score_1d/...` and `cache/candles/{tf}/...`,
+    # "gcs" reads from `cache/candles/{tf}/...` (uniform path for 1d/5m/15m),
     # the same canonical store the live system reads at scan time. This
     # is the default — backtests are faithful to live by construction
     # and don't depend on the best-effort BQ dual-write coverage.
@@ -141,6 +141,11 @@ class RunSpec:
     # stock and over-fires by 2-4×. Disable only for "what if we ran every
     # setup against every stock?" counterfactual studies.
     apply_watchlist_per_day: bool = True
+    # Swing-mode flag. Drives PureReplayConfig.is_swing which routes orders
+    # through the delivery (CNC) cost model and enables check_swing_entry
+    # daily-bias gating. Use with timeframe="1d" + a swing-compatible setup
+    # subset. Default False = intraday backtest.
+    is_swing: bool = False
 
 
 # ── Live-replay run ────────────────────────────────────────────────────────
@@ -405,6 +410,7 @@ def run_pure_replay(spec: RunSpec) -> BacktestResult:
         apply_daily_bias=spec.apply_daily_bias,
         apply_strategy_entry_gate=spec.apply_strategy_entry_gate,
         apply_watchlist_per_day=spec.apply_watchlist_per_day,
+        is_swing=spec.is_swing,
     )
     strategy = PureReplayStrategy(
         cfg=pr_cfg,
