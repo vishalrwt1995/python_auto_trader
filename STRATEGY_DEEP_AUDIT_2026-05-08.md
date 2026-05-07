@@ -356,6 +356,74 @@ The compare-mode result shows:
 
 ---
 
+## Part 8: Long-window backtest results (added after intraday backtest finished)
+
+The 29-day intraday pure-replay (`--no-watchlist-per-day` semantic = multi-emission applied to intraday) produced **458 trades, ALL strategies negative**:
+
+| Strategy × Regime | Trades | WR | Net P&L | E[R] | Avg MFE | Avg MAE |
+|---|---|---|---|---|---|---|
+| MOMENTUM × RANGE | 306 | 32.7% | -₹67,744 | -0.47 | 0.54R | -0.52R |
+| PULLBACK × TREND_UP | 58 | 22.4% | -₹39,870 | -1.11 | 0.42R | -0.62R |
+| MOMENTUM × TREND_UP | 53 | 20.8% | -₹57,216 | -1.12 | 0.47R | -0.54R |
+| MORNING_FADE × RANGE | 30 | 16.7% | -₹63,534 | -0.42 | 0.53R | -0.54R |
+| MEAN_REVERSION × RANGE | 11 | 9.1% | -₹28,162 | -0.70 | 0.40R | -0.47R |
+| **Total** | **458** | **28.4%** | **-₹256,526** | **-0.63** | — | — |
+| VWAP_TREND, VWAP_REVERSAL, BREAKOUT, OPEN_DRIVE | 0 | — | — | — | — | — |
+
+**Critical insight #1: Multi-emission applied to intraday would be a disaster.**
+
+Under multi-emission ("best signal wins" across all setups per bar), MOMENTUM wins 78% of selections (359/458 trades) and bleeds catastrophically (-₹125k). Live's winner-takes-all watchlist + per-strategy gates correctly produces only 1 MOMENTUM trade in 29 days — contradicting pure-replay's 359.
+
+**The current production design (winner-takes-all + strict gates) is structurally sound. Extending multi-emission to intraday would produce -₹256k vs live's -₹1k.**
+
+**Critical insight #2: MFE/MAE pattern across all strategies is the same.**
+
+Every strategy shows:
+- Winners' max favorable excursion: 0.40-0.53R (winners barely reach target)
+- Losers' max adverse excursion: -0.47R to -0.62R (losers don't go much beyond stop)
+
+Translation: **5-min intraday signals rarely produce sustained directional moves of 1+R.** Indian markets at 5m are choppy. Both winners and losers oscillate around entry by 0.4-0.6R then close at flat or stop.
+
+This implies the entire intraday framework needs:
+- **Tighter targets** (capture 0.3-0.5R quickly instead of 1R)
+- **Tighter stops** (0.4R instead of 1R)
+- **Higher score threshold** to filter for the rare 1R+ moves
+
+OR the strategies need timeframe-aware target/SL pairs (5m for fast capture, 15m for trend confirmation).
+
+**Critical insight #3: MORNING_FADE doesn't work in RANGE either.**
+
+Pure-replay finally tested MORNING_FADE in its supposedly-ideal RANGE regime (live data only had TREND_UP). Result: 30 trades, 16.7% WR, -₹64k. The strategy thesis (fade morning pop, expect reversion) doesn't hold up — even in RANGE, 83% of "morning pops" continued or stayed elevated.
+
+**Recommendation:** validate MORNING_FADE with pure-replay BEFORE deploying it widely. If pure-replay already says 17% WR, live won't be much better. Consider hard-blocking it across all regimes pending fundamental redesign.
+
+**Critical insight #4: Live system is correctly conservative.**
+
+Pure-replay with multi-emission semantics: 458 trades, -₹256k.
+Live winner-takes-all: 78 trades, -₹1.4k.
+
+The 5x difference in trade count and 180x difference in losses shows the live system's strict gates and one-setup-per-symbol watchlist are saving it from the multi-emission disaster. **Don't loosen gates without a specific reason and validation.**
+
+---
+
+## Part 9: REVISED prioritized fix list (incorporating Part 8 data)
+
+| Priority | Strategy | Fix | Why |
+|---|---|---|---|
+| **P0 (kill)** | MORNING_FADE | Hard-block across ALL regimes pending redesign | Pure-replay 17% WR in RANGE (its supposed sweet spot); live untested |
+| P0 | VWAP_TREND | Add time-of-day gate ≥11:30 IST | Live data: 33% WR morning vs 75% afternoon |
+| P0 | VWAP_TREND | Tighten target from 2R to 0.7R (matches MFE distribution) | Live data: only 4% hit target; MFE typically 0.4-0.5R |
+| P1 | DON'T extend multi-emission to intraday | Keep winner-takes-all watchlist | Pure-replay shows -₹256k under multi-emission vs -₹1.4k live |
+| P1 | MEAN_REVERSION (intraday) | Loosen RSI gate (35→40) + VWAP extension (1%→0.6%) | Score reaches threshold (p90=80) but gates compound to ~0% pass-through |
+| P1 | PULLBACK (intraday) | Don't enable multi-emission for this — keep watchlist gate | Pure-replay 22% WR over 58 trades = pattern not predictive |
+| P1 | SHORT_BREAKDOWN | Suppress emission in RANGE (affinity makes threshold unreachable) | Mathematical: 0.55× × max raw 100 = 55 vs threshold 70 |
+| **P2 (architectural)** | All intraday strategies | Investigate target/SL calibration vs MFE/MAE distribution | All strategies show winners only reach 0.4-0.5R; targets at 1R+ rarely hit |
+| P2 | AUTO | Investigate insufficient_candles (700/2705) | Data quality |
+| P3 | PHASE1_REVERSAL | Wait for PANIC/TREND_DOWN regime | Calibration looks correct but needs exposure |
+| P3 | PHASE1_MOMENTUM | Hard-block in RANGE/CHOP via affinity (already 0.64×, push to 0.0) | Wasted scans |
+
+---
+
 ## What I'd do next (post-launch validation)
 
 1. **Day 1 (May 8):** Watch for swing trades. If 0, investigate which gate killed each MEAN_REVERSION watchlist row.
