@@ -138,7 +138,17 @@ def test_adx_zero_no_choppy_penalty():
 # ─────────────────────────────────────────────────────────────────────────────
 # FIX 8: MEAN_REVERSION VWAP threshold lowered to 1.0%
 # ─────────────────────────────────────────────────────────────────────────────
-def test_mean_reversion_vwap_threshold_1pct():
+def test_mean_reversion_vwap_threshold_06pct():
+    """VWAP extension threshold for MEAN_REVERSION / VWAP_REVERSAL.
+
+    2026-05-08 strategy audit lowered this from 1.0% to 0.6%. p50 5m
+    VWAP-deviation in our universe is ~0.4%; 1.0% rejected ~90% of
+    intraday reversal signals. 0.6% captures genuine reversal setups
+    without firing on bid/ask noise (<0.5%).
+
+    This test was previously `test_mean_reversion_vwap_threshold_1pct`
+    asserting 0.8% should fail. Renamed and updated for the new threshold.
+    """
     from autotrader.domain.scoring import check_strategy_entry
     from autotrader.domain.indicators import compute_indicators
     from autotrader.settings import StrategySettings
@@ -152,23 +162,24 @@ def test_mean_reversion_vwap_threshold_1pct():
     ind = compute_indicators(candles, cfg)
     assert ind is not None
 
-    # Manually craft an indicator snapshot where price is 1.2% below VWAP
+    # Manually craft an indicator snapshot where price is 0.8% below VWAP —
+    # ABOVE the new 0.6% threshold, so should pass.
     from dataclasses import replace
     vwap = 200.0
-    close_1_2pct_below = round(vwap * (1 - 0.012), 2)  # 1.2% below VWAP — between 1.0% and old 1.5%
-    ind_test = replace(ind, close=close_1_2pct_below, vwap=vwap)
+    close_0_8pct_below = round(vwap * (1 - 0.008), 2)
+    ind_test = replace(ind, close=close_0_8pct_below, vwap=vwap)
     # Also force RSI to oversold (IndicatorLine = curr/prev pair)
     from autotrader.domain.models import IndicatorLine
     ind_test = replace(ind_test, rsi=IndicatorLine(curr=32.0, prev=35.0))
 
     ok, reason = check_strategy_entry("MEAN_REVERSION", "BUY", ind_test, regime="RANGE")
-    assert ok, f"1.2% VWAP extension should pass with threshold=1.0%, got: {reason}"
+    assert ok, f"0.8% VWAP extension should pass with new threshold=0.6%, got: {reason}"
 
-    # 0.8% should still fail
-    close_0_8pct_below = round(vwap * (1 - 0.008), 2)
-    ind_test2 = replace(ind_test, close=close_0_8pct_below)
+    # 0.4% should still fail (below the 0.6% threshold).
+    close_0_4pct_below = round(vwap * (1 - 0.004), 2)
+    ind_test2 = replace(ind_test, close=close_0_4pct_below)
     ok2, reason2 = check_strategy_entry("MEAN_REVERSION", "BUY", ind_test2, regime="RANGE")
-    assert not ok2, f"0.8% extension should still fail, got ok=True"
+    assert not ok2, f"0.4% extension should fail (below 0.6% threshold), got ok=True"
     assert "vwap_extension" in reason2
 
 
@@ -176,6 +187,15 @@ def test_mean_reversion_vwap_threshold_1pct():
 # FIX 7: PULLBACK EMA proximity check
 # ─────────────────────────────────────────────────────────────────────────────
 def test_pullback_blocks_extended_moves():
+    """PULLBACK EMA-distance gate — blocks entries where price is too far
+    from fast EMA to be a real pullback.
+
+    2026-05-08 audit widened the threshold from ±3% to ±5%. The audit
+    found 0 live trades / 96 scans because ±3% on 5m bars was too tight —
+    liquid Indian stocks routinely move 3-4% intraday in uptrends.
+    Updated this test to use 7% (well above the new 5% threshold) so it
+    still validates the "block extended moves" semantic.
+    """
     from autotrader.domain.scoring import check_strategy_entry
     from autotrader.domain.indicators import compute_indicators
     from autotrader.settings import StrategySettings
@@ -191,17 +211,17 @@ def test_pullback_blocks_extended_moves():
     ind = compute_indicators(candles, cfg)
     assert ind is not None
 
-    # Price 5% above EMA fast → already extended, not a pullback
+    # Price 7% above EMA fast → above new ±5% threshold, should be blocked.
     ema_fast_val = 200.0
     extended = replace(
         ind,
         ema_fast=IndicatorLine(curr=ema_fast_val, prev=ema_fast_val - 0.5),
         ema_stack=True,
-        close=ema_fast_val * 1.05,  # 5% above EMA
+        close=ema_fast_val * 1.07,  # 7% above EMA — above ±5% gate
         rsi=IndicatorLine(curr=52.0, prev=50.0),
     )
     ok, reason = check_strategy_entry("PULLBACK", "BUY", extended)
-    assert not ok, f"Price 5% above EMA should be blocked as 'extended', got ok=True"
+    assert not ok, f"Price 7% above EMA should be blocked (gate is ±5%), got ok=True"
     assert "extended" in reason
 
     # Price within 2% of EMA → valid pullback
