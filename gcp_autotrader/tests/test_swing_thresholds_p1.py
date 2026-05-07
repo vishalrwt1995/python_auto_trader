@@ -19,34 +19,44 @@ from autotrader.settings import StrategySettings
 # ─── P1-1: swing_min_signal_score drop ────────────────────────────────────
 
 
-def test_swing_min_signal_score_is_70():
-    """Swing threshold must be 70 after 2026-04-22 calibration.
+def test_swing_min_signal_score_is_65():
+    """Swing threshold lowered 70 → 65 (2026-05-07 audit).
 
-    Rationale: today's live data had max swing adjusted_score = 73,
-    threshold = 75, only 1 qualified (MOTHERSON @ 76 by a 1-point margin).
-    Dropping to 70 captures daily-uptrend names (WELCORP s=82, LLOYDSME
-    s=84, STLTECH s=88) that genuinely have edge on the daily horizon
-    but scored 65-73 on intraday-composite.
+    Live data 2026-04-23 → 2026-05-07 (305 swing scans):
+      * 0-30 score: 88 (29%)
+      * 30-50:      84 (28%)
+      * 50-60:      33 (11%)
+      * 60-65:      16 (5%)
+      * 65-70:      27 (9%)  ← unlocked by this drop
+      * 70-75:      19 (6%)
+      * 75-80:      15 (5%)
+      * 80+:        23 (8%)
+
+    Only 4 qualified across 14 trading days at threshold=70 — effectively
+    zero swing trades fired in production. Lowered to 65 to unlock real
+    volume; subsequent gates (volume, RSI, daily-bias, sl_too_wide) still
+    filter low-quality candidates. Target post-deploy: 1-3 swing trades/day.
     """
     cfg = StrategySettings()
-    assert cfg.swing_min_signal_score == 70, (
-        f"swing_min_signal_score must be 70, got {cfg.swing_min_signal_score}. "
-        "Do NOT revert to 75 without live BQ evidence that 70 is generating "
-        "low-quality signals. See 2026-04-22 scan_decisions audit."
+    assert cfg.swing_min_signal_score == 65, (
+        f"swing_min_signal_score must be 65, got {cfg.swing_min_signal_score}. "
+        "Do NOT revert to 70+ without live BQ evidence the 65-69 band is "
+        "generating losing trades. See 2026-05-07 scan_decisions audit."
     )
 
 
-def test_swing_threshold_still_above_intraday_normal():
-    """Sanity: swing threshold should still be ≥ intraday NORMAL threshold.
-
-    If someone drops swing below intraday, the horizon-asymmetry assumption
-    breaks — swing should demand at least as much signal quality as a
-    NORMAL-regime intraday trade.
+def test_swing_threshold_above_or_near_intraday_threshold():
+    """Sanity: swing threshold should not be MORE than 10 points below
+    intraday default. The 2026-05-07 drop allows swing slightly below
+    intraday because swing scoring is the same intraday-tuned formula
+    applied to daily candles — score numerics are systematically lower
+    for genuine swing setups even when the underlying edge is real.
     """
     cfg = StrategySettings()
-    assert cfg.swing_min_signal_score >= cfg.min_signal_score - 5, (
-        "Swing threshold dropped too close to intraday — swing trades should "
-        "still clear a quality bar even though horizon is longer."
+    assert cfg.swing_min_signal_score >= cfg.min_signal_score - 10, (
+        f"Swing threshold dropped too far below intraday "
+        f"(swing={cfg.swing_min_signal_score}, intraday={cfg.min_signal_score}). "
+        "Hard floor: swing must be within 10 points of intraday."
     )
 
 
@@ -104,11 +114,12 @@ def test_breadth_filter_still_blocks_intraday_shorts_in_bullish_tape():
 
 
 def test_settings_file_has_p1_comment():
-    """Commit hygiene: the settings file should carry the P1 rationale so
-    future readers know why swing_min_signal_score is 70.
+    """Commit hygiene: the settings file should carry the rationale so
+    future readers know why swing_min_signal_score is 65.
     """
     path = Path(__file__).parent.parent / "src" / "autotrader" / "settings.py"
     text = path.read_text()
-    assert "swing_min_signal_score: int = 70" in text
-    # Rationale comment near the constant
-    assert "2026-04-22" in text and "swing" in text.lower()
+    assert "swing_min_signal_score: int = 65" in text
+    # Rationale comment near the constant — both the original 2026-04-22
+    # context and the 2026-05-07 audit-driven adjustment should be cited.
+    assert "2026-05-07" in text and "swing" in text.lower()

@@ -84,7 +84,16 @@ class StrategySettings:
     # A 3–10 day swing trade's edge is the daily trend — over-filtering at 75
     # on intraday-composite scoring kills the sample size (see 2026-04-22:
     # 35 evaluations → 1 qualified at 76/75, 1-point margin).
-    swing_min_signal_score: int = 70
+    #
+    # 2026-05-07 audit (live data 2026-04-23 → 2026-05-07, 305 swing scans):
+    # Score distribution showed only 19% of swing scans scored ≥70 (57 of 305),
+    # and just 4 actually qualified across 14 trading days — effectively zero
+    # swing trades fired. The 65-69 band held 27 scans (9% of total) — the
+    # natural sweet spot for the swing-on-intraday-formula gap. Lowered to 65
+    # to unlock real swing trade volume; subsequent gates (volume, RSI zone,
+    # daily-bias, sl_too_wide) still filter low-quality candidates. Track
+    # qualified rate post-deploy: target 1-3 swing trades/day.
+    swing_min_signal_score: int = 65
     # Batch 2.1 (2026-04-22): re-entry cooldown. When a position closes
     # (SL hit, target hit, or timeout), the scanner should NOT immediately
     # re-stage the same symbol on the next 3-min cycle. The watchlist will
@@ -305,7 +314,7 @@ class AppSettings:
             # directly saw the P1 value. The P1 swing-threshold calibration only
             # takes effect because no SWING_MIN_SIGNAL_SCORE env var is set in
             # Cloud Run today, so from_env's default must be authoritative.
-            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 70),
+            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 65),
             reentry_cooldown_minutes=_env_int("REENTRY_COOLDOWN_MINUTES", 30),
             paper_entry_slippage_pct=_env_float("PAPER_ENTRY_SLIPPAGE_PCT", 0.0010),
             paper_sl_slippage_pct=_env_float("PAPER_SL_SLIPPAGE_PCT", 0.0020),

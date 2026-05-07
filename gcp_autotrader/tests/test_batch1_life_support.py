@@ -112,34 +112,27 @@ def test_swing_written_not_gated_by_premarket():
 def test_swing_min_signal_score_env_default_matches_dataclass():
     """from_env() must use the same default as the dataclass.
 
-    Divergence previously meant prod (uses from_env) saw 75 while tests
-    (construct StrategySettings() directly) saw 70 — the P1 calibration
-    silently never took effect in prod because no SWING_MIN_SIGNAL_SCORE
-    env var is set in Cloud Run.
+    Divergence here means production silently uses a different threshold
+    than what tests verify. Adjusted to 65 in the 2026-05-07 audit (after
+    live data showed only 4 of 305 swing scans qualified at threshold=70).
     """
     # Dataclass default
-    assert StrategySettings().swing_min_signal_score == 70
+    assert StrategySettings().swing_min_signal_score == 65
     # from_env() default must match
     settings_src = Path(__file__).parent.parent / "src" / "autotrader" / "settings.py"
     text = settings_src.read_text()
-    # The env-loader line must reference the same literal 70
-    assert '_env_int("SWING_MIN_SIGNAL_SCORE", 70)' in text, (
-        "settings.from_env() SWING_MIN_SIGNAL_SCORE env default must be 70 to "
-        "match the dataclass default. Mismatch silently overrides the P1 "
-        "calibration in production. Batch 1.3 (2026-04-22)."
-    )
-    assert '_env_int("SWING_MIN_SIGNAL_SCORE", 75)' not in text, (
-        "from_env() still has the old pre-P1 env default (75) — revert?"
+    # The env-loader line must reference the same literal 65
+    assert '_env_int("SWING_MIN_SIGNAL_SCORE", 65)' in text, (
+        "settings.from_env() SWING_MIN_SIGNAL_SCORE env default must be 65 to "
+        "match the dataclass default. See 2026-05-07 swing audit."
     )
 
 
-def test_from_env_produces_swing_threshold_70_when_env_unset():
-    """End-to-end: with no SWING_MIN_SIGNAL_SCORE env var, from_env → 70."""
+def test_from_env_produces_swing_threshold_65_when_env_unset():
+    """End-to-end: with no SWING_MIN_SIGNAL_SCORE env var, from_env → 65."""
     # Save/restore env so the test is hermetic
     saved = os.environ.pop("SWING_MIN_SIGNAL_SCORE", None)
     try:
-        # Need all required env vars to build AppSettings; just assert the
-        # env loader we care about. Build a minimal env so from_env works.
         required = {
             "GCP_PROJECT_ID": "test",
             "GCS_BUCKET": "test-bucket",
@@ -151,10 +144,9 @@ def test_from_env_produces_swing_threshold_70_when_env_unset():
         }
         with patch.dict(os.environ, required, clear=False):
             app = AppSettings.from_env()
-            assert app.strategy.swing_min_signal_score == 70, (
+            assert app.strategy.swing_min_signal_score == 65, (
                 f"from_env produced {app.strategy.swing_min_signal_score} — "
-                "expected 70 (P1 calibration). If this is 75 the env-default "
-                "alignment regressed."
+                "expected 65 per 2026-05-07 audit calibration."
             )
     finally:
         if saved is not None:
