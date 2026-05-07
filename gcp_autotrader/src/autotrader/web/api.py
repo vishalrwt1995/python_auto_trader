@@ -1877,3 +1877,60 @@ def run_refresh_earnings_calendar(
     except Exception as exc:
         logger.exception("earnings_calendar_refresh_failed")
         return {"ok": False, "error": str(exc)}
+
+
+@app.post("/jobs/compute-daily-metrics")
+def run_compute_daily_metrics(
+    since: str | None = Query(default=None, description="YYYY-MM-DD inclusive; defaults to previous day"),
+    until: str | None = Query(default=None, description="YYYY-MM-DD inclusive; defaults to since"),
+    dry_run: bool = Query(default=False, description="Compute but skip BQ insert"),
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Roll up `attribution` rows into `daily_metrics` for [since, until] inclusive.
+
+    Scheduled: 16:20 IST Mon–Fri (post-market, after EOD recon at 15:25–15:29
+    has flushed `trades` and the AttributionLog producer has emitted exit rows).
+    Safe to call manually for backfills — the BQ writer dedupes on trade_date.
+
+    Parameters default to "previous calendar day" so the nightly Scheduler call
+    needs no body. For backfills, pass explicit since/until.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        from autotrader.services.daily_metrics_service import run as _run_rollup
+
+        sink.action("DailyMetrics", "compute_daily_metrics", "START", "",
+                    {**sched_ctx, "since": since, "until": until, "dryRun": dry_run})
+        out = _run_rollup(
+            project=c.settings.gcp.project_id,
+            dataset=c.settings.gcp.bq_dataset,
+            since=since,
+            until=until,
+            dry_run=dry_run,
+        )
+        sink.action(
+            "DailyMetrics",
+            "compute_daily_metrics",
+            "DONE",
+            f"wrote {out.get('wrote', 0)}/{out.get('days', 0)} days",
+            {**sched_ctx, **_duration_ctx(started_perf), **{k: v for k, v in out.items() if k != "rollup_rows"}},
+        )
+        sink.flush_all()
+        return {"ok": True, **out}
+    except Exception as exc:
+        sink.action(
+            "DailyMetrics",
+            "compute_daily_metrics",
+            "ERROR",
+            f"{type(exc).__name__}: {exc}",
+            {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(exc).__name__},
+        )
+        sink.flush_all()
+        logger.exception("compute_daily_metrics_failed")
+        raise

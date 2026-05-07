@@ -8,8 +8,14 @@ from autotrader.domain.indicators import normalize_candles
 
 
 class GoogleCloudStorageStore:
-    def __init__(self, bucket_name: str):
+    def __init__(self, bucket_name: str, *, pool_maxsize: int = 64):
+        """`pool_maxsize` sizes the urllib3 connection pool that backs the
+        underlying requests session. The default of 10 chokes when the
+        backtester bulk-loads 30+ symbols concurrently — every request
+        beyond pool size eats a fresh TLS handshake. 64 covers the GCS
+        loader's default concurrency=32 with headroom."""
         self.bucket_name = bucket_name
+        self._pool_maxsize = max(10, int(pool_maxsize))
         self._client = None
         self._bucket = None
 
@@ -18,8 +24,26 @@ class GoogleCloudStorageStore:
             return self._bucket
         from google.cloud import storage
 
-        self._client = storage.Client()
-        self._bucket = self._client.bucket(self.bucket_name)
+        # Build the client; then resize its HTTP adapters to avoid
+        # "Connection pool is full, discarding connection" warnings under
+        # high concurrency. The storage client uses an AuthorizedSession
+        # internally — patch its mounted adapters.
+        client = storage.Client()
+        try:
+            from requests.adapters import HTTPAdapter
+            session = client._http  # AuthorizedSession (subclass of Session)
+            adapter = HTTPAdapter(
+                pool_connections=self._pool_maxsize,
+                pool_maxsize=self._pool_maxsize,
+            )
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+        except Exception:
+            # Best-effort: an outdated google-cloud-storage that doesn't
+            # expose `_http` will still work — just with the old warnings.
+            pass
+        self._client = client
+        self._bucket = client.bucket(self.bucket_name)
         return self._bucket
 
     def exists(self, path: str) -> bool:

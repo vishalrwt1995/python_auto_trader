@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -15,6 +16,9 @@ from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.daily_bias import compute_daily_bias
 from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regime_strategy_multiplier
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
+from autotrader.domain.expected_edge import evaluate as evaluate_expected_edge
+from autotrader.domain.playbook import check_playbook
+from autotrader.domain.portfolio_book import build_book as build_portfolio_book, check_can_open as portfolio_check_can_open
 from autotrader.domain.scoring import check_strategy_entry, check_swing_entry, determine_direction, score_signal
 from autotrader.services.log_sink import LogSink
 from autotrader.services.order_service import OrderService
@@ -266,6 +270,60 @@ class TradingService:
             return merged[-max(need, 120):]
         return cached[-max(need, 120):]
 
+    def _prefetch_candles_parallel(
+        self,
+        subset: list[Any],
+        key_by_symbol: dict[str, str],
+        *,
+        timeframe: str,
+        lookback_days: int,
+        max_workers: int = 10,
+    ) -> dict[str, list[list[Any]]]:
+        """Fetch candles for many symbols concurrently.
+
+        Replaces the old sequential `for w in subset: self._fetch_candles(...)`
+        pattern that gated scan latency at ~230s on 35-symbol watchlists.
+        Upstox v3 historical-candle limit is 50 req/s; max_workers=10 stays
+        comfortably under that.
+
+        On partial failure (one symbol raising), the remaining symbols still
+        complete and their results are returned. Failed symbols are absent
+        from the dict — callers should handle missing keys as "no candles".
+        """
+        if not subset:
+            return {}
+
+        out: dict[str, list[list[Any]]] = {}
+
+        def _fetch_one(w: Any) -> tuple[str, list[list[Any]]]:
+            sym = str(w.symbol).strip().upper()
+            ik = key_by_symbol.get(sym, "")
+            candles = self._fetch_candles(
+                w.symbol,
+                w.exchange,
+                w.segment,
+                instrument_key=ik,
+                timeframe=timeframe,
+                lookback_days=lookback_days,
+            )
+            return sym, candles
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch_one, w): w for w in subset}
+            for fut in as_completed(futures):
+                w = futures[fut]
+                try:
+                    sym, candles = fut.result()
+                    out[sym] = candles
+                except Exception:
+                    logger.warning(
+                        "prefetch_candles_failed symbol=%s timeframe=%s",
+                        getattr(w, "symbol", "?"),
+                        timeframe,
+                        exc_info=True,
+                    )
+        return out
+
     def run_scan_once(
         self,
         allow_live_orders: bool = False,
@@ -297,6 +355,18 @@ class TradingService:
             self.log_sink.flush_all()
             return {"skipped": "lock_busy"}
         try:
+            # ── M0.1 Kill-switch (fail-closed) ────────────────────────────
+            # control/kill_switch.active=True halts all new entries. Any
+            # Firestore read error treats as ACTIVE so a DB outage stops
+            # us rather than letting us trade blind.
+            _ks_active, _ks_reason = self.state.get_kill_switch()
+            if _ks_active:
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP", "kill_switch_active",
+                    {"reason": _ks_reason},
+                )
+                return {"skipped": "kill_switch_active", "reason": _ks_reason}
+
             if not force and not is_market_open_ist():
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "market closed")
                 return {"skipped": "market_closed"}
@@ -420,10 +490,20 @@ class TradingService:
             # the hot path fast.
             _today_pnl = 0.0
             _pnl_block_reason = ""
+            # M0.2 fail-closed: a read failure on the daily-PnL gate is treated
+            # as a SKIP, not a silent continue. Previous behaviour (default to
+            # 0.0 and proceed) meant a Firestore hiccup bypassed max_daily_loss
+            # entirely. One missed 3-min scan is strictly safer than one
+            # unchecked blow-up.
             try:
                 _today_pnl = self.state.get_today_realized_pnl(now_ist_str()[:10])
             except Exception:
-                logger.warning("daily_pnl_check_failed — proceeding without limit", exc_info=True)
+                logger.exception("daily_pnl_check_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "daily_pnl_read_failed_fail_closed",
+                )
+                return {"skipped": "daily_pnl_read_failed"}
             # ── Runtime settings overrides (Firestore config/{key}) ───────
             # Allows live tuning of thresholds without redeploy.
             # Supported: min_signal_score, max_positions, risk_per_trade,
@@ -467,11 +547,17 @@ class TradingService:
             # the scan entirely, since every candidate downstream would be
             # blocked anyway and there is no partial-qualification path.
             _today_iso = now_ist_str()[:10]
+            # M0.2 fail-closed: if we cannot read the day's trade count we
+            # cannot enforce max_trades_day — SKIP rather than assume 0.
             try:
                 _today_trade_count = self.state.get_today_trade_count(_today_iso)
             except Exception:
-                logger.warning("today_trade_count_failed — proceeding without cap", exc_info=True)
-                _today_trade_count = 0
+                logger.exception("today_trade_count_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "trade_count_read_failed_fail_closed",
+                )
+                return {"skipped": "trade_count_read_failed"}
             if _today_trade_count >= int(cfg.max_trades_day):
                 self.log_sink.action(
                     "TradingService", "run_scan_once", "SKIP", "max_trades_day_hit",
@@ -483,6 +569,38 @@ class TradingService:
                     "max_trades_day": int(cfg.max_trades_day),
                 }
 
+            # ── M4: PortfolioBook + DD governors ──────────────────────────
+            # Build once per scan cycle so downstream per-symbol checks use a
+            # consistent snapshot. Only when USE_PORTFOLIO_BOOK_V1 is on;
+            # otherwise the channel/DD gate is skipped entirely and the
+            # existing max_daily_loss logic remains the sole defense.
+            _portfolio_book = None
+            if self.settings.runtime.use_portfolio_book_v1:
+                try:
+                    from datetime import date as _date_cls, timedelta as _td
+                    _today_d = _date_cls.fromisoformat(_today_iso)
+                    _week_start = (_today_d - _td(days=7)).isoformat()
+                    _month_start = (_today_d - _td(days=30)).isoformat()
+                    _weekly_pnl = self.state.get_realized_pnl_since(_week_start)
+                    _monthly_pnl = self.state.get_realized_pnl_since(_month_start)
+                    _open_risk = self.state.get_open_risk_by_channel()
+                    _portfolio_book = build_portfolio_book(
+                        capital=float(cfg.capital or 0.0),
+                        open_risk_by_channel=_open_risk,
+                        daily_pnl=_today_pnl,
+                        weekly_pnl=_weekly_pnl,
+                        monthly_pnl=_monthly_pnl,
+                    )
+                except Exception:
+                    # Fail-closed on book construction: if we can't read the
+                    # inputs we shouldn't silently fall back to unlimited.
+                    logger.exception("portfolio_book_build_failed — failing closed")
+                    self.log_sink.action(
+                        "TradingService", "run_scan_once", "SKIP",
+                        "portfolio_book_build_failed_fail_closed",
+                    )
+                    return {"skipped": "portfolio_book_build_failed"}
+
             # Read watchlist: Firestore is primary, Sheets is fallback
             watchlist = self._read_watchlist_with_fallback()
             if wl_filter in {"intraday", "swing"}:
@@ -493,6 +611,46 @@ class TradingService:
             if not subset:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")
                 return {"skipped": "watchlist_empty"}
+
+            # 2026-05-06: MORNING_FADE overlay. For every intraday watchlist
+            # row, inject a parallel row with strategy="MORNING_FADE". The
+            # existing scan loop processes both rows naturally — the original
+            # row scores its assigned strategy, the companion row scores
+            # MORNING_FADE. The MORNING_FADE gate (check_strategy_entry)
+            # only matches in the 09:45-10:15 IST window with a >1.5% pop
+            # + volume, so 99% of MORNING_FADE companions fail the gate
+            # cheaply. The 1% that fire produce the regime-appropriate
+            # short-the-pop signals validated in pure-replay (51 trades,
+            # 37% WR, +₹12k net over Apr 16-May 4).
+            #
+            # Live integration parity: the universe_service does NOT yet
+            # tag MORNING_FADE candidates, so this overlay is the only path
+            # for the strategy to reach orders in production. When/if the
+            # universe service starts assigning MORNING_FADE directly, the
+            # injection here can be made a no-op via a flag.
+            from dataclasses import replace as _dc_replace
+            from autotrader.time_utils import ist_minutes as _ist_min_now
+            _ist_now_min = _ist_min_now()
+            # Window: open injection from market open through 10:15 IST.
+            # The gate enforces 09:45-10:15, but pre-09:45 bars still flow
+            # through the loop and exit cheaply on the time gate.
+            # Only inject when we'll plausibly fire in this scan tick — saves
+            # a per-symbol indicator computation outside the window.
+            if 555 <= _ist_now_min <= 615:
+                _mf_companions: list[Any] = []
+                for w in subset:
+                    if getattr(w, "wl_type", "intraday") == "swing":
+                        continue   # swing watchlist rows aren't intraday-fadeable
+                    _existing_strat = str(w.strategy or "").strip().upper()
+                    if _existing_strat == "MORNING_FADE":
+                        continue   # already a MORNING_FADE row, don't double up
+                    _mf_companions.append(_dc_replace(w, strategy="MORNING_FADE"))
+                if _mf_companions:
+                    logger.info(
+                        "morning_fade_overlay_injected n=%d ist_min=%d (window 555-615)",
+                        len(_mf_companions), _ist_now_min,
+                    )
+                    subset = list(subset) + _mf_companions
 
             # Portfolio risk: pre-build sector map of open positions for concentration check
             _portfolio_sectors = self._build_portfolio_sector_map()
@@ -515,6 +673,11 @@ class TradingService:
             # positions 2 days before/after results when gap risk is maximum.
             _earnings_blackout: dict[str, str] = {}
             _blackout_days = 2
+            # M0.2 fail-closed: if we cannot read the blackout document we
+            # cannot guarantee we're not about to enter into earnings — SKIP.
+            # Absent-doc (empty dict) is a legitimate "no blackout" state and
+            # handled by the `or {}` guard, so only true read errors reach the
+            # except branch.
             try:
                 _eb_cfg = self.state.get_json("config", "earnings_blackout") or {}
                 _earnings_blackout = {
@@ -522,12 +685,12 @@ class TradingService:
                 }
                 _blackout_days = int(_eb_cfg.get("blackout_days", 2))
             except Exception:
-                # Batch 1.4 (2026-04-22): log at DEBUG so a broken blackout
-                # document is diagnosable. Silent except-pass previously hid
-                # the fact that earnings blackout was never taking effect
-                # (earnings_blackout document absent → entries fire through
-                # earnings with no protection and no visible error).
-                logger.debug("earnings_blackout_read_failed", exc_info=True)
+                logger.exception("earnings_blackout_read_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "earnings_blackout_read_failed_fail_closed",
+                )
+                return {"skipped": "earnings_blackout_read_failed"}
 
             # Count existing swing positions for separate cap
             _open_swing_count = sum(
@@ -541,6 +704,9 @@ class TradingService:
             # from re-staging the same trade on the 3-min cycle immediately
             # after an SL/target/timeout. See settings comment for rationale.
             _recent_exits: dict[str, str] = {}
+            # M0.2 fail-closed: re-entry cooldown is a safety cap. If we cannot
+            # read it we cannot enforce it — SKIP rather than silently allow
+            # re-entries into freshly-stopped names.
             try:
                 _recent_exits = self.state.get_recently_exited_symbols(
                     within_minutes=int(cfg.reentry_cooldown_minutes),
@@ -552,7 +718,12 @@ class TradingService:
                         ",".join(sorted(_recent_exits.keys())[:10]),
                     )
             except Exception:
-                logger.debug("reentry_cooldown_fetch_failed", exc_info=True)
+                logger.exception("reentry_cooldown_fetch_failed — failing closed")
+                self.log_sink.action(
+                    "TradingService", "run_scan_once", "SKIP",
+                    "reentry_cooldown_read_failed_fail_closed",
+                )
+                return {"skipped": "reentry_cooldown_read_failed"}
 
             symbol_set = {str(w.symbol).strip().upper() for w in subset if str(w.symbol).strip()}
             key_by_symbol: dict[str, str] = {}
@@ -599,31 +770,83 @@ class TradingService:
             _ist_now = now_ist()
             _vwap_guard_active = (_ist_now.hour * 60 + _ist_now.minute) >= (9 * 60 + 30)
 
+            # ── Parallel candle prefetch (perf fix, 2026-05) ──────────────
+            # Hoist both candle fetches out of the per-symbol loop and
+            # parallelise across the watchlist subset. Upstox v3 historical-
+            # candle limit is 50 req/s; 10 concurrent workers stays safe.
+            #
+            # `primary_candles_map`: 15m for intraday rows, 1d for swing rows.
+            # `intraday_daily_map`: daily candles for intraday rows only,
+            #   for the multi-timeframe daily_bias overlay (swing rows
+            #   already have daily candles in primary).
+            _intraday_subset = [w for w in subset if getattr(w, "wl_type", "intraday") != "swing"]
+            _swing_subset = [w for w in subset if getattr(w, "wl_type", "intraday") == "swing"]
+            _prefetch_started = time.perf_counter()
+            primary_candles_map: dict[str, list[list[Any]]] = {}
+            primary_candles_map.update(self._prefetch_candles_parallel(
+                _intraday_subset, key_by_symbol, timeframe="15m", lookback_days=8,
+            ))
+            primary_candles_map.update(self._prefetch_candles_parallel(
+                _swing_subset, key_by_symbol, timeframe="1d", lookback_days=120,
+            ))
+            intraday_daily_map = self._prefetch_candles_parallel(
+                _intraday_subset, key_by_symbol, timeframe="1d", lookback_days=120,
+            )
+            logger.info(
+                "candle_prefetch_done intraday=%d swing=%d daily_bias=%d elapsed=%.2fs",
+                len(_intraday_subset), len(_swing_subset), len(intraday_daily_map),
+                time.perf_counter() - _prefetch_started,
+            )
+
             for w in subset:
                 _is_swing = getattr(w, "wl_type", "intraday") == "swing"
-                instrument_key = key_by_symbol.get(str(w.symbol).strip().upper(), "")
-                candles = self._fetch_candles(
-                    w.symbol,
-                    w.exchange,
-                    w.segment,
-                    instrument_key=instrument_key,
-                    timeframe="1d" if _is_swing else "15m",
-                    lookback_days=120 if _is_swing else 8,
-                )
+                _sym_upper = str(w.symbol).strip().upper()
+                # Veto incompatible (wl_type, strategy) combos at the code level.
+                # The watchlist comes from Firestore where humans (or upstream
+                # jobs) can mis-tag a stock — e.g. wl_type=swing + strategy=MOMENTUM
+                # produces an 11-day hold (MOTHERSON bug, 2026-04-22 → 2026-05-04)
+                # because MAX_HOLD for swing is 11 days but MOMENTUM is an intraday
+                # pattern with no daily-trend basis to hold for. Any swing trade
+                # must use a daily-trend strategy. Any intraday-only strategy
+                # forced into swing routing is silently retagged to intraday.
+                #
+                # 2026-05-07: removed MEAN_REVERSION from this set. Daily-frame
+                # mean-reversion (RSI<35 + close near 20-day-low + vol_sanity)
+                # is a legitimate swing edge — buying oversold stocks at support
+                # and holding 3-5 days for the bounce is one of the highest-WR
+                # setups in Indian markets historically. The watchlist generator
+                # has been computing a swing-appropriate mean_rev score on daily
+                # candles all along (universe_service.py:4729-4759); silently
+                # retagging it to intraday wasted the scoring effort and was
+                # one of the reasons swing fired 0 trades over 14 days.
+                # OPEN_DRIVE / VWAP_* stay intraday-only — they encode the
+                # opening-auction / VWAP-cross intraday clock structure and
+                # cannot be evaluated on daily candles.
+                _strategy_upper = str(w.strategy or "").strip().upper()
+                _intraday_only_strategies = {
+                    "MOMENTUM", "OPEN_DRIVE", "VWAP_REVERSAL", "VWAP_TREND",
+                }
+                if _is_swing and _strategy_upper in _intraday_only_strategies:
+                    logger.warning(
+                        "watchlist_invalid_swing_strategy symbol=%s strategy=%s "
+                        "— swing channel only supports daily-trend strategies; "
+                        "treating as intraday for this scan tick.",
+                        w.symbol, _strategy_upper,
+                    )
+                    _is_swing = False
+                instrument_key = key_by_symbol.get(_sym_upper, "")
+                candles = primary_candles_map.get(_sym_upper, [])
                 # ── Daily bias (multi-timeframe confirmation) ──────────────
                 # For swing: candles are already daily → compute bias directly.
-                # For intraday: fetch daily candles separately for alignment overlay.
+                # For intraday: use the prefetched daily candle map.
                 _daily_bias = None
                 try:
                     if _is_swing:
                         _daily_bias = compute_daily_bias(candles)
-                    elif instrument_key:
-                        _daily_candles = self._fetch_candles(
-                            w.symbol, w.exchange, w.segment,
-                            instrument_key=instrument_key,
-                            timeframe="1d", lookback_days=120,
-                        )
-                        _daily_bias = compute_daily_bias(_daily_candles)
+                    else:
+                        _daily_candles = intraday_daily_map.get(_sym_upper, [])
+                        if _daily_candles:
+                            _daily_bias = compute_daily_bias(_daily_candles)
                 except Exception:
                     logger.debug("daily_bias_compute_failed symbol=%s", w.symbol)
 
@@ -776,6 +999,33 @@ class TradingService:
                 else:
                     pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult, rr_override=_rr_override)
 
+                # M4 — PortfolioBook gate: channel-budget + DD halts are
+                # hard-block, daily-throttle halves size. Evaluated AFTER
+                # position sizing so we know the exact risk_amount the
+                # trade would commit. Gated behind USE_PORTFOLIO_BOOK_V1.
+                if _portfolio_book is not None and direction != "HOLD":
+                    _channel = "swing" if _is_swing else "intraday"
+                    _risk_amt = abs(float(pos.max_loss or 0.0))
+                    _book_decision = portfolio_check_can_open(
+                        _portfolio_book, channel=_channel, risk_amount=_risk_amt,
+                    )
+                    if not _book_decision.allowed:
+                        policy_block_reason = _book_decision.reason
+                    elif _book_decision.size_multiplier < 1.0:
+                        # Soft throttle — halve qty. Minimum 1 share so
+                        # we don't round to zero on small accounts.
+                        _throttled_qty = max(1, int(pos.qty * _book_decision.size_multiplier))
+                        if _throttled_qty < pos.qty:
+                            pos.qty = _throttled_qty
+                            pos.max_loss = round(abs(pos.entry_price - pos.sl_price) * _throttled_qty, 2)
+                            pos.max_gain = round(abs(pos.target - pos.entry_price) * _throttled_qty, 2)
+                            self.log_sink.action(
+                                "TradingService", "run_scan_once", "THROTTLE",
+                                "portfolio_daily_dd_throttle",
+                                {"symbol": w.symbol, "new_qty": _throttled_qty,
+                                 "daily_dd_pct": round(_portfolio_book.dd.daily_dd_pct, 4)},
+                            )
+
                 # ── Dynamic min_signal_score (Item 3) ────────────────────────
                 # adjust_signal() already penalises adjusted_score by 0.60–0.82×
                 # in DEFENSIVE/LOCKDOWN + an extra 0.88× in PANIC/CHOP regime.
@@ -829,6 +1079,24 @@ class TradingService:
                     _regime_min = _REGIME_MIN_SCORE.get(_brain_regime)
                     if _regime_min is not None and _regime_min < dynamic_min_score:
                         dynamic_min_score = _regime_min
+                    # 2026-05-06: Adaptive discount for "stressed range" regimes.
+                    # Live observation 2026-04-30 → 2026-05-06: 4 consecutive
+                    # trading days with 0 qualified entries (1500-1700 scans/day,
+                    # ~65% blocked on score_below_min). Brain state was identical:
+                    # regime=RANGE, breadth=91 (very narrow), trend=18 (weak).
+                    # In this state — bullish breadth amplifying SELL haircuts
+                    # AND weak trend amplifying BUY haircuts — every layer of
+                    # the score cancels out, parking signals in the 62-68 band.
+                    # Drop the bar by 5 so the top-decile of intra-band signals
+                    # can still fire as discovery trades. Brain-haircut still
+                    # applies, so wave-of-low-quality trades remains capped.
+                    if (
+                        brain_state is not None
+                        and _brain_regime in ("RANGE", "CHOP")
+                        and getattr(brain_state, "breadth_score", 0) > 85
+                        and getattr(brain_state, "trend_score", 50) < 30
+                    ):
+                        dynamic_min_score = max(60, dynamic_min_score - 5)
 
                 setup_conf = max(0.45, min(1.30, (adjusted_score / 100.0) + 0.20))
                 liq_mult = 1.0 if ind.volume.ratio >= 1.0 else 0.85
@@ -982,6 +1250,31 @@ class TradingService:
                         _strategy_ok, _strategy_fail = check_strategy_entry(w.strategy, direction, ind, regime=_brain_regime)
                     if not _strategy_ok:
                         policy_block_reason = _strategy_fail
+                    # M2 — Playbook hard-block (regime × edge × risk_mode).
+                    # Gated behind USE_PLAYBOOK_V1; when OFF we preserve the
+                    # old pass-through behaviour (see DESIGN.md §9 rollout).
+                    elif self.settings.runtime.use_playbook_v1:
+                        _risk_mode = brain_state.risk_mode if brain_state else "NORMAL"
+                        _pb_ok, _pb_reason = check_playbook(
+                            setup=w.strategy,
+                            direction=direction,
+                            regime=_brain_regime,
+                            risk_mode=_risk_mode,
+                        )
+                        if not _pb_ok:
+                            policy_block_reason = _pb_reason
+                    # M3 — Expected_edge_R gate. Blocks when prior.n ≥
+                    # min_sample_size AND expected_edge_R ≤ 0. Below the
+                    # sample floor it's a no-op. Independent of the playbook
+                    # flag — can be flipped on separately during rollout.
+                    elif self.settings.runtime.use_expected_edge_r_v1:
+                        _ee = evaluate_expected_edge(
+                            regime=_brain_regime,
+                            setup=w.strategy,
+                            direction=direction,
+                        )
+                        if not _ee.allowed:
+                            policy_block_reason = _ee.reason
                     # Portfolio sector concentration: don't pile into the same sector
                     elif w.sector and w.sector.upper() != "UNKNOWN":
                         _sym_sector = w.sector.upper()

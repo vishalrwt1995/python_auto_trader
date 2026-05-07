@@ -58,10 +58,37 @@ export default function PositionsPage() {
     }
   }, []);
 
+  const [channelFilter, setChannelFilter] = useState<"all" | "intraday" | "swing">("all");
+
   const openPositions = useMemo(
     () => positions.filter((p) => p.status === "OPEN" || p.status === "PENDING_AMO_EXIT"),
     [positions],
   );
+
+  // Per-channel counts for the tab badges + filtered view.
+  const intradayPositions = useMemo(
+    () => openPositions.filter((p) => (p.wl_type ?? "intraday") !== "swing"),
+    [openPositions],
+  );
+  const swingPositions = useMemo(
+    () => openPositions.filter((p) => p.wl_type === "swing"),
+    [openPositions],
+  );
+  const filteredPositions = useMemo(() => {
+    if (channelFilter === "intraday") return intradayPositions;
+    if (channelFilter === "swing") return swingPositions;
+    return openPositions;
+  }, [channelFilter, openPositions, intradayPositions, swingPositions]);
+
+  // Compute days held for a swing position. Returns null for intraday or
+  // when entry_ts is missing/unparseable.
+  const computeDaysHeld = useCallback((entry_ts: string | undefined): number | null => {
+    if (!entry_ts) return null;
+    const t = Date.parse(entry_ts);
+    if (Number.isNaN(t)) return null;
+    const ms = Date.now() - t;
+    return Math.max(0, Math.floor(ms / (1000 * 60 * 60 * 24)));
+  }, []);
 
   const posColumns: Column<Position>[] = useMemo(
     () => [
@@ -255,6 +282,31 @@ export default function PositionsPage() {
           </span>
         ),
       },
+      {
+        key: "daysHeld",
+        label: "Days",
+        className: "text-right font-mono text-xs",
+        sortable: true,
+        sortValue: (r) => computeDaysHeld(r.entry_ts) ?? -1,
+        render: (r) => {
+          // Days-held is only meaningful for swing positions; intraday
+          // closes same day so the value would always be 0 and adds noise.
+          if (r.wl_type !== "swing") return <span className="text-text-secondary/40">—</span>;
+          const days = computeDaysHeld(r.entry_ts);
+          if (days == null) return <span className="text-text-secondary/40">—</span>;
+          // Highlight long-hold swings (≥7 days) so user notices stale positions.
+          return (
+            <span
+              className={cn(
+                days >= 7 ? "text-neutral font-semibold" : "text-text-secondary",
+              )}
+              title={r.entry_ts}
+            >
+              {days}d
+            </span>
+          );
+        },
+      },
       ...(isAdmin()
         ? [
             {
@@ -277,7 +329,7 @@ export default function PositionsPage() {
           ]
         : []),
     ],
-    [ltpCache, isAdmin, exitingTag],
+    [ltpCache, isAdmin, exitingTag, computeDaysHeld],
   );
 
   const pendingColumns: Column<PendingOrder>[] = useMemo(
@@ -341,6 +393,12 @@ export default function PositionsPage() {
           >
             {openPositions.length}
           </span>
+          {/* Per-channel breakdown indicator (visible when both channels have positions) */}
+          {openPositions.length > 0 && intradayPositions.length > 0 && swingPositions.length > 0 && (
+            <span className="text-[10px] text-text-secondary/60 font-mono">
+              {intradayPositions.length} intraday · {swingPositions.length} swing
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {isAdmin() ? (
@@ -381,18 +439,63 @@ export default function PositionsPage() {
 
       {/* Active Positions */}
       <section>
-        <h2 className="text-sm font-medium text-text-secondary mb-2">
-          Active Positions
-        </h2>
-        {openPositions.length === 0 ? (
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-medium text-text-secondary">
+            Active Positions
+          </h2>
+          {/* Channel filter tabs — only show when there's something to filter */}
+          {openPositions.length > 0 && (
+            <div className="flex items-center gap-1 text-xs">
+              {(["all", "intraday", "swing"] as const).map((tab) => {
+                const count =
+                  tab === "all"
+                    ? openPositions.length
+                    : tab === "intraday"
+                      ? intradayPositions.length
+                      : swingPositions.length;
+                const active = channelFilter === tab;
+                return (
+                  <button
+                    key={tab}
+                    onClick={() => setChannelFilter(tab)}
+                    className={cn(
+                      "px-3 py-1 rounded-full font-medium transition-colors capitalize",
+                      active
+                        ? tab === "swing"
+                          ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
+                          : tab === "intraday"
+                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                            : "bg-bg-tertiary text-text-primary border border-bg-tertiary"
+                        : "text-text-secondary hover:text-text-primary border border-transparent",
+                    )}
+                  >
+                    {tab}
+                    <span className="ml-1.5 text-[10px] opacity-70">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {filteredPositions.length === 0 ? (
           <EmptyState
-            title="No open positions"
-            description="Positions will appear here when the scanner places trades"
+            title={
+              channelFilter === "all"
+                ? "No open positions"
+                : `No open ${channelFilter} positions`
+            }
+            description={
+              channelFilter === "swing"
+                ? "Swing positions hold overnight (CNC product). They appear here when the daily scanner fires a swing entry."
+                : channelFilter === "intraday"
+                  ? "Intraday positions auto-close at EOD (MIS product). They appear here when the 5m scanner fires an entry."
+                  : "Positions will appear here when the scanner places trades"
+            }
           />
         ) : (
           <DataTable
             columns={posColumns}
-            data={openPositions}
+            data={filteredPositions}
             emptyMessage="No open positions"
           />
         )}

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# Backtest output (per-run, large CSVs)
+backtests/
+
+# Runtime artefacts: smoke reports, profile dumps, calibration metrics.
+# These are reproducible from the scripts in scripts/redesign/ and the
+# config in src/autotrader/backtest/calibrated/, so don't pollute git.
+out/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Secrets (never commit)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+service-account*.json

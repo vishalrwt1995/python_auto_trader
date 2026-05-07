@@ -107,6 +107,37 @@ TABLES: dict[str, list[dict]] = {
         {"name": "selected", "type": "INTEGER", "mode": "NULLABLE"},
         {"name": "symbols", "type": "STRING", "mode": "REPEATED"},
     ],
+    # PCR / option-chain snapshots archived per poll. The live system reads
+    # the latest snapshot from Firestore for `score_signal` Layer-7; we
+    # additionally persist every snapshot to BQ so backtests can read back
+    # the exact PCR live saw at each scan tick (closes the ~5%-of-100pt
+    # scoring approximation gap noted in `replay_pure.py:46-50`).
+    "option_metrics_history": [
+        {"name": "asof_ts", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        {"name": "run_date", "type": "DATE", "mode": "NULLABLE"},
+        # display key for human queries (e.g. "NIFTY", "BANKNIFTY")
+        {"name": "underlying", "type": "STRING", "mode": "NULLABLE"},
+        # Upstox instrument_key (e.g. "NSE_INDEX|Nifty 50")
+        {"name": "instrument_key", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "expiry", "type": "DATE", "mode": "NULLABLE"},
+        # Spot price at snapshot time (for ATM resolution).
+        {"name": "spot", "type": "FLOAT", "mode": "NULLABLE"},
+        # Whole-chain put/call OI sums.
+        {"name": "pe_oi_total", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "ce_oi_total", "type": "FLOAT", "mode": "NULLABLE"},
+        # Headline PCR (PE_OI / CE_OI).
+        {"name": "put_call_ratio", "type": "FLOAT", "mode": "NULLABLE"},
+        # Reactive PCR based on intraday OI additions.
+        {"name": "oi_change_pcr", "type": "FLOAT", "mode": "NULLABLE"},
+        # Max-pain strike (option-writer-loss minimum).
+        {"name": "max_pain_strike", "type": "FLOAT", "mode": "NULLABLE"},
+        # IV skew (OTM put IV − OTM call IV in a ±7% window). Positive
+        # skew = market paying up for downside protection.
+        {"name": "iv_skew", "type": "FLOAT", "mode": "NULLABLE"},
+        # How many rows contributed — distinguish "empty chain" from
+        # "genuinely neutral metrics".
+        {"name": "n_rows", "type": "INTEGER", "mode": "NULLABLE"},
+    ],
 }
 
 # Tables partitioned by a date column
@@ -118,6 +149,7 @@ PARTITION_BY: dict[str, str] = {
     "candles_5m": "trade_date",
     "audit_log": "run_date",
     "watchlist_history": "run_date",
+    "option_metrics_history": "run_date",
 }
 
 # Tables with clustering columns
@@ -126,6 +158,7 @@ CLUSTER_BY: dict[str, list[str]] = {
     "candles_5m": ["symbol"],
     "trades": ["symbol"],
     "signals": ["symbol"],
+    "option_metrics_history": ["underlying"],
 }
 
 

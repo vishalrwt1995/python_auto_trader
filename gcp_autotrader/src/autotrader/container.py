@@ -13,7 +13,7 @@ from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.secrets_manager import SecretManagerStore
 from autotrader.adapters.upstox_client import UpstoxClient
-from autotrader.services.log_sink import LogSink
+from autotrader.services.log_sink import LogSink, set_default_bq as _log_sink_set_default_bq
 from autotrader.services.market_brain_service import MarketBrainService
 from autotrader.services.order_service import OrderService
 from autotrader.services.regime_service import MarketRegimeService
@@ -83,6 +83,12 @@ class AppContainer:
         self.gcs = GoogleCloudStorageStore(settings.gcp.bucket_name)
         self.state = FirestoreStateStore(settings.gcp.project_id, settings.gcp.firestore_database)
         self.bq = BigQueryClient(settings.gcp.project_id, settings.gcp.bq_dataset)
+        # Wire LogSink's default BQ adapter so every `LogSink()` constructed
+        # without explicit DI (jobs.py / web/api.py — 32 sites) persists its
+        # action buffer to the `audit_log` table on flush.
+        # Discovered 2026-05-07: audit_log table was empty since launch
+        # because flush_actions() never wrote anywhere.
+        _log_sink_set_default_bq(self.bq)
         self.pubsub = PubSubClient(settings.gcp.project_id)
         self.upstox = UpstoxClient(settings.upstox, self.secrets)
         self._regime_service: MarketRegimeService | None = None
@@ -93,7 +99,9 @@ class AppContainer:
         self._swing_reconciliation_service: SwingReconciliationService | None = None
 
     def log_sink(self) -> LogSink:
-        return LogSink()
+        # Pass `bq` explicitly here; `LogSink()` constructed elsewhere
+        # without DI falls back to the module-level default set above.
+        return LogSink(bq=self.bq)
 
     def regime_service(self) -> MarketRegimeService:
         if self._regime_service is None:

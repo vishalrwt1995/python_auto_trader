@@ -84,7 +84,16 @@ class StrategySettings:
     # A 3–10 day swing trade's edge is the daily trend — over-filtering at 75
     # on intraday-composite scoring kills the sample size (see 2026-04-22:
     # 35 evaluations → 1 qualified at 76/75, 1-point margin).
-    swing_min_signal_score: int = 70
+    #
+    # 2026-05-07 audit (live data 2026-04-23 → 2026-05-07, 305 swing scans):
+    # Score distribution showed only 19% of swing scans scored ≥70 (57 of 305),
+    # and just 4 actually qualified across 14 trading days — effectively zero
+    # swing trades fired. The 65-69 band held 27 scans (9% of total) — the
+    # natural sweet spot for the swing-on-intraday-formula gap. Lowered to 65
+    # to unlock real swing trade volume; subsequent gates (volume, RSI zone,
+    # daily-bias, sl_too_wide) still filter low-quality candidates. Track
+    # qualified rate post-deploy: target 1-3 swing trades/day.
+    swing_min_signal_score: int = 65
     # Batch 2.1 (2026-04-22): re-entry cooldown. When a position closes
     # (SL hit, target hit, or timeout), the scanner should NOT immediately
     # re-stage the same symbol on the next 3-min cycle. The watchlist will
@@ -128,6 +137,12 @@ class UpstoxSettings:
     access_token_expiry_secret_name: str
     redirect_uri: str = ""
     auth_code_secret_name: str = ""
+    # Long-lived Upstox Analytics token (1-year, read-only scope: historical
+    # candles, LTP, option chain, market holidays). When set, all read-side
+    # API calls route through this token and survive daily 03:30 IST rotation
+    # of `access_token_secret_name`. Order placement / portfolio / funds
+    # endpoints always use the daily access token regardless.
+    analytics_token_secret_name: str = ""
     notifier_shared_secret: str = ""
     instruments_complete_url: str = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
     requests_per_second: int = 50
@@ -159,6 +174,29 @@ class RuntimeSettings:
     job_trigger_token: str
     log_level: str
     timezone_name: str = "Asia/Kolkata"
+    # ── Redesign feature flags (default OFF — flip to opt in) ──
+    # M1: 5-state exit FSM (INITIAL/CONFIRMED/RUNNER/LOSING/TERMINAL).
+    # When False, the legacy exit precedence in ws_monitor runs.
+    use_exit_fsm_v1: bool = False
+    # M2: Playbook hard-block layer + Edge registry. When False, the legacy
+    # scorer decides entries directly.
+    use_playbook_v1: bool = False
+    # M3: expected_edge_R scoring (backtest-derived R priors). When False,
+    # the legacy signal_score drives entry ranking.
+    use_expected_edge_r_v1: bool = False
+    # M4: PortfolioBook channel budgets + DD governors. When False, the
+    # legacy max_positions / risk_per_trade gates apply.
+    use_portfolio_book_v1: bool = False
+    # M5: Upstox P0 expansion (option analytics poll, news signal ingest,
+    # portfolio-stream WS). Independently flagged so each primitive can
+    # roll out separately during the canary.
+    use_option_analytics_v1: bool = False
+    use_news_signals_v1: bool = False
+    use_portfolio_stream_v1: bool = False
+    # M6: Per-trade AttributionLog row + daily-metrics rollup. When False,
+    # the close-position path only writes the legacy `trades` row; the
+    # `attribution` table stays empty and the weekly review script no-ops.
+    use_attribution_log_v1: bool = False
 
 
 @dataclass(frozen=True)
@@ -276,7 +314,7 @@ class AppSettings:
             # directly saw the P1 value. The P1 swing-threshold calibration only
             # takes effect because no SWING_MIN_SIGNAL_SCORE env var is set in
             # Cloud Run today, so from_env's default must be authoritative.
-            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 70),
+            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 65),
             reentry_cooldown_minutes=_env_int("REENTRY_COOLDOWN_MINUTES", 30),
             paper_entry_slippage_pct=_env_float("PAPER_ENTRY_SLIPPAGE_PCT", 0.0010),
             paper_sl_slippage_pct=_env_float("PAPER_SL_SLIPPAGE_PCT", 0.0020),
@@ -302,6 +340,7 @@ class AppSettings:
                 access_token_expiry_secret_name=_env("UPSTOX_ACCESS_TOKEN_EXPIRY_SECRET_NAME"),
                 redirect_uri=_env("UPSTOX_REDIRECT_URI", ""),
                 auth_code_secret_name=_env("UPSTOX_AUTH_CODE_SECRET_NAME", ""),
+                analytics_token_secret_name=_env("UPSTOX_ANALYTICS_TOKEN_SECRET_NAME", ""),
                 notifier_shared_secret=_env("UPSTOX_NOTIFIER_SHARED_SECRET", ""),
                 instruments_complete_url=_env(
                     "UPSTOX_INSTRUMENTS_COMPLETE_URL",
@@ -321,6 +360,20 @@ class AppSettings:
                 job_trigger_token=_env("JOB_TRIGGER_TOKEN"),
                 log_level=_env("LOG_LEVEL", "INFO"),
                 timezone_name=_env("TZ", "Asia/Kolkata"),
+                use_exit_fsm_v1=_env_bool("USE_EXIT_FSM_V1", False),
+                use_playbook_v1=_env_bool("USE_PLAYBOOK_V1", False),
+                use_expected_edge_r_v1=_env_bool("USE_EXPECTED_EDGE_R_V1", False),
+                use_portfolio_book_v1=_env_bool("USE_PORTFOLIO_BOOK_V1", False),
+                use_option_analytics_v1=_env_bool("USE_OPTION_ANALYTICS_V1", False),
+                use_news_signals_v1=_env_bool("USE_NEWS_SIGNALS_V1", False),
+                use_portfolio_stream_v1=_env_bool("USE_PORTFOLIO_STREAM_V1", False),
+                # 2026-05-06: Default flipped to True. The attribution table
+                # is the only place MAE/MFE per trade is captured. With it OFF,
+                # every diagnostic question ("did this trade ever go +0.5R
+                # before reverting?", "what's the median pull-back-to-entry
+                # ratio for losers?") is unanswerable. Flag stays togglable
+                # via env so canary runbook can still validate it cleanly.
+                use_attribution_log_v1=_env_bool("USE_ATTRIBUTION_LOG_V1", True),
             ),
             strategy=strategy,
             regime_thresholds=RegimeThresholds(

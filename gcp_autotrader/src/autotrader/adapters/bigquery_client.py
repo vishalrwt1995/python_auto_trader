@@ -103,6 +103,23 @@ class BigQueryClient:
         """Batch-insert audit-log entries."""
         self._insert("audit_log", entries)
 
+    def insert_attribution(self, row: dict[str, Any]) -> None:
+        """Record a per-trade AttributionLog row (M6).
+
+        Separate from `trades` so the weekly review can join Thesis
+        (expected_r / edge_name / hold_delta) without touching the
+        minimal trades row used by legacy dashboards.
+        """
+        self._insert("attribution", [row])
+
+    def insert_attribution_batch(self, rows: list[dict[str, Any]]) -> None:
+        """Batch-insert attribution rows (used by daily rollup backfills)."""
+        self._insert("attribution", rows)
+
+    def insert_daily_metrics(self, row: dict[str, Any]) -> None:
+        """Record a DailyMetrics rollup row (M6)."""
+        self._insert("daily_metrics", [row])
+
     def insert_scan_decisions_batch(self, decisions: list[dict[str, Any]]) -> None:
         """Batch-insert per-symbol scan decisions (both qualified and rejected).
 

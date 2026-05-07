@@ -243,6 +243,112 @@ class FirestoreStateStore:
             pass
         return round(total, 2)
 
+    def get_realized_pnl_since(self, start_date_iso: str) -> float:
+        """M4 — sum realized PnL of positions closed on/after start_date_iso.
+
+        Used by the PortfolioBook to compute rolling weekly / monthly DD.
+        `start_date_iso` is an ISO date string (YYYY-MM-DD). Any CLOSED
+        position whose `exit_ts` lexicographically >= `start_date_iso`
+        contributes. Matches the cheap date-prefix comparison used by
+        `get_today_realized_pnl`.
+
+        Best-effort: a Firestore outage returns 0.0 rather than raising,
+        consistent with the existing rolling-pnl helpers. Callers that
+        need fail-closed semantics should wrap this themselves.
+        """
+        total = 0.0
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                exit_ts = str(row.get("exit_ts", "") or "")
+                if not exit_ts:
+                    continue
+                if exit_ts[:10] >= start_date_iso:
+                    total += float(row.get("pnl", 0) or 0)
+        except Exception:
+            pass
+        return round(total, 2)
+
+    def get_open_risk_by_channel(self) -> dict[str, float]:
+        """M4 — aggregate open R-at-risk per channel (intraday/swing/positional/hedge).
+
+        "Open risk" per position = max_loss (qty × sl_distance). Each
+        position doc carries a `channel` field (defaults to 'intraday'
+        for legacy rows that don't have it yet). Returns a dict keyed
+        by channel name; missing channels map to 0.0.
+        """
+        out: dict[str, float] = {}
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "OPEN":
+                    continue
+                ch = str(row.get("channel", "") or "").strip().lower()
+                if not ch:
+                    # Back-compat: swing positions have is_swing=True, rest
+                    # are intraday. Positional + hedge channels are new.
+                    ch = "swing" if bool(row.get("is_swing", False)) else "intraday"
+                risk = abs(float(row.get("max_loss", 0) or 0))
+                out[ch] = out.get(ch, 0.0) + risk
+        except Exception:
+            return {}
+        return {k: round(v, 2) for k, v in out.items()}
+
+    # ------------------------------------------------------------------ #
+    # Kill-switch (M0) — fail-closed. Any read error is treated as ACTIVE
+    # so a Firestore outage halts trading rather than letting it run blind.
+    # ------------------------------------------------------------------ #
+
+    def get_kill_switch(self) -> tuple[bool, str]:
+        """Return (active, reason). Fail-closed: read errors => (True, 'fail_closed').
+
+        Doc shape: control/kill_switch = {active: bool, reason: str, set_by: str, set_at: ts}.
+        """
+        try:
+            doc = self.get_json("control", "kill_switch") or {}
+            active = bool(doc.get("active", False))
+            reason = str(doc.get("reason", "") or "")
+            return active, reason
+        except Exception as exc:
+            return True, f"fail_closed:{exc.__class__.__name__}"
+
+    def set_kill_switch(self, active: bool, reason: str = "", set_by: str = "system") -> None:
+        self.set_json(
+            "control",
+            "kill_switch",
+            {"active": bool(active), "reason": reason, "set_by": set_by},
+        )
+
+    # ------------------------------------------------------------------ #
+    # Paper GTTs (M0.5) — Firestore-backed stop orders for paper mode.
+    # Polled by ws_monitor + a 60s cron so paper has real SL protection
+    # matching live-mode GTT behaviour.
+    # ------------------------------------------------------------------ #
+
+    def save_paper_gtt(self, position_tag: str, payload: dict[str, Any]) -> None:
+        data = dict(payload)
+        data["position_tag"] = position_tag
+        data["status"] = data.get("status", "ACTIVE")
+        self.set_json("paper_gtts", position_tag, data)
+
+    def delete_paper_gtt(self, position_tag: str) -> None:
+        self.delete("paper_gtts", position_tag)
+
+    def get_paper_gtt(self, position_tag: str) -> dict[str, Any] | None:
+        return self.get_json("paper_gtts", position_tag)
+
+    def list_paper_gtts(self, status: str = "ACTIVE", limit: int = 500) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for d in self._db().collection("paper_gtts").limit(limit).stream():
+            row = d.to_dict() or {}
+            if status and str(row.get("status", "")).upper() != status.upper():
+                continue
+            row["_id"] = d.id
+            rows.append(row)
+        return rows
+
     # ------------------------------------------------------------------ #
     # Orders log
     # ------------------------------------------------------------------ #

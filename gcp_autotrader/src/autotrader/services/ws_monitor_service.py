@@ -47,6 +47,12 @@ def _ist_minutes_now() -> int:
     return ((ist_sec % 86400) // 3600) * 60 + ((ist_sec % 3600) // 60)
 
 
+def _now_ist_str() -> str:
+    """Cheap local IST ISO timestamp — avoids importing time_utils inside a hot tick path."""
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=5, minutes=30))).isoformat()
+
+
 class WsMonitorService:
     """Real-time position monitor via Upstox WebSocket."""
 
@@ -86,9 +92,48 @@ class WsMonitorService:
         # the trailing high-watermark to entry_price, regressing the trailing-stop
         # reference point and silently losing every gain accrued before the crash.
         self._best_last_persist: dict[str, float] = {}
+        # M0.6 MFE/MAE persistence throttle — similar cadence to best_price.
+        # In-memory tracking is always-on per tick; we persist every 60s so
+        # the position doc reflects the high-water / low-water marks without
+        # hammering Firestore.
+        self._mfe_last_persist: dict[str, float] = {}
+        self._mae_last_persist: dict[str, float] = {}
+        # M0.3 ws_last_tick persistence throttle — we write the last LTP per
+        # instrument to ws_last_tick/{instrument_key} so order_service.py can
+        # fall back to it when the broker quote endpoint is unreachable at
+        # exit time. Throttled to once per 10s per instrument (cheap enough
+        # that a Firestore hiccup doesn't back up the tick queue).
+        self._ws_tick_last_persist: dict[str, float] = {}
         # Current brain regime — refreshed alongside positions. Used to tighten
         # stops when the market turns while we hold a trend position.
         self._current_regime: str = ""
+        # M1 exit FSM flag + config. We read the runtime flag once at startup
+        # so a mid-day flip is a deliberate service restart (matches the
+        # "flag-gated rollout" rule in BUILD.md — no silent behaviour change).
+        try:
+            from autotrader.container import get_container
+            _settings = get_container().settings
+            self._use_exit_fsm_v1 = bool(getattr(_settings.runtime, "use_exit_fsm_v1", False))
+        except Exception:
+            self._use_exit_fsm_v1 = False
+        from autotrader.domain.exit_fsm import FsmConfig
+        self._fsm_cfg = FsmConfig()
+        # M5: Portfolio-stream flag — when ON, the monitor will subscribe to
+        # Upstox portfolio-update WS topic so fills/cancels from other
+        # sessions (or the broker's own OCO cancelations on GTT fires) are
+        # reflected in Firestore without waiting for the next scan cycle.
+        # Left as a stub-hook here: the actual subscribe call is added
+        # once the Upstox WS client exposes a portfolio_topic method.
+        try:
+            from autotrader.container import get_container
+            _s = get_container().settings
+            self._use_portfolio_stream_v1 = bool(getattr(_s.runtime, "use_portfolio_stream_v1", False))
+        except Exception:
+            self._use_portfolio_stream_v1 = False
+        logger.info(
+            "ws_monitor_init use_exit_fsm_v1=%s use_portfolio_stream_v1=%s",
+            self._use_exit_fsm_v1, self._use_portfolio_stream_v1,
+        )
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -104,13 +149,17 @@ class WsMonitorService:
         monitor_task = asyncio.create_task(self.ws.run_forever())
         refresh_task = asyncio.create_task(self._refresh_loop())
         eod_task = asyncio.create_task(self._eod_watchdog())
+        # M0.5 paper GTT reconciler — 60s fallback so paper stops still fire
+        # if the ws tick stream stalls.
+        paper_gtt_task = asyncio.create_task(self._paper_gtt_reconciler())
         await self._stop_event.wait()
         logger.info("ws_monitor stopping")
         self.ws.stop()
         monitor_task.cancel()
         refresh_task.cancel()
         eod_task.cancel()
-        for t in (monitor_task, refresh_task, eod_task):
+        paper_gtt_task.cancel()
+        for t in (monitor_task, refresh_task, eod_task, paper_gtt_task):
             try:
                 await t
             except (asyncio.CancelledError, Exception):
@@ -220,6 +269,17 @@ class WsMonitorService:
                     "sl_dist": _sl_dist,
                     "partial_exit_1_done": pos.get("partial_exit_1_done", old.get("partial_exit_1_done", False)),
                     "partial_exit_2_done": pos.get("partial_exit_2_done", old.get("partial_exit_2_done", False)),
+                    # M0.6 MFE/MAE tracking — carry forward in-memory, fall back to Firestore.
+                    "mfe_price": float(_carry("max_favorable_excursion_price", entry_price) or entry_price),
+                    "mae_price": float(_carry("max_adverse_excursion_price", entry_price) or entry_price),
+                    # M1 FSM state — Firestore-backed so a restart resumes in
+                    # the correct state (otherwise the FSM would re-enter
+                    # INITIAL and move the stop back to the original level).
+                    "_fsm_state": _carry("exit_fsm_state", "INITIAL") or "INITIAL",
+                    "_fsm_peak_mfe_r": float(_carry("max_favorable_excursion_r", 0.0) or 0.0),
+                    "_fsm_confirm_started_epoch": float(
+                        _carry("_fsm_confirm_started_epoch", 0.0) or 0.0
+                    ),
                 }
             self._positions = new_map
             self._last_refresh = time.time()
@@ -256,11 +316,35 @@ class WsMonitorService:
     _FLAT_TIMEOUT_SEC = 120 * 60  # 120 minutes
 
     async def _on_quote(self, instrument_key: str, ltp: float, ts: float) -> None:
+        # M0.3: ws_last_tick persistence. Even for instruments we don't have a
+        # position on, we don't write (no need — only positions are subscribed).
+        # For subscribed instruments we write every 10s so order_service.py can
+        # use it as the exit-price fallback when the quote API is down.
+        _now_epoch = time.time()
+        if _now_epoch - self._ws_tick_last_persist.get(instrument_key, 0) >= 10:
+            try:
+                self.state.set_json("ws_last_tick", instrument_key, {
+                    "ltp": round(float(ltp), 2),
+                    "ts": float(ts),
+                    "age_s": 0,
+                })
+                self._ws_tick_last_persist[instrument_key] = _now_epoch
+            except Exception:
+                logger.debug("ws_last_tick_persist_failed", exc_info=True)
+
         pos = self._positions.get(instrument_key)
         if not pos:
             return
         tag = pos["position_tag"]
         if tag in self._exiting:
+            return
+
+        # M1: if the FSM flag is on, delegate exit logic to the FSM path and
+        # return. The legacy code below is kept intact for the default-off
+        # code path so we can flip back with a single env var if the FSM
+        # misbehaves in production.
+        if self._use_exit_fsm_v1:
+            await self._on_quote_fsm(instrument_key, ltp, ts, pos, tag)
             return
 
         sl = pos["sl_price"]
@@ -271,6 +355,57 @@ class WsMonitorService:
         best = pos.get("best_price", entry_price)
         sl_dist = pos.get("sl_dist", 0.0)
         original_qty = pos.get("original_qty", 0)
+
+        # ── M0.6 MFE/MAE ────────────────────────────────────────────────
+        # Track the most-favorable and most-adverse prices seen since entry.
+        # Favorable for a BUY is price > entry; adverse for a BUY is price <
+        # entry. Inverse for SELL. Stored both as raw prices and converted
+        # to R-multiples on persist (sl_dist is the per-trade R). Used by
+        # M6 AttributionLog and the backtest harness to score edge quality.
+        _mfe_price = pos.get("mfe_price", entry_price)
+        _mae_price = pos.get("mae_price", entry_price)
+        _mfe_changed = False
+        _mae_changed = False
+        if side == "BUY":
+            if ltp > _mfe_price:
+                pos["mfe_price"] = ltp
+                _mfe_price = ltp
+                _mfe_changed = True
+            if ltp < _mae_price:
+                pos["mae_price"] = ltp
+                _mae_price = ltp
+                _mae_changed = True
+        else:  # SELL
+            if ltp < _mfe_price:
+                pos["mfe_price"] = ltp
+                _mfe_price = ltp
+                _mfe_changed = True
+            if ltp > _mae_price:
+                pos["mae_price"] = ltp
+                _mae_price = ltp
+                _mae_changed = True
+        # Throttled persistence (60s) — no need to write every tick.
+        if sl_dist > 0 and (_mfe_changed or _mae_changed):
+            _mfe_r = round((_mfe_price - entry_price) * (1 if side == "BUY" else -1) / sl_dist, 3)
+            _mae_r = round((_mae_price - entry_price) * (1 if side == "BUY" else -1) / sl_dist, 3)
+            if _mfe_changed and _now_epoch - self._mfe_last_persist.get(tag, 0) >= 60:
+                try:
+                    self.state.update_position(tag, {
+                        "max_favorable_excursion_price": round(_mfe_price, 2),
+                        "max_favorable_excursion_r": _mfe_r,
+                    })
+                    self._mfe_last_persist[tag] = _now_epoch
+                except Exception:
+                    logger.debug("mfe_persist_failed tag=%s", tag, exc_info=True)
+            if _mae_changed and _now_epoch - self._mae_last_persist.get(tag, 0) >= 60:
+                try:
+                    self.state.update_position(tag, {
+                        "max_adverse_excursion_price": round(_mae_price, 2),
+                        "max_adverse_excursion_r": _mae_r,
+                    })
+                    self._mae_last_persist[tag] = _now_epoch
+                except Exception:
+                    logger.debug("mae_persist_failed tag=%s", tag, exc_info=True)
 
         # Emergency SL: if sl_price is 0 (missing), compute from ATR to prevent unlimited loss
         if sl == 0.0 and entry_price > 0 and atr > 0:
@@ -325,7 +460,22 @@ class WsMonitorService:
                 # Persist immediately — critical: restart must not regress to original SL
                 # Batch 3.1: persist best_price alongside so the trailing reference survives.
                 try:
-                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True, "best_price": round(best, 2)})
+                    _mfe_r_now = 0.0
+                    if sl_dist > 0:
+                        _mfe_r_now = round(
+                            (best - entry_price) * (1 if side == "BUY" else -1) / sl_dist,
+                            3,
+                        )
+                    self.state.update_position(tag, {
+                        "sl_price": sl,
+                        "sl_moved": True,
+                        "best_price": round(best, 2),
+                        # M0.6: mark when breakeven fired so backtest/attribution
+                        # can split trade outcomes by BE-fire vs pre-BE exits.
+                        "breakeven_sl_fired": True,
+                        "breakeven_sl_trigger_mfe_r": _mfe_r_now,
+                        "breakeven_sl_trigger_ts": _now_ist_str(),
+                    })
                     self._sl_last_persist[tag] = time.time()
                     self._best_last_persist[tag] = time.time()
                 except Exception as _e:
@@ -336,7 +486,22 @@ class WsMonitorService:
                 sl = pos["sl_price"]
                 logger.info("breakeven_sl tag=%s new_sl=%.2f best=%.2f swing=%s", tag, sl, best, is_swing)
                 try:
-                    self.state.update_position(tag, {"sl_price": sl, "sl_moved": True, "best_price": round(best, 2)})
+                    _mfe_r_now = 0.0
+                    if sl_dist > 0:
+                        _mfe_r_now = round(
+                            (best - entry_price) * (1 if side == "BUY" else -1) / sl_dist,
+                            3,
+                        )
+                    self.state.update_position(tag, {
+                        "sl_price": sl,
+                        "sl_moved": True,
+                        "best_price": round(best, 2),
+                        # M0.6: mark when breakeven fired so backtest/attribution
+                        # can split trade outcomes by BE-fire vs pre-BE exits.
+                        "breakeven_sl_fired": True,
+                        "breakeven_sl_trigger_mfe_r": _mfe_r_now,
+                        "breakeven_sl_trigger_ts": _now_ist_str(),
+                    })
                     self._sl_last_persist[tag] = time.time()
                     self._best_last_persist[tag] = time.time()
                 except Exception as _e:
@@ -544,6 +709,169 @@ class WsMonitorService:
             )
             asyncio.create_task(self._do_exit(tag, instrument_key, exit_reason))
 
+    # ------------------------------------------------------------------ #
+    # M1 FSM-based tick handler (flag-gated)
+    # ------------------------------------------------------------------ #
+
+    async def _on_quote_fsm(
+        self,
+        instrument_key: str,
+        ltp: float,
+        ts: float,
+        pos: dict,
+        tag: str,
+    ) -> None:
+        """Alternate tick handler driven by the 5-state exit FSM.
+
+        Gated by settings.runtime.use_exit_fsm_v1. Performs the same side
+        effects as the legacy path (Firestore persists, _do_exit on
+        terminal) but the state transitions come from a pure function so
+        they are deterministic and replay-testable.
+        """
+        from autotrader.domain.exit_fsm import ExitState, PositionView, TickEvent, transition
+
+        side = pos["side"]
+        entry_price = pos.get("entry_price", 0.0)
+        atr = pos.get("atr", 0.0)
+        sl_dist = pos.get("sl_dist", 0.0)
+        is_swing = pos.get("wl_type") == "swing"
+
+        # Map legacy dict fields into the FSM view. Carry FSM-specific state
+        # in in-memory keys prefixed "_fsm_" so the legacy path is unaffected
+        # when the flag is flipped off mid-session.
+        prev_state = ExitState(pos.get("_fsm_state", ExitState.INITIAL.value))
+        best = pos.get("best_price", entry_price) or entry_price
+        view = PositionView(
+            tag=tag,
+            side=side,
+            entry_price=entry_price,
+            atr=atr,
+            sl_dist=sl_dist,
+            is_swing=is_swing,
+            entry_epoch=pos.get("entry_epoch", ts),
+            # Static planned target — without this the FSM never fires
+            # TARGET_HIT and a peak-then-pullback can drop into LOSING with
+            # no exit (AEROFLEX 2026-04-29 regression).
+            target=float(pos.get("target", 0.0) or 0.0),
+            state=prev_state,
+            best_price=best,
+            peak_mfe_r=float(pos.get("_fsm_peak_mfe_r", 0.0)),
+            current_sl=float(pos.get("sl_price", 0.0)),
+            confirm_started_epoch=float(pos.get("_fsm_confirm_started_epoch", 0.0)),
+        )
+        tick = TickEvent(
+            ltp=ltp,
+            ts=ts,
+            regime=self._current_regime or "",
+            entry_regime=pos.get("entry_regime", ""),
+        )
+        out = transition(view, tick, self._fsm_cfg)
+
+        # Maintain debounce bookkeeping.
+        if prev_state == ExitState.INITIAL:
+            if "confirm_arming" in out.events and pos.get("_fsm_confirm_started_epoch", 0.0) == 0.0:
+                pos["_fsm_confirm_started_epoch"] = ts
+            elif "confirm_aborted" in out.events:
+                pos["_fsm_confirm_started_epoch"] = 0.0
+
+        # Update mutable FSM-tracked fields (best price + peak MFE_R).
+        if side.upper() == "BUY":
+            pos["best_price"] = max(best, ltp)
+        else:
+            pos["best_price"] = min(best, ltp)
+        pos["_fsm_peak_mfe_r"] = max(float(pos.get("_fsm_peak_mfe_r", 0.0)), out.mfe_r_now)
+
+        # ── M0.6 MFE/MAE persistence (mirror legacy path) ───────────────
+        # Without this the FSM path silently drops the MFE/MAE columns the
+        # M6 AttributionLog and backtest harness rely on.
+        _now_epoch = time.time()
+        _mfe_price = pos.get("mfe_price", entry_price) or entry_price
+        _mae_price = pos.get("mae_price", entry_price) or entry_price
+        _mfe_changed = False
+        _mae_changed = False
+        if side.upper() == "BUY":
+            if ltp > _mfe_price:
+                pos["mfe_price"] = ltp
+                _mfe_price = ltp
+                _mfe_changed = True
+            if ltp < _mae_price:
+                pos["mae_price"] = ltp
+                _mae_price = ltp
+                _mae_changed = True
+        else:  # SELL
+            if ltp < _mfe_price:
+                pos["mfe_price"] = ltp
+                _mfe_price = ltp
+                _mfe_changed = True
+            if ltp > _mae_price:
+                pos["mae_price"] = ltp
+                _mae_price = ltp
+                _mae_changed = True
+        if sl_dist > 0 and (_mfe_changed or _mae_changed):
+            _sign = 1 if side.upper() == "BUY" else -1
+            _mfe_r = round((_mfe_price - entry_price) * _sign / sl_dist, 3)
+            _mae_r = round((_mae_price - entry_price) * _sign / sl_dist, 3)
+            if _mfe_changed and _now_epoch - self._mfe_last_persist.get(tag, 0) >= 60:
+                try:
+                    self.state.update_position(tag, {
+                        "max_favorable_excursion_price": round(_mfe_price, 2),
+                        "max_favorable_excursion_r": _mfe_r,
+                    })
+                    self._mfe_last_persist[tag] = _now_epoch
+                except Exception:
+                    logger.debug("fsm_mfe_persist_failed tag=%s", tag, exc_info=True)
+            if _mae_changed and _now_epoch - self._mae_last_persist.get(tag, 0) >= 60:
+                try:
+                    self.state.update_position(tag, {
+                        "max_adverse_excursion_price": round(_mae_price, 2),
+                        "max_adverse_excursion_r": _mae_r,
+                    })
+                    self._mae_last_persist[tag] = _now_epoch
+                except Exception:
+                    logger.debug("fsm_mae_persist_failed tag=%s", tag, exc_info=True)
+
+        # Handle state change + SL writes.
+        if out.next_state != prev_state:
+            pos["_fsm_state"] = out.next_state.value
+            logger.info(
+                "fsm_transition tag=%s %s→%s mfe_r=%.3f events=%s",
+                tag, prev_state.value, out.next_state.value, out.mfe_r_now, out.events,
+            )
+            # Persist the transition immediately — we want state changes in
+            # Firestore before any subsequent tick, to survive a restart.
+            try:
+                update_fields: dict = {"exit_fsm_state": out.next_state.value}
+                if out.sl_changed and out.new_sl > 0:
+                    pos["sl_price"] = out.new_sl
+                    update_fields["sl_price"] = out.new_sl
+                    update_fields["sl_moved"] = True
+                if out.next_state == ExitState.CONFIRMED:
+                    update_fields["breakeven_sl_fired"] = True
+                    update_fields["breakeven_sl_trigger_mfe_r"] = out.mfe_r_now
+                    update_fields["breakeven_sl_trigger_ts"] = _now_ist_str()
+                self.state.update_position(tag, update_fields)
+                self._sl_last_persist[tag] = time.time()
+            except Exception:
+                logger.warning("fsm_persist_failed tag=%s", tag, exc_info=True)
+        elif out.sl_changed and out.new_sl > 0:
+            # Trailing ratchet in RUNNER state — throttled like the legacy path.
+            pos["sl_price"] = out.new_sl
+            if time.time() - self._sl_last_persist.get(tag, 0) >= 30:
+                try:
+                    self.state.update_position(tag, {"sl_price": out.new_sl})
+                    self._sl_last_persist[tag] = time.time()
+                except Exception:
+                    logger.warning("fsm_trail_persist_failed tag=%s", tag, exc_info=True)
+
+        # Terminal → schedule the exit.
+        if out.next_state == ExitState.TERMINAL and out.exit_reason:
+            self._exiting.add(tag)
+            logger.info(
+                "fsm_exit tag=%s reason=%s ltp=%.2f sl=%.2f mfe_r=%.3f",
+                tag, out.exit_reason, ltp, out.new_sl or pos.get("sl_price", 0), out.mfe_r_now,
+            )
+            asyncio.create_task(self._do_exit(tag, instrument_key, out.exit_reason))
+
     async def _do_exit(self, tag: str, instrument_key: str, exit_reason: str) -> None:
         try:
             from autotrader.services.order_service import OrderService
@@ -614,6 +942,60 @@ class WsMonitorService:
                 logger.info("eod_hard_stop reached — shutting down ws_monitor")
                 self._stop_event.set()
                 break
+
+    # ------------------------------------------------------------------ #
+    # Paper GTT reconciler (M0.5)
+    # ------------------------------------------------------------------ #
+
+    async def _paper_gtt_reconciler(self) -> None:
+        """Every 60s, poll paper_gtts and fire stops the tick stream missed.
+
+        Tick-level compare in _on_quote is the primary path. This reconciler
+        is the failover: if the ws stream stalls, a stale socket means no
+        ticks → no SL evaluation. The 60s poll fetches a fresh quote for
+        each active paper GTT and triggers the same _do_exit flow as a
+        tick-driven hit would. No-op in live mode.
+        """
+        while True:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                return
+            try:
+                # We don't need a paper-vs-live mode check: the paper_gtts
+                # collection is only populated by order_service._place_gtt_sl
+                # when paper_trade=True, so in live mode this is a no-op.
+                rows = self.state.list_paper_gtts(status="ACTIVE", limit=200)
+                if not rows:
+                    continue
+                from autotrader.container import get_container
+                quote_svc = get_container().upstox
+                for row in rows:
+                    tag = str(row.get("position_tag") or row.get("_id") or "")
+                    ikey = str(row.get("instrument_key") or "")
+                    if not tag or not ikey or tag in self._exiting:
+                        continue
+                    trigger = float(row.get("trigger_price") or 0)
+                    side = str(row.get("side") or "BUY").upper()
+                    if trigger <= 0:
+                        continue
+                    try:
+                        ltp = float(quote_svc.get_quote(ikey).ltp or 0)
+                    except Exception:
+                        logger.debug("paper_gtt_poll_quote_failed tag=%s", tag, exc_info=True)
+                        continue
+                    if ltp <= 0:
+                        continue
+                    triggered = (side == "BUY" and ltp <= trigger) or (side == "SELL" and ltp >= trigger)
+                    if triggered:
+                        logger.warning(
+                            "paper_gtt_reconciler_firing tag=%s ltp=%.2f trigger=%.2f side=%s",
+                            tag, ltp, trigger, side,
+                        )
+                        self._exiting.add(tag)
+                        asyncio.create_task(self._do_exit(tag, ikey, "SL_HIT_PAPER_GTT"))
+            except Exception:
+                logger.exception("paper_gtt_reconciler_cycle_failed")
 
     # ------------------------------------------------------------------ #
     # Disconnect handler

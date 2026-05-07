@@ -920,6 +920,14 @@ def get_history_symbols(
                 continue
             if search_q and search_q not in sym.lower():
                 continue
+            # Coerce stale_days to int — older Firestore docs occasionally
+            # hold it as a string, which breaks the sort below with
+            # "bad operand type for unary -: 'str'" and causes the whole
+            # symbols list to disappear on the Data History page.
+            try:
+                stale_days_val = int(row.get("stale_days") or 0)
+            except (TypeError, ValueError):
+                stale_days_val = 0
             result.append({
                 "symbol": sym,
                 "exchange": row.get("exchange", "NSE"),
@@ -927,7 +935,7 @@ def get_history_symbols(
                 "last_1d_date": _fmt_date(row.get("last_1d_date")),
                 "bars_1d": row.get("bars_1d"),
                 "status_1d": s1d,
-                "stale_days": row.get("stale_days"),
+                "stale_days": stale_days_val,
                 "last_5m_date": str(row.get("last_5m_date") or ""),
                 "bars_5m": row.get("bars_5m"),
                 "status_5m": s5m,
@@ -936,7 +944,7 @@ def get_history_symbols(
         _order = {"MISSING": 0, "INVALID": 1, "NO_DATA": 2, "STALE": 3, "OTHER": 4, "FRESH": 5}
         result.sort(key=lambda r: (
             _order.get(r["status_1d"], 4),
-            -(r.get("stale_days") or 0),
+            -int(r.get("stale_days") or 0),
         ))
         return {"symbols": result[:limit], "total": len(result)}
     except Exception as exc:
