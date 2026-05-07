@@ -351,6 +351,16 @@ export interface Trade {
   risk_mode: string;
   market_confidence: number;
   signal_score: number;
+  // Optional — present once the BQ trades writer is updated to persist
+  // the wl_type that was on the source Position record. Until then
+  // `inferTradeChannel()` (lib/utils.ts) classifies historic trades from
+  // hold_minutes / entry_ts vs exit_ts dates.
+  wl_type?: "swing" | "intraday" | string;
+  // Optional brokerage / net P&L (BQ has these columns but the writer
+  // populates them only for live trades, not legacy paper trades).
+  brokerage?: number;
+  net_pnl?: number;
+  net_pnl_pct?: number;
 }
 
 /* ── Audit Log ── */

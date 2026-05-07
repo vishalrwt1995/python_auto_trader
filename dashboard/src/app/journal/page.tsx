@@ -4,8 +4,10 @@ import React, { useEffect, useState, useMemo } from "react";
 import { api } from "@/lib/api";
 import { EquityCurve } from "@/components/charts/EquityCurve";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
-import { cn, formatCurrency, formatPercent } from "@/lib/utils";
+import { cn, formatCurrency, formatPercent, inferTradeChannel } from "@/lib/utils";
 import type { Trade, TradeSummary } from "@/lib/types";
+
+type ChannelFilter = "all" | "intraday" | "swing";
 import {
   BarChart,
   Bar,
@@ -26,6 +28,10 @@ function daysAgo(n: number): string {
   return `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, "0")}-${String(ist.getDate()).padStart(2, "0")}`;
 }
 
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 const REGIME_COLORS: Record<string, string> = {
   TREND_UP: "#22c55e",
   TREND_DOWN: "#ef4444",
@@ -44,6 +50,7 @@ export default function JournalPage() {
   const [strategyFilter, setStrategyFilter] = useState("");
   const [regimeFilter, setRegimeFilter] = useState("");
   const [sideFilter, setSideFilter] = useState("");
+  const [channelFilter, setChannelFilter] = useState<ChannelFilter>("all");
   const [tab, setTab] = useState<"trades" | "by-strategy" | "by-regime" | "by-day">("trades");
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -67,23 +74,51 @@ export default function JournalPage() {
       .finally(() => setLoading(false));
   }, [range, fromDate, strategyFilter]);
 
+  // Per-trade channel classification. Until the BQ trades writer persists
+  // wl_type, this is inferred from hold time / entry-vs-exit dates.
+  const tradesWithChannel = useMemo(
+    () => trades.map((t) => ({ trade: t, channel: inferTradeChannel(t) })),
+    [trades],
+  );
+
+  // Counts for the channel-filter tabs (computed on ALL trades, not the
+  // post-filter view, so the badges stay stable as you toggle).
+  const channelCounts = useMemo(() => {
+    let intraday = 0;
+    let swing = 0;
+    for (const { channel } of tradesWithChannel) {
+      if (channel === "swing") swing++;
+      else intraday++;
+    }
+    return { all: tradesWithChannel.length, intraday, swing };
+  }, [tradesWithChannel]);
+
+  // Trades after the channel-filter tab (drives BOTH the table and the
+  // breakdown tabs so user sees a coherent story across views).
+  const channelTrades = useMemo(() => {
+    if (channelFilter === "all") return trades;
+    return tradesWithChannel
+      .filter((x) => x.channel === channelFilter)
+      .map((x) => x.trade);
+  }, [channelFilter, trades, tradesWithChannel]);
+
   // Exclude EOD_CLOSE_NO_QUOTE trades from breakdown tabs and stats.
   // These have pnl=0 due to quote failure at close — not real breakevens.
   // They still appear in the main Trades table for full transparency.
   const validTrades = useMemo(
-    () => trades.filter((t) => t.exit_reason !== "EOD_CLOSE_NO_QUOTE"),
-    [trades],
+    () => channelTrades.filter((t) => t.exit_reason !== "EOD_CLOSE_NO_QUOTE"),
+    [channelTrades],
   );
 
   const strategies = useMemo(() => [...new Set(validTrades.map((t) => t.strategy).filter(Boolean))], [validTrades]);
   const regimes = useMemo(() => [...new Set(validTrades.map((t) => t.regime).filter(Boolean))], [validTrades]);
 
   const filteredTrades = useMemo(() => {
-    let t = trades; // keep all trades in main table
+    let t = channelTrades; // start from the channel-filtered set
     if (regimeFilter) t = t.filter((r) => r.regime === regimeFilter);
     if (sideFilter) t = t.filter((r) => r.side === sideFilter);
     return t;
-  }, [trades, regimeFilter, sideFilter]);
+  }, [channelTrades, regimeFilter, sideFilter]);
 
   const toggleSort = (key: string) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -121,6 +156,85 @@ export default function JournalPage() {
       winRate: v.trades > 0 ? Math.round((v.wins / v.trades) * 1000) / 10 : 0,
     }));
   }, [validTrades]);
+
+  // When a channel filter is active, the server-side `summary` (which
+  // aggregates ALL trades) becomes misleading. Compute a client-side
+  // subset summary from validTrades so the headline numbers stay honest.
+  // We only fill metrics that are trivially computable from the row set —
+  // profit_factor / max_drawdown / avg_rr stay null because they need the
+  // ordered trade stream and we don't want to half-implement them.
+  const filteredSummary = useMemo<TradeSummary | null>(() => {
+    if (channelFilter === "all") return null; // use server summary as-is
+    if (validTrades.length === 0) {
+      return {
+        total_pnl: 0,
+        realized_pnl: 0,
+        unrealized_pnl: 0,
+        win_rate: 0,
+        total_trades: 0,
+        avg_rr: 0,
+        biggest_win: 0,
+        biggest_loss: 0,
+        profit_factor: null,
+        max_drawdown: 0,
+        max_drawdown_pct: 0,
+        expectancy: 0,
+      };
+    }
+    let total = 0;
+    let wins = 0;
+    let grossWin = 0;
+    let grossLoss = 0; // accumulated as positive magnitude
+    let biggestWin = -Infinity;
+    let biggestLoss = Infinity;
+    for (const t of validTrades) {
+      const p = t.pnl || 0;
+      total += p;
+      if (p > 0) {
+        wins++;
+        grossWin += p;
+        if (p > biggestWin) biggestWin = p;
+      } else if (p < 0) {
+        grossLoss += -p;
+        if (p < biggestLoss) biggestLoss = p;
+      }
+    }
+    const n = validTrades.length;
+    return {
+      total_pnl: round2(total),
+      realized_pnl: round2(total),
+      unrealized_pnl: 0,
+      win_rate: Math.round((wins / n) * 1000) / 10,
+      total_trades: n,
+      avg_rr: 0, // requires SL/target context; left at 0 to avoid misleading
+      biggest_win: biggestWin === -Infinity ? 0 : round2(biggestWin),
+      biggest_loss: biggestLoss === Infinity ? 0 : round2(biggestLoss),
+      profit_factor: grossLoss > 0 ? Math.round((grossWin / grossLoss) * 100) / 100 : null,
+      max_drawdown: 0,
+      max_drawdown_pct: 0,
+      expectancy: round2(total / n),
+    };
+  }, [channelFilter, validTrades]);
+
+  const displaySummary = filteredSummary ?? summary;
+
+  // When the channel filter is active, also recompute the equity curve from
+  // the filtered trade set so the chart matches the cards. Falls back to
+  // the server-provided series otherwise.
+  const displayEquity = useMemo<{ date: string; pnl: number }[]>(() => {
+    if (channelFilter === "all") return equityData;
+    const byDate: Record<string, number> = {};
+    for (const t of validTrades) {
+      if (!t.trade_date) continue;
+      byDate[t.trade_date] = (byDate[t.trade_date] || 0) + (t.pnl || 0);
+    }
+    const dates = Object.keys(byDate).sort();
+    let cum = 0;
+    return dates.map((d) => {
+      cum += byDate[d];
+      return { date: d, pnl: round2(cum) };
+    });
+  }, [channelFilter, equityData, validTrades]);
 
   const byDay = useMemo(() => {
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -160,7 +274,25 @@ export default function JournalPage() {
         label: "Symbol",
         sortable: true,
         sortValue: (r) => r.symbol,
-        render: (r) => <span className="font-medium">{r.symbol}</span>,
+        render: (r) => {
+          const ch = inferTradeChannel(r);
+          return (
+            <div className="flex items-center gap-1.5">
+              <span className="font-medium">{r.symbol}</span>
+              <span
+                className={cn(
+                  "text-[9px] font-semibold px-1 py-0.5 rounded",
+                  ch === "swing"
+                    ? "bg-indigo-500/15 text-indigo-400"
+                    : "bg-cyan-500/15 text-cyan-400",
+                )}
+                title={ch === "swing" ? "Swing (CNC)" : "Intraday (MIS)"}
+              >
+                {ch === "swing" ? "CNC" : "MIS"}
+              </span>
+            </div>
+          );
+        },
       },
       {
         key: "side",
@@ -304,59 +436,65 @@ export default function JournalPage() {
         </div>
       )}
 
-      {/* Summary Cards */}
-      {summary && (
+      {/* Summary Cards (channel-scoped when a filter tab is active) */}
+      {displaySummary && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
           <SummaryCard
             label="Total P&L"
-            value={formatCurrency(summary.total_pnl)}
-            positive={summary.total_pnl >= 0}
-            borderColor={summary.total_pnl >= 0 ? "#22c55e" : "#ef4444"}
+            value={formatCurrency(displaySummary.total_pnl)}
+            positive={displaySummary.total_pnl >= 0}
+            borderColor={displaySummary.total_pnl >= 0 ? "#22c55e" : "#ef4444"}
           />
           <SummaryCard
             label="Win Rate"
-            value={`${summary.win_rate}%`}
-            positive={summary.win_rate >= 50}
+            value={`${displaySummary.win_rate}%`}
+            positive={displaySummary.win_rate >= 50}
             borderColor="#3b82f6"
           />
           <SummaryCard
             label="Avg R:R"
-            value={String(summary.avg_rr)}
+            value={String(displaySummary.avg_rr)}
             borderColor="#6366f1"
           />
           <SummaryCard
             label="Expectancy"
-            value={formatCurrency(summary.expectancy)}
-            positive={summary.expectancy >= 0}
+            value={formatCurrency(displaySummary.expectancy)}
+            positive={displaySummary.expectancy >= 0}
             borderColor="#6366f1"
           />
           <SummaryCard
             label="Profit Factor"
-            value={summary.profit_factor == null ? "∞" : String(summary.profit_factor)}
-            positive={summary.profit_factor == null || summary.profit_factor >= 1.5}
+            value={displaySummary.profit_factor == null ? "∞" : String(displaySummary.profit_factor)}
+            positive={displaySummary.profit_factor == null || displaySummary.profit_factor >= 1.5}
             borderColor="#3b82f6"
           />
           <SummaryCard
             label="Trades"
-            value={String(summary.total_trades)}
+            value={String(displaySummary.total_trades)}
             borderColor="#64748b"
           />
           <SummaryCard
             label="Best Win"
-            value={formatCurrency(summary.biggest_win)}
+            value={formatCurrency(displaySummary.biggest_win)}
             positive
             borderColor="#22c55e"
           />
           <SummaryCard
             label="Worst Loss"
-            value={formatCurrency(summary.biggest_loss)}
+            value={formatCurrency(displaySummary.biggest_loss)}
             borderColor="#ef4444"
           />
         </div>
       )}
+      {channelFilter !== "all" && (
+        <p className="text-[10px] text-text-secondary/70 -mt-3 italic">
+          Showing {channelFilter} only · summary cards reflect this channel · Avg R:R / Drawdown
+          require ordered-stream context and stay 0 in subset view — switch to “All” for canonical metrics.
+        </p>
+      )}
 
       {/* Equity Curve */}
-      {equityData.length > 0 && (
+      {displayEquity.length > 0 && (
         <div
           className="rounded-lg border border-bg-tertiary p-4 shadow-md shadow-black/20"
           style={{ background: "linear-gradient(180deg, rgba(59,130,246,0.04) 0%, rgba(17,24,39,1) 100%)" }}
@@ -367,12 +505,45 @@ export default function JournalPage() {
             </svg>
             Equity Curve
           </h3>
-          <EquityCurve data={equityData} height={250} />
+          <EquityCurve data={displayEquity} height={250} />
         </div>
       )}
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        {/* Channel filter — pill-style tabs to mirror the Positions page UX */}
+        <div className="flex items-center gap-1 text-xs">
+          {(["all", "intraday", "swing"] as const).map((tab) => {
+            const count = channelCounts[tab];
+            const active = channelFilter === tab;
+            return (
+              <button
+                key={tab}
+                onClick={() => setChannelFilter(tab)}
+                className={cn(
+                  "px-3 py-1.5 rounded-lg font-medium transition-colors capitalize",
+                  active
+                    ? tab === "swing"
+                      ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
+                      : tab === "intraday"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                        : "bg-bg-tertiary text-text-primary border border-bg-tertiary"
+                    : "text-text-secondary hover:text-text-primary border border-transparent",
+                )}
+                title={
+                  tab === "swing"
+                    ? "Overnight CNC trades"
+                    : tab === "intraday"
+                      ? "Same-day MIS trades"
+                      : "Both channels combined"
+                }
+              >
+                {tab}
+                <span className="ml-1.5 text-[10px] opacity-70">{count}</span>
+              </button>
+            );
+          })}
+        </div>
         <select
           value={strategyFilter}
           onChange={(e) => setStrategyFilter(e.target.value)}
