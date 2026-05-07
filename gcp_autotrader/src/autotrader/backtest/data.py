@@ -4,7 +4,7 @@ Two candle sources, with **GCS preferred** because it is the canonical
 store the live system reads from at scan time:
 
   1. **GCS candle cache** — `load_candles_bulk_gcs()`
-       1d : `cache/score_1d/{ex}/{seg}/{sym}.json`     (full history)
+       1d : `cache/candles/1d/{ex}/{seg}/{sym}.json`   (rolling, daily-finalize cron)
        5m : `cache/candles/5m/{ex}/{seg}/{sym}.json`   (rolling ~5 months)
        15m: `cache/candles/15m/{ex}/{seg}/{sym}.json`  (rolling)
      Same JSON the live `score_signal()` reads → backtests are faithful by
@@ -282,17 +282,24 @@ _DEFAULT_GCS_BUCKET = "grow-profit-machine-autotrader-data"
 
 def _gcs_path_for(timeframe: str, symbol: str, exchange: str, segment: str) -> str:
     """Mirror live writers in `universe_service`:
-        1d  → cache/score_1d/{ex}/{seg}/{sym}.json
+        1d  → cache/candles/1d/{ex}/{seg}/{sym}.json   (canonical, active writer)
         5m  → cache/candles/5m/{ex}/{seg}/{sym}.json
         15m → cache/candles/15m/{ex}/{seg}/{sym}.json
+
+    2026-05-07 fix: 1d previously read from `cache/score_1d/`. That path
+    is the LEGACY score-cache writer's output and the live system stopped
+    refreshing it on 2026-02-27 — every backtest using 1d candles since
+    has been silently reading 70-day-stale data, producing meaningless
+    results for any swing or daily-bias path. The fresh canonical writer
+    is `cache/candles/1d/` (the same convention as 5m/15m), updated daily
+    by the candle finalize cron. Verified 2026-05-07: candles/1d has bars
+    through 2026-05-06; score_1d's last bar is 2026-02-26.
     """
     sym = symbol.strip().upper()
     ex = exchange.strip().upper()
     seg = segment.strip().upper()
     tf = timeframe.lower()
-    if tf == "1d":
-        return f"cache/score_1d/{ex}/{seg}/{sym}.json"
-    if tf in ("5m", "15m"):
+    if tf in ("5m", "15m", "1d"):
         return f"cache/candles/{tf}/{ex}/{seg}/{sym}.json"
     raise ValueError(f"unsupported timeframe for GCS loader: {tf}")
 
@@ -342,8 +349,8 @@ def load_candles_bulk_gcs(
 ) -> dict[str, list[Bar]]:
     """Bulk-load candles from GCS for many symbols.
 
-    Reads the same JSON files the live system writes (`cache/score_1d/...`
-    and `cache/candles/{tf}/...`), filters to the requested date window in
+    Reads the same JSON files the live system writes
+    (`cache/candles/{tf}/...`), filters to the requested date window in
     Python, and returns the same shape as `load_candles_bulk_bq()`.
 
     For 15m: if the per-symbol 15m cache file is missing, falls back to

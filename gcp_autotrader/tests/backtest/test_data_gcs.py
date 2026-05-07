@@ -24,10 +24,18 @@ from autotrader.backtest.types import Bar
 # ── Path resolution ──────────────────────────────────────────────────────
 
 
-def test_path_1d_uses_score_cache_prefix():
-    """1d goes to `cache/score_1d/...` (matches live writer in universe_service)."""
+def test_path_1d_uses_candles_prefix():
+    """1d uses the same `cache/candles/{tf}/...` path as 5m/15m.
+
+    2026-05-07 fix: previously 1d read from `cache/score_1d/`, but that
+    is the LEGACY score-cache writer's output and the live system stopped
+    refreshing it on 2026-02-27. The fresh canonical writer is
+    `cache/candles/1d/` (uniform with 5m/15m), updated daily by the
+    candle finalize cron. Verified: candles/1d had bars through
+    2026-05-06; score_1d's last bar was 2026-02-26 (70 days stale).
+    """
     assert _gcs_path_for("1d", "RELIANCE", "NSE", "CASH") == \
-        "cache/score_1d/NSE/CASH/RELIANCE.json"
+        "cache/candles/1d/NSE/CASH/RELIANCE.json"
 
 
 def test_path_5m_uses_candles_prefix():
@@ -207,10 +215,17 @@ def test_load_candles_bulk_gcs_skips_symbol_with_no_data(monkeypatch):
     assert "NOBARS" not in out
 
 
-def test_load_candles_bulk_gcs_uses_score_cache_path_for_1d(monkeypatch):
-    """1d reads from cache/score_1d/, not cache/candles/1d/."""
+def test_load_candles_bulk_gcs_uses_candles_path_for_1d(monkeypatch):
+    """1d reads from cache/candles/1d/ (same convention as 5m/15m).
+
+    2026-05-07 fix: was previously cache/score_1d/, but that path is the
+    legacy score-cache writer and stopped refreshing 2026-02-27. The
+    canonical fresh path is cache/candles/1d/. Reverting this test to the
+    old path silently re-introduces 70-day-stale daily candles into every
+    backtest run.
+    """
     rows_by_path = {
-        "cache/score_1d/NSE/CASH/RELIANCE.json": [
+        "cache/candles/1d/NSE/CASH/RELIANCE.json": [
             _row("2026-04-16T00:00:00+05:30", o=2900.0),
         ],
     }

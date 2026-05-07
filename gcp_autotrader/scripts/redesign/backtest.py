@@ -78,6 +78,8 @@ def _build_spec(args: argparse.Namespace):
         warmup_days=getattr(args, "warmup_days", 7),
         min_signal_score=getattr(args, "min_signal_score", None),
         pure_universe_from_scan=getattr(args, "pure_universe_from_scan", True),
+        apply_watchlist_per_day=getattr(args, "apply_watchlist_per_day", True),
+        is_swing=getattr(args, "is_swing", False),
     )
 
 
@@ -236,6 +238,37 @@ def main(argv: list[str] | None = None) -> int:
                         action="store_false", default=True,
                         help="do NOT derive symbol universe from scan_decisions; "
                              "require --symbols to be set")
+    # 2026-05-07 multi-emission audit flag.
+    # When True (default), pure-replay restricts each (symbol, date) to the
+    # ONE setup label live's scanner historically assigned — useful for
+    # validating cost/exit fidelity but NOT useful for testing what current
+    # code would do, since the historical setup labels reflect old code's
+    # winner-takes-all watchlist generator. With --no-watchlist-per-day,
+    # pure-replay evaluates EVERY setup in --setups against every bar and
+    # picks the best — which mirrors the post-2026-05-07 multi-emission
+    # behaviour where the watchlist generator emits one row per qualifying
+    # pattern. This is the right flag for "if today's code had been live
+    # for the audit window, what would it have made?".
+    p_pure.add_argument("--no-watchlist-per-day", dest="apply_watchlist_per_day",
+                        action="store_false", default=True,
+                        help="do NOT restrict to historical per-day setup "
+                             "assignments — evaluate every setup in --setups "
+                             "against every bar (use this to test current "
+                             "multi-emission code on historical data)")
+    # Swing mode: drives PureReplayConfig.is_swing which (1) routes orders
+    # through the delivery (CNC) cost model, (2) enables check_swing_entry
+    # gating against daily-bias, (3) expects --timeframe 1d. Combined with
+    # --no-watchlist-per-day + the swing-compatible setup subset, this
+    # answers "if the deployed multi-emission code had been live, what
+    # would swing have made?". Without this flag, pure-replay defaults to
+    # intraday cost model + intraday entry gates.
+    p_pure.add_argument("--is-swing", dest="is_swing",
+                        action="store_true", default=False,
+                        help="run as a swing backtest (delivery cost model + "
+                             "check_swing_entry daily-bias gate). Use with "
+                             "--timeframe 1d and a swing-compatible setup list "
+                             "(BREAKOUT,PULLBACK,MEAN_REVERSION,SHORT_BREAKDOWN,"
+                             "SHORT_PULLBACK).")
     p_pure.set_defaults(func=cmd_pure_replay)
 
     p_cmp = sub.add_parser("compare",
