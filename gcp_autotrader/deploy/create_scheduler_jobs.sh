@@ -93,6 +93,12 @@ create_job "autotrader-watchlist-v2-5m-1000" "0-30/5 10 * * 1-5" "$WATCHLIST_V2_
 create_job "autotrader-watchlist-v2-15m-1045" "45 10 * * 1-5" "$WATCHLIST_V2_URI"
 create_job "autotrader-watchlist-v2-15m-11to12" "0,15,30,45 11-12 * * 1-5" "$WATCHLIST_V2_URI"
 create_job "autotrader-watchlist-v2-15m-1300" "0 13 * * 1-5" "$WATCHLIST_V2_URI"
+# 2026-05-08 mid-session: fill the previous 13:00→14:45 gap (1h 45m of no
+# refresh during peak afternoon volatility). Adds rebuilds at 13:30, 14:00,
+# 14:15 so the watchlist reflects today's evolving tape continuously.
+create_job "autotrader-watchlist-v2-15m-1330" "30 13 * * 1-5" "$WATCHLIST_V2_URI"
+create_job "autotrader-watchlist-v2-15m-1400" "0 14 * * 1-5" "$WATCHLIST_V2_URI"
+create_job "autotrader-watchlist-v2-15m-1415" "15 14 * * 1-5" "$WATCHLIST_V2_URI"
 create_job "autotrader-watchlist-v2-final-1445" "45 14 * * 1-5" "$WATCHLIST_V2_URI"
 
 # Live scanner loops — SPLIT by wl_type so swing (CNC) and intraday (MIS) use
@@ -103,12 +109,34 @@ INTRADAY_SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=fal
 SWING_SCAN_URI="$SERVICE_URL/jobs/scan-once?force=false&allow_live_orders=false&wl_type=swing"
 
 # Intraday scanner — every 3 min during market hours (09:21–15:27 IST).
-create_job "autotrader-scan-intraday-3m" "21-57/3 9-14 * * 1-5" "$INTRADAY_SCAN_URI"
+#
+# 2026-05-08 mid-session fix: the previous schedule `21-57/3 9-14 * * 1-5`
+# only fired at minutes 21-57 of each hour, leaving minutes 00-20 of each
+# hour with NO scans. Live evidence: 10:00-10:21 IST today had zero scan
+# attempts. Across hours 10-14 = 5 daily gaps × 21 min = 105 min lost
+# (29% of trading time). New pattern `*/3 9-14 * * 1-5` fires every 3 min
+# at every minute slot (00, 03, 06, 09, ..., 57) for hours 09-14.
+create_job "autotrader-scan-intraday-3m" "*/3 9-14 * * 1-5" "$INTRADAY_SCAN_URI"
 create_job "autotrader-scan-intraday-1530" "0-27/3 15 * * 1-5" "$INTRADAY_SCAN_URI"
 
-# Swing scanner — fires once at 09:22 IST after watchlist v2 refresh lands.
-# No need to re-scan during the day: swing setups are based on daily candles.
+# Swing scanner.
+#
+# 2026-05-08 mid-session: previous design was a single 09:22 IST scan/day
+# with the rationale "swing setups are based on daily candles, no need to
+# re-scan during the day." That rationale is wrong — daily-frame indicators
+# stay valid intraday but the SETUP TRIGGERS (e.g. price pulling back to
+# daily-EMA, RSI extension to daily-overbought, breakdown of daily support)
+# can happen at any time of day as intraday price action evolves. The
+# 09:22 scan only catches setups that are already triggered at market
+# open; it misses setups that develop mid-day.
+#
+# Combined with the trading_service.py:_slice_watchlist_for_scan fix (full-
+# batch for swing — no rotation), now each swing scan evaluates ALL 150
+# rows. Multiple scan times catch setups whenever they actually develop.
 create_job "autotrader-scan-swing-0922" "22 9 * * 1-5" "$SWING_SCAN_URI" "{}" "10m"
+create_job "autotrader-scan-swing-1100" "0 11 * * 1-5" "$SWING_SCAN_URI" "{}" "10m"
+create_job "autotrader-scan-swing-1300" "0 13 * * 1-5" "$SWING_SCAN_URI" "{}" "10m"
+create_job "autotrader-scan-swing-1430" "30 14 * * 1-5" "$SWING_SCAN_URI" "{}" "10m"
 
 # Clean up the old combined schedule if still present
 for OLD_JOB in autotrader-scan-market-5m autotrader-scan-market-3m autotrader-scan-market-1530; do

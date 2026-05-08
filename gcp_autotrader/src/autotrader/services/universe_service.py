@@ -3477,7 +3477,15 @@ class UniverseService:
             elif ti.date() < today:
                 hist_by_day_slot[ti.date().isoformat()][slot] = vol
         today_bars = self._candles_sorted_unique(today_bars)
-        if len(today_bars) < 4:
+        # 2026-05-08 mid-session: lowered threshold from 4 to 3. Today's 09:30
+        # watchlist build had only 3 bars (09:15, 09:20, 09:25) and Phase 2
+        # rejected 460/461 candidates with INSUFFICIENT_INTRADAY_BARS, falling
+        # back to stale Phase 1 picks. With threshold=3, Phase 2 fires from
+        # the first 09:25 build instead of waiting until 09:30 — recovers
+        # ~5 min of intraday-momentum coverage at the open. The first 3 bars
+        # cover the full ORB window (09:15-09:25 = 15 min) which is the
+        # required signal for momentum scoring.
+        if len(today_bars) < 3:
             if latest_ts is not None and latest_ts.date() < today:
                 out["reason"] = "STALE_INTRADAY_CACHE"
             else:

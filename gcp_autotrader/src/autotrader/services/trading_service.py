@@ -147,10 +147,40 @@ class TradingService:
             sector_map.setdefault(sector, []).append(sym)
         return sector_map
 
-    def _slice_watchlist_for_scan(self, watchlist: list[Any]) -> tuple[list[Any], dict[str, int | bool]]:
+    def _slice_watchlist_for_scan(
+        self,
+        watchlist: list[Any],
+        *,
+        wl_type: str = "",
+    ) -> tuple[list[Any], dict[str, int | bool]]:
+        """Pick the slice of the watchlist to scan this tick.
+
+        Intraday: rotational batching (10 core + 25 rotated = 35/tick) so we
+        cycle through all stocks across multiple 3-min ticks without
+        exhausting the Upstox API rate budget per tick.
+
+        Swing (2026-05-08): full-batch — scan ALL rows every tick. With
+        only 1-4 swing scans per day (vs ~80 intraday ticks), rotation
+        means each swing row is evaluated only once every 4-5 days. The 5
+        MEAN_REVERSION rows in today's swing watchlist had only 1 evaluated;
+        the other 4 wouldn't be touched until next 1-4 days. Full-batch
+        ensures every row is evaluated every scan, paired with the
+        scheduler change adding 11:00/13:00/14:30 swing scan times so the
+        same rows are revisited as intraday price triggers their setups.
+        """
         total = len(watchlist)
         if total == 0:
             return [], {"total": 0, "scanned": 0, "core": 0, "rotated": 0, "nextCursor": 0, "wrapped": True}
+        # Swing: scan the full watchlist every tick — see method docstring.
+        if str(wl_type or "").strip().lower() == "swing":
+            return watchlist[:], {
+                "total": total,
+                "scanned": total,
+                "core": total,
+                "rotated": 0,
+                "nextCursor": 0,
+                "wrapped": True,
+            }
         batch = DEFAULT_WATCHLIST_SCAN_BATCH
         core = min(total, DEFAULT_WATCHLIST_SCAN_CORE)
         if total <= core + batch:
@@ -607,7 +637,7 @@ class TradingService:
                 before = len(watchlist)
                 watchlist = [w for w in watchlist if getattr(w, "wl_type", "intraday") == wl_filter]
                 logger.info("watchlist_filter wl_type=%s before=%d after=%d", wl_filter, before, len(watchlist))
-            subset, scan_meta = self._slice_watchlist_for_scan(watchlist)
+            subset, scan_meta = self._slice_watchlist_for_scan(watchlist, wl_type=wl_filter)
             if not subset:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")
                 return {"skipped": "watchlist_empty"}
