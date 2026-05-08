@@ -280,3 +280,34 @@ def test_phase1_momentum_removed_from_panic_chop_trenddown():
         "regime-removal sets (CHOP/PANIC, TREND_DOWN, PANIC). "
         f"Found {src.count('PHASE1_MOMENTUM')} occurrences."
     )
+
+
+# ─── 8. PHASE1_MOMENTUM hard-block in TREND_UP (added mid-session 2026-05-08) ─
+
+
+def test_phase1_momentum_hard_blocked_in_trend_up():
+    """PHASE1_MOMENTUM fires on stale Phase 1 (premarket-selected) data even
+    when Phase 2 (today's intraday momentum) is available. OLECTRA SL_HIT
+    in 8 minutes today (-₹47) on a Phase 1 selection while Phase 2 had
+    just produced fresh candidates 6 min earlier.
+
+    Hard-blocked regimes (4 of 6):
+      * TREND_UP — added 2026-05-08 mid-session (this fix)
+      * RANGE/CHOP/PANIC — earlier audit (momentum-chasing fails)
+
+    Allowed-through-_HARD_BLOCKS regimes (2 of 6):
+      * TREND_DOWN — filtered at market_policy.allowed_strategies level
+      * RECOVERY — the only regime where PHASE1_MOMENTUM actually adds value
+        (early-bull where Phase 2 may struggle; affinity 1.1×)
+    """
+    assert regime_hard_blocks_strategy("TREND_UP", "PHASE1_MOMENTUM"), (
+        "PHASE1_MOMENTUM must be hard-blocked in TREND_UP — Phase 2 is the "
+        "proper signal here. Live evidence: OLECTRA SL_HIT in 8 min."
+    )
+    # Already-blocked regimes from earlier audit work
+    assert regime_hard_blocks_strategy("RANGE", "PHASE1_MOMENTUM")
+    assert regime_hard_blocks_strategy("CHOP", "PHASE1_MOMENTUM")
+    assert regime_hard_blocks_strategy("PANIC", "PHASE1_MOMENTUM")
+    # Not in _HARD_BLOCKS (other gating layer applies)
+    assert not regime_hard_blocks_strategy("TREND_DOWN", "PHASE1_MOMENTUM")
+    assert not regime_hard_blocks_strategy("RECOVERY", "PHASE1_MOMENTUM")

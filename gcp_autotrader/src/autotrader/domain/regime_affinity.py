@@ -206,7 +206,9 @@ _HARD_BLOCKS: dict[str, set[str]] = {
     # unable to trade on broadly bullish range days (breadth=100%).
     "RANGE": {
         "BREAKOUT", "SHORT_BREAKDOWN",
-        "OPEN_DRIVE", "PHASE1_MOMENTUM",
+        "OPEN_DRIVE", "PHASE1_MOMENTUM",   # 2026-05-08 mid-session: confirmed via
+                                            #   live OLECTRA loss + audit data (3963
+                                            #   PHASE1_MOMENTUM scans, 0 qualified)
         "SHORT_PULLBACK",  # 2026-05-08: 4/4 backtest losses; shorting in RANGE without bearish structure
         "MORNING_FADE",  # 2026-05-08: backtest 17% WR / -₹64k in 1.4× affinity regime
     },
@@ -227,6 +229,11 @@ _HARD_BLOCKS: dict[str, set[str]] = {
         "MORNING_FADE",
         "SHORT_BREAKDOWN",   # 2026-05-08: explicit block for consistency (affinity already 0.24× effective)
         "SHORT_PULLBACK",    # 2026-05-08: shorting strength in uptrend is structurally wrong
+        "PHASE1_MOMENTUM",   # 2026-05-08 mid-session: stale Phase-1 selections fire on
+                             #   yesterday's momentum, not today's tape (OLECTRA SL_HIT
+                             #   in 8 min). Phase 2 is the proper signal in TREND_UP.
+                             #   Allowed in PANIC/TREND_DOWN/RECOVERY where Phase 2 may
+                             #   struggle and Phase 1 fallback adds value.
     },
     "TREND_DOWN": {"BREAKOUT", "MORNING_FADE"},  # 2026-05-08: MORNING_FADE thesis dead in all regimes
     # 2026-05-08: RECOVERY added to enforce MORNING_FADE block consistently.
