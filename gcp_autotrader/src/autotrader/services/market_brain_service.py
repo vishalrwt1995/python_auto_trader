@@ -1177,6 +1177,16 @@ class MarketBrainService:
             size_multiplier = min(1.50, round(size_multiplier * 1.30, 2))
             max_positions_multiplier = min(1.50, round(max_positions_multiplier * 1.20, 2))
 
+        # 2026-05-08 EMERGENCY FIX: PHASE1_MOMENTUM and PHASE1_REVERSAL were
+        # missing from this allowlist, causing `_strategy_allowed` in
+        # trading_service.py:102 to return False for every PHASE1_* watchlist
+        # row. Audit data: 3,963 PHASE1_MOMENTUM scans in our window, 0
+        # qualified, dominant block was `policy_strategy_blocked`. Today's
+        # intraday watchlist (2026-05-08 09:00 IST) was 100% PHASE1_MOMENTUM
+        # — without this fix the system would fire ZERO intraday trades.
+        # Both PHASE1_* setups are emitted by the watchlist generator and
+        # have well-defined entry gates in check_strategy_entry; they belong
+        # in the allowlist alongside the other intraday strategies.
         allowed_strategies = [
             "BREAKOUT",
             "SHORT_BREAKDOWN",   # explicit — was only reachable via fragile substring alias
@@ -1187,21 +1197,30 @@ class MarketBrainService:
             "VWAP_REVERSAL",
             "OPEN_DRIVE",
             "MOMENTUM",          # swing relative-strength leader chasing
+            "PHASE1_MOMENTUM",   # 2026-05-08: was missing → 100% policy_strategy_blocked
+            "PHASE1_REVERSAL",   # 2026-05-08: same fix for the bearish-regime variant
+            "MORNING_FADE",      # included for completeness (hard-blocked elsewhere)
         ]
         if regime in {"CHOP", "PANIC"}:
             # Remove momentum-chasing strategies; keep reversal/mean-reversion.
             # PULLBACK stays: short-side pullbacks are valid in bear markets.
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM"}]
+            # PHASE1_MOMENTUM removed alongside MOMENTUM (same chasing-strength
+            # rationale fails in chop/panic). PHASE1_REVERSAL kept — oversold
+            # bounces are the primary edge in panic/chop.
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM", "PHASE1_MOMENTUM"}]
         if regime in {"TREND_DOWN"}:
             # Down-trend: remove BREAKOUT (upside breakouts fail) and MOMENTUM
             # (buying leaders into a downtrend = catching a knife). Keep PULLBACK
             # (short pullbacks are scored in setup scoring), keep VWAP strategies.
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM"}]
+            # PHASE1_MOMENTUM removed (same logic as MOMENTUM in downtrend).
+            # PHASE1_REVERSAL kept — its 1.2× TREND_DOWN affinity sweet spot.
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM", "PHASE1_MOMENTUM"}]
         if regime == "PANIC":
             # PANIC: minimal strategies, but VWAP_REVERSAL is the best edge.
             # Keep PULLBACK for short-pullback setups. Add VWAP_TREND only if
             # data quality is sufficient (quality gate checked elsewhere).
-            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM"}]
+            # PHASE1_REVERSAL kept — capitulation + oversold = strong reversal candidate.
+            allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM", "PHASE1_MOMENTUM"}]
         if not allowed_strategies:
             allowed_strategies = ["MEAN_REVERSION", "VWAP_REVERSAL"]
         # P0-2 (2026-04-22): apply the disabled_strategies blocklist AFTER regime
