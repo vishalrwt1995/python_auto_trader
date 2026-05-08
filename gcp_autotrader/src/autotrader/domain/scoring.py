@@ -395,7 +395,20 @@ def check_strategy_entry(
         return True, ""
 
     if s in ("PULLBACK", "SHORT_PULLBACK"):
-        # Pullback needs the higher-TF trend intact (EMA stack) and RSI in reload zone
+        # 2026-05-08 strategy audit: PULLBACK had 0 live trades / 96 scans
+        # despite p90 score of 70 (just above threshold of 68.5 in TREND_UP).
+        # Block reasons cascade: gates compound to ~0% pass-through. Specific
+        # widenings below preserve the trend-continuity check (ema_stack)
+        # while letting more legitimate pullback entries through:
+        #   * RSI band 38-65 → 35-70 (BUY): stocks in strong uptrends often
+        #     pull back to 60-70 range, not 38-50. Tight band missed real
+        #     pullback entries on RS leaders.
+        #   * RSI band 40-62 → 38-65 (SELL): symmetric widening for shorts.
+        #   * EMA distance ±3% → ±5%: 5m bars on liquid Indian stocks
+        #     routinely move 3-4% intraday during uptrends. ±3% tight EMA
+        #     band rejected most pullbacks before they could enter.
+        # The structural anchors stay strict: ema_stack required (no buying
+        # broken trends), pullback direction enforced.
         if is_buy and not ind.ema_stack:
             return False, "strategy_pullback_no_bull_ema_stack"
         # SHORT_PULLBACK: require at minimum fast EMA < med EMA (first downtrend signal).
@@ -405,41 +418,55 @@ def check_strategy_entry(
         if not is_buy and ind.ema_stack:
             return False, "strategy_pullback_no_bear_ema_signal"
         rsi = ind.rsi.curr
-        if is_buy and not (38 <= rsi <= 65):
+        # Widened from 38-65 to 35-70 (2026-05-08 audit).
+        if is_buy and not (35 <= rsi <= 70):
             return False, "strategy_pullback_rsi_outside_reload_zone"
-        if not is_buy and not (40 <= rsi <= 62):
+        # Widened from 40-62 to 38-65 (2026-05-08 audit).
+        if not is_buy and not (38 <= rsi <= 65):
             return False, "strategy_pullback_rsi_outside_reload_zone"
         # Actual pullback check: price must be near fast EMA support/resistance
-        # (within ±3%). If price is >3% above EMA for BUY, it already ran — not a pullback.
-        # If price is >3% below EMA for BUY, the trend is broken — not a pullback entry.
+        # (within ±5%, was ±3%). If price is >5% above EMA for BUY, it already
+        # ran — not a pullback. If price is >5% below EMA for BUY, the trend
+        # is broken — not a pullback entry.
         if ind.ema_fast.curr > 0:
             _ema_dist_pct = (ind.close - ind.ema_fast.curr) / ind.ema_fast.curr * 100.0
             if is_buy:
-                if _ema_dist_pct > 3.0:
+                if _ema_dist_pct > 5.0:
                     return False, "strategy_pullback_price_extended_above_ema"
-                if _ema_dist_pct < -3.0:
+                if _ema_dist_pct < -5.0:
                     return False, "strategy_pullback_price_broke_below_ema"
             else:
-                if _ema_dist_pct < -3.0:
+                if _ema_dist_pct < -5.0:
                     return False, "strategy_pullback_price_extended_below_ema"
-                if _ema_dist_pct > 3.0:
+                if _ema_dist_pct > 5.0:
                     return False, "strategy_pullback_price_broke_above_ema"
         return True, ""
 
     if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
-        # VWAP Reversal / Mean Reversion — proper institutional entry gates:
+        # VWAP Reversal / Mean Reversion — proper institutional entry gates.
         #
-        # BUY (fade the selloff):
-        #   - Price must be BELOW VWAP (stretched down, expecting bounce back to VWAP)
-        #   - RSI must be oversold: ≤ 40 in RANGE, ≤ 35 in trending regimes
+        # 2026-05-08 strategy audit: MEAN_REVERSION had 0 live trades / 1953
+        # scans despite p90 score of 80 in RANGE (well above threshold 71).
+        # Block-cascade analysis showed the gates here compounded with
+        # `direction_hold` (RSI 40-60 produces no direction vote) to drop
+        # ~99.5% of scans. Two specific calibration mismatches identified:
         #
-        # SELL (fade the rally):
-        #   - Price must be ABOVE VWAP (stretched up, expecting reversion back to VWAP)
-        #   - RSI must be overbought: ≥ 65 in RANGE, ≥ 60 in trending regimes
+        #   1. RSI gate vs direction logic: determine_direction() casts a
+        #      bull vote at RSI<40 (loose), bear at RSI>60 (loose). This
+        #      gate required RSI≤35 in non-RANGE — so a stock with RSI=37
+        #      could be voted BUY by direction logic and then rejected here.
+        #      Aligning the strategy gate to match the direction logic's
+        #      thresholds removes this contradiction. RSI band widened:
+        #        - Non-RANGE BUY:  ≤35 → ≤40
+        #        - Non-RANGE SELL: ≥60 → ≥60 (already aligned)
+        #        - RANGE BUY:      ≤40 → ≤45 (slight loosening, still oversold)
+        #        - RANGE SELL:     ≥65 → ≥58 (matches direction logic at 60)
         #
-        # Extension: price must be ≥ 1.5% from VWAP (was 0.5% — too close to noise)
-        # A 0.5% deviation is inside normal intraday bid/ask noise and produces
-        # false signals. Real reversions need at least 1.5% stretch.
+        #   2. VWAP extension: 1.0% was too tight on 5m bars. p50 5m
+        #      VWAP-deviation in our universe is 0.4%; 1.0% threshold means
+        #      we only fire on the top ~10% extension events. Loosened to
+        #      0.6% — captures genuine reversal setups without firing on
+        #      bid/ask noise (<0.5%).
         rsi = ind.rsi.curr
         _regime_upper = str(regime or "").strip().upper()
         _is_range_like = _regime_upper in ("RANGE", "CHOP")
@@ -448,20 +475,24 @@ def check_strategy_entry(
             # BUY reversal: price must be below VWAP (oversold stretch)
             if ind.vwap > 0 and ind.close >= ind.vwap:
                 return False, "strategy_mr_buy_price_not_below_vwap"
-            rsi_limit = 40 if _is_range_like else 35
+            # Loosened from (40 RANGE / 35 other) to (45 RANGE / 40 other).
+            rsi_limit = 45 if _is_range_like else 40
             if rsi > rsi_limit:
                 return False, "strategy_mr_rsi_not_oversold"
         else:
             # SELL reversal: price must be above VWAP (overbought stretch)
             if ind.vwap > 0 and ind.close <= ind.vwap:
                 return False, "strategy_mr_sell_price_not_above_vwap"
-            rsi_floor = 65 if _is_range_like else 60
+            # Loosened from (65 RANGE / 60 other) to (58 RANGE / 60 other).
+            # Match direction logic's bear vote at RSI>60.
+            rsi_floor = 58 if _is_range_like else 60
             if rsi < rsi_floor:
                 return False, "strategy_mr_rsi_not_overbought"
 
         if ind.vwap > 0:
             vwap_dev = abs(ind.close - ind.vwap) / ind.vwap * 100
-            if vwap_dev < 1.0:
+            # Loosened from 1.0% to 0.6%. p50 5m VWAP deviation ≈ 0.4%.
+            if vwap_dev < 0.6:
                 return False, "strategy_mr_insufficient_vwap_extension"
         return True, ""
 

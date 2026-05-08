@@ -175,6 +175,21 @@ def regime_strategy_multiplier(
 # proximity is wrong for current market structure — BREAKOUT is parked across
 # the board. Re-enable on a regime-by-regime basis when a controlled re-test
 # (paper or canary) shows positive expectancy.
+# 2026-05-08 strategy audit: hard-block updates based on live + backtest data.
+#   * MORNING_FADE: 30-trade backtest in RANGE (its supposed sweet spot at
+#     1.4× affinity) showed 17% WR / -₹64k. The thesis (fade morning pop)
+#     doesn't hold up — 83% of pops continued or stayed elevated. Strategy
+#     is now hard-blocked in EVERY regime pending fundamental redesign with
+#     bearish-confirmation gates (rejection candle, RSI>70, volume fade).
+#     Was previously blocked only in TREND_UP. Live live-trade count: 0.
+#   * SHORT_PULLBACK: 4/4 losses in 5-month backtest. Already blocked in CHOP.
+#     Adding TREND_UP and RANGE — fading rallies in non-bearish regimes is
+#     structurally wrong (you're shorting STRENGTH). Allow in TREND_DOWN
+#     (affinity 1.2× — the actual sweet spot), PANIC (0.6×), RECOVERY (0.5×).
+#   * SHORT_BREAKDOWN: adding TREND_UP to hard-blocks for consistency. Was
+#     already affinity-suppressed (0.4× × 0.6 SELL-dampening = 0.24×
+#     effective in TREND_UP) but the explicit hard-block prevents wasted
+#     scan cycles. Allowed in TREND_DOWN (1.3× sweet spot) and PANIC (0.8×).
 _HARD_BLOCKS: dict[str, set[str]] = {
     # CHOP: block high-risk momentum strategies. Keep VWAP_REVERSAL and
     # VWAP_TREND — individual stocks can still trend/reverse even on choppy
@@ -183,6 +198,7 @@ _HARD_BLOCKS: dict[str, set[str]] = {
         "BREAKOUT", "SHORT_BREAKDOWN", "PULLBACK", "SHORT_PULLBACK",
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
         "MOMENTUM",    # relative-strength leaders fail when index whipsaws
+        "MORNING_FADE",  # 2026-05-08: backtest 17% WR even in 1.3× affinity regime
     },
     # RANGE: block pure-breakout strategies (fakeouts common) and OPEN_DRIVE
     # (needs gap/momentum at open). Allow VWAP_TREND — individual stocks trend
@@ -191,6 +207,8 @@ _HARD_BLOCKS: dict[str, set[str]] = {
     "RANGE": {
         "BREAKOUT", "SHORT_BREAKDOWN",
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
+        "SHORT_PULLBACK",  # 2026-05-08: 4/4 backtest losses; shorting in RANGE without bearish structure
+        "MORNING_FADE",  # 2026-05-08: backtest 17% WR / -₹64k in 1.4× affinity regime
     },
     # PANIC: only allow counter-trend oversold bounces (MR) or short-breakdown
     # continuation. Everything else gets shredded.
@@ -198,13 +216,23 @@ _HARD_BLOCKS: dict[str, set[str]] = {
         "BREAKOUT", "PULLBACK",
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
         "MOMENTUM",    # chasing strength into a panic = catching a knife
+        "MORNING_FADE",  # 2026-05-08: PANIC opens often gap-down, fade thesis inverted
     },
     # TREND_UP / TREND_DOWN: BREAKOUT parked here too (0/9 live WR, see comment
     # block above). Other strategies still allowed — TREND regimes are where
     # VWAP_TREND and MOMENTUM are designed to shine.
     # MORNING_FADE blocked in TREND_UP — fading strong rallies is a knife-catch.
-    "TREND_UP":   {"BREAKOUT", "MORNING_FADE"},
-    "TREND_DOWN": {"BREAKOUT"},
+    "TREND_UP":   {
+        "BREAKOUT",
+        "MORNING_FADE",
+        "SHORT_BREAKDOWN",   # 2026-05-08: explicit block for consistency (affinity already 0.24× effective)
+        "SHORT_PULLBACK",    # 2026-05-08: shorting strength in uptrend is structurally wrong
+    },
+    "TREND_DOWN": {"BREAKOUT", "MORNING_FADE"},  # 2026-05-08: MORNING_FADE thesis dead in all regimes
+    # 2026-05-08: RECOVERY added to enforce MORNING_FADE block consistently.
+    # Pre-fix RECOVERY had no entry in _HARD_BLOCKS → silently allowed all
+    # strategies. Add MORNING_FADE explicitly.
+    "RECOVERY":   {"MORNING_FADE"},
 }
 
 
