@@ -239,3 +239,44 @@ def test_auto_default_strategies_never_blocked():
     for regime in ("TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"):
         assert not regime_hard_blocks_strategy(regime, "AUTO")
         assert not regime_hard_blocks_strategy(regime, "DEFAULT")
+
+
+# ─── 7. PHASE1_MOMENTUM allowlist emergency fix (2026-05-08 09:02 IST) ──
+
+
+def test_phase1_momentum_in_allowed_strategies_for_trend_up():
+    """PHASE1_MOMENTUM must be in the market-policy allowlist or the
+    intraday watchlist (often 100% PHASE1_MOMENTUM in TREND_UP days)
+    gets blanket-blocked by `policy_strategy_blocked`. Discovered live
+    on 2026-05-08 morning when today's watchlist was 150 PHASE1_MOMENTUM
+    rows and would have fired zero trades."""
+    import inspect
+    from autotrader.services import market_brain_service as mbs_mod
+    src = inspect.getsource(mbs_mod)
+    # Grep for the strategy in the allowed_strategies list-literal.
+    assert '"PHASE1_MOMENTUM",' in src, (
+        "PHASE1_MOMENTUM must be in market_brain_service.allowed_strategies "
+        "list. Without it, _strategy_allowed() in trading_service rejects "
+        "every PHASE1_MOMENTUM watchlist row with policy_strategy_blocked."
+    )
+    assert '"PHASE1_REVERSAL",' in src, (
+        "PHASE1_REVERSAL must be in allowed_strategies for the same reason "
+        "(bearish-regime oversold-bounce setup, used in PANIC/TREND_DOWN)."
+    )
+
+
+def test_phase1_momentum_removed_from_panic_chop_trenddown():
+    """PHASE1_MOMENTUM (like MOMENTUM) must be removed from the allowlist
+    in CHOP/PANIC/TREND_DOWN — chasing strength in those regimes fails.
+    PHASE1_REVERSAL stays since oversold bounces are the edge there."""
+    import inspect
+    from autotrader.services import market_brain_service as mbs_mod
+    src = inspect.getsource(mbs_mod)
+    # Look for the regime filter blocks that remove PHASE1_MOMENTUM.
+    # Each block should mention "PHASE1_MOMENTUM" alongside MOMENTUM.
+    # Three filter blocks: CHOP/PANIC, TREND_DOWN, PANIC (separate).
+    assert src.count('"PHASE1_MOMENTUM"') >= 4, (
+        "Expected PHASE1_MOMENTUM in: 1× allowed_strategies list + 3× "
+        "regime-removal sets (CHOP/PANIC, TREND_DOWN, PANIC). "
+        f"Found {src.count('PHASE1_MOMENTUM')} occurrences."
+    )
