@@ -380,7 +380,16 @@ def check_strategy_entry(
     is_buy = direction == "BUY"
 
     if s in ("BREAKOUT", "SHORT_BREAKDOWN"):
-        # Must have trend strength and be near the high (or low for shorts)
+        # 2026-05-14 audit: BREAKOUT was 0/6 WR over Apr 23 → Apr 28 with
+        # AvgMFE = 0.00R (trades NEVER went positive). Bar-by-bar analysis
+        # showed 5/5 verified entries fired on RED bars (close <= open) where
+        # price was reversing OFF the breakout level. Old gate only checked
+        # "near 52w high" — same green-light for actual breakouts and for
+        # stocks reversing off their highs. The system already hard-blocked
+        # BREAKOUT in all regimes on 2026-05-06 (see regime_affinity.py); this
+        # gate fix makes the setup safe to re-enable once validated.
+        #
+        # Architectural fix: confirm an ACTUAL breakout NOW, not proximity.
         if ind.adx < 20:
             return False, "strategy_breakout_adx_too_low"
         if is_buy and ind.dist_from_52w_high > 5.0:
@@ -392,6 +401,35 @@ def check_strategy_entry(
             return False, "strategy_breakdown_price_too_high"
         if ind.volume.ratio < 1.2:
             return False, "strategy_breakout_no_volume_surge"
+        # ── Breakout confirmation gates (2026-05-14) ────────────────────
+        if not ind.candles or len(ind.candles) < 13:
+            return False, "strategy_breakout_insufficient_history"
+        current = ind.candles[-1]
+        c_open = float(current[1])
+        c_close = float(current[4])
+        # 1. Current bar must close in trade direction. A red bar (close<=open)
+        # for a BUY breakout is a textbook false breakout / reversal candle.
+        if is_buy and c_close <= c_open:
+            return False, "strategy_breakout_red_entry_bar"
+        if not is_buy and c_close >= c_open:
+            return False, "strategy_breakout_green_entry_bar"
+        # 2. Close must clear the prior 12-bar high (60 min on 5m). "Near 52w
+        # high" can be true while price is rolling over; "close > recent high"
+        # is what an actual breakout looks like.
+        prior_12 = ind.candles[-13:-1]  # excludes current bar
+        if is_buy:
+            prior_high = max(float(b[2]) for b in prior_12)
+            if c_close < prior_high:
+                return False, "strategy_breakout_close_below_recent_high"
+        else:
+            prior_low = min(float(b[3]) for b in prior_12)
+            if c_close > prior_low:
+                return False, "strategy_breakout_close_above_recent_low"
+        # 3. Volume must be accelerating INTO the breakout, not just elevated
+        # overall. Current bar volume > 1.1× prior-4-bar avg.
+        recent_vol_avg = sum(float(b[5]) for b in ind.candles[-5:-1]) / 4
+        if recent_vol_avg > 0 and float(current[5]) < recent_vol_avg * 1.1:
+            return False, "strategy_breakout_volume_not_accelerating"
         return True, ""
 
     if s in ("PULLBACK", "SHORT_PULLBACK"):
@@ -497,12 +535,35 @@ def check_strategy_entry(
         return True, ""
 
     if s == "VWAP_TREND":
-        # Price must be on the correct side of VWAP
+        # 2026-05-14 audit: VWAP_TREND time-of-day split:
+        #   09:45-10:30:  1/3 WR (-₹44)
+        #   10:31-11:30:  1/6 WR (-₹300) ← morning bleeder
+        #   11:31-12:30:  3/3 WR (+₹228) ← afternoon edge
+        # Root cause: gate doesn't validate that VWAP is a meaningful signal.
+        # At 10:00 IST VWAP has ~9 bars of input → noise. By 11:30 VWAP has
+        # 27 bars → actual trend signal. Two additional gates:
+        #   1. Bars-since-open >= 12 (60 min) — VWAP statistically settled
+        #   2. Last 3 bars all on trade side of VWAP — not coincidental crossing
+        # (VWAP slope check deferred — needs vwap_history on IndicatorSnapshot,
+        # bigger change; the bars-since-open + sustained-side gates capture
+        # most of the morning-failure pattern.)
+        bar_ts = str(ind.candles[-1][0]) if ind.candles else ""
+        bar_min = _ist_minutes_from_ts(bar_ts)
+        # 60 min after session-open: 09:15 + 60 = 10:15 = 615 min.
+        if bar_min < 615:
+            return False, "strategy_vwap_trend_session_too_young"
+        # Sustained side of VWAP — last 3 closes all in direction.
+        if len(ind.candles) >= 3:
+            last_3 = ind.candles[-3:]
+            if is_buy and not all(float(c[4]) > ind.vwap for c in last_3):
+                return False, "strategy_vwap_trend_not_sustained_above_vwap"
+            if not is_buy and not all(float(c[4]) < ind.vwap for c in last_3):
+                return False, "strategy_vwap_trend_not_sustained_below_vwap"
+        # Existing gates — price on correct side of VWAP
         if is_buy and ind.close <= ind.vwap:
             return False, "strategy_vwap_trend_price_below_vwap"
         if not is_buy and ind.close >= ind.vwap:
             return False, "strategy_vwap_trend_price_above_vwap"
-        # Needs moderate trend strength
         if ind.adx < 18:
             return False, "strategy_vwap_trend_adx_too_low"
         return True, ""
@@ -563,12 +624,19 @@ def check_strategy_entry(
         return True, ""
 
     if s == "OPEN_DRIVE":
-        # First-30-min strong directional setup. Without a time-of-day check
-        # here (we don't have current_ts in this function), at minimum require
-        # real volume + ADX so a stale stock can't fire on the OPEN_DRIVE
-        # template hours after the open. Time-of-day is enforced upstream by
-        # `is_entry_window_open_ist` — entries are only allowed 09:45–13:30,
-        # which is wider than ideal but rules out the overnight stale path.
+        # First-30-min strong directional setup. 2026-05-14 audit identified
+        # 3/3 OPEN_DRIVE losses in live (MOSCHIP, ANURAS, AEROFLEX), all
+        # firing in 10:24-11:29 window — well past the actual opening drive.
+        # Each trade showed AvgMFE +0.72R then reversed (system entered late,
+        # caught the dying gasp of the morning move). The previous developer
+        # left a TODO comment about this (see git history); the fix mirrors
+        # MORNING_FADE's existing pattern using `ind.candles[-1][0]`.
+        bar_ts = str(ind.candles[-1][0]) if ind.candles else ""
+        bar_min = _ist_minutes_from_ts(bar_ts)
+        # 09:15-09:45 IST = 555-585 minutes since midnight. The 09:20 bar
+        # represents 09:15-09:20 close, so first 6 bars qualify.
+        if not (555 <= bar_min <= 585):
+            return False, "strategy_open_drive_outside_time_window"
         if ind.adx < 18:
             return False, "strategy_open_drive_adx_too_low"
         if ind.volume.ratio < 1.2:

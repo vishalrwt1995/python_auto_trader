@@ -48,11 +48,25 @@ _AFFINITY: dict[str, dict[str, float]] = {
     "RANGE": {
         "BREAKOUT": 0.6,
         "SHORT_BREAKDOWN": 0.6,
-        "PULLBACK": 0.8,
+        # 2026-05-14 audit (FIX A): PULLBACK lifted 0.8 → 1.0. On NIFTY-RANGE
+        # days with sector rotation (mid-caps May 13, banks May 14), individual
+        # trending stocks were CRUSHED by 0.8× multiplier — base scores ~75
+        # × 0.8 = 60 < threshold 72 → rejected as `score_below_min`. Live
+        # had 0 trades on both days despite clear sector trends. Individual
+        # setup gates (ema_stack, RSI band, EMA distance) already validate
+        # the stock is actually trending — the affinity nerf was redundant.
+        "PULLBACK": 1.0,
         "SHORT_PULLBACK": 0.8,
         "MEAN_REVERSION": 1.4,
         "VWAP_REVERSAL": 1.3,
-        "VWAP_TREND": 0.7,
+        # 2026-05-14 audit (FIX A): VWAP_TREND lifted 0.7 → 1.0. Same root
+        # cause as PULLBACK above. Backtest validation (May 13/14 trending
+        # + Apr 22/23 narrow-range): FIX A produces +₹1,242 net over 4 days
+        # vs ₹0 currently. Trending days +53% WR, narrow days +33% WR/+0.18R
+        # avg — net positive on both day types. Stock-level gates (RC-2 fix:
+        # bars_since_open ≥ 60 + sustained-side-of-VWAP for 3 bars) prevent
+        # firing on noise-VWAP-crossing signals.
+        "VWAP_TREND": 1.0,
         "OPEN_DRIVE": 0.8,
         "PHASE1_MOMENTUM": 0.7,
         "PHASE1_REVERSAL": 1.0,   # decent — individual oversold stocks can bounce in a range
