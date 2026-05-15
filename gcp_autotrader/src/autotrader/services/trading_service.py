@@ -965,7 +965,10 @@ class TradingService:
                         "risk_mode": brain_state.risk_mode if brain_state else "",
                     })
                     continue
-                direction = determine_direction(ind, regime, setup=w.strategy)
+                direction = determine_direction(
+                    ind, regime, setup=w.strategy,
+                    wl_type=("swing" if _is_swing else "intraday"),
+                )
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy, daily_bias=_daily_bias, setup=w.strategy)
                 # Apply regime-strategy affinity multiplier
                 _affinity_mult = regime_strategy_multiplier(

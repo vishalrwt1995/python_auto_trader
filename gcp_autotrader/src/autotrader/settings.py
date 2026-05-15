@@ -73,7 +73,11 @@ class StrategySettings:
     # Swing-specific settings
     swing_atr_sl_mult: float = 2.5
     swing_rr: float = 2.0
-    swing_risk_per_trade: float = 200.0
+    # Audit 2026-05-16 (Batch D): bumped from 200 to 300. 122 sl_too_wide
+    # rejects/week — daily ATR × 2.5 (swing SL mult) frequently exceeds
+    # 200/qty for stocks priced > 1000. Bumping risk_per_trade widens the
+    # qty math envelope without changing the SL distance per share.
+    swing_risk_per_trade: float = 300.0
     swing_max_positions: int = 5
     swing_max_hold_days: int = 10
     # P1 (2026-04-22): dropped 75 → 70 after live observation that scorer-eligible
@@ -93,7 +97,14 @@ class StrategySettings:
     # to unlock real swing trade volume; subsequent gates (volume, RSI zone,
     # daily-bias, sl_too_wide) still filter low-quality candidates. Track
     # qualified rate post-deploy: target 1-3 swing trades/day.
-    swing_min_signal_score: int = 65
+    # Audit 2026-05-16 (Batch D): 65 → 60. 1424 score_below_min rejects in
+    # the past trading week — the score distribution peaks in the 58-67
+    # band; dropping the bar to 60 captures ~30-40% of that cluster while
+    # the strategy gates (check_swing_entry: daily trend, ADX, RSI band,
+    # supertrend) still filter the lowest-quality candidates. Paired with
+    # the direction-margin 2→1 swing fix above, expected to convert from
+    # 0 swing trades/day to 1-3/day on rotation/trending sessions.
+    swing_min_signal_score: int = 60
     # Batch 2.1 (2026-04-22): re-entry cooldown. When a position closes
     # (SL hit, target hit, or timeout), the scanner should NOT immediately
     # re-stage the same symbol on the next 3-min cycle. The watchlist will
@@ -314,7 +325,7 @@ class AppSettings:
             nifty_trend_pct=_env_float("NIFTY_TREND_PCT", 0.3),
             swing_atr_sl_mult=_env_float("SWING_ATR_SL_MULT", 2.5),
             swing_rr=_env_float("SWING_RR", 2.0),
-            swing_risk_per_trade=_env_float("SWING_RISK_PER_TRADE", 200),
+            swing_risk_per_trade=_env_float("SWING_RISK_PER_TRADE", 300),
             swing_max_positions=_env_int("SWING_MAX_POSITIONS", 5),
             swing_max_hold_days=_env_int("SWING_MAX_HOLD_DAYS", 10),
             # Batch 1.3 (2026-04-22): default aligned to dataclass (70). Prior
@@ -324,7 +335,7 @@ class AppSettings:
             # directly saw the P1 value. The P1 swing-threshold calibration only
             # takes effect because no SWING_MIN_SIGNAL_SCORE env var is set in
             # Cloud Run today, so from_env's default must be authoritative.
-            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 65),
+            swing_min_signal_score=_env_int("SWING_MIN_SIGNAL_SCORE", 60),
             reentry_cooldown_minutes=_env_int("REENTRY_COOLDOWN_MINUTES", 30),
             paper_entry_slippage_pct=_env_float("PAPER_ENTRY_SLIPPAGE_PCT", 0.0010),
             paper_sl_slippage_pct=_env_float("PAPER_SL_SLIPPAGE_PCT", 0.0020),

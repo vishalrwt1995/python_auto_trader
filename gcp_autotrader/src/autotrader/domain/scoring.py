@@ -9,11 +9,17 @@ if TYPE_CHECKING:
     from autotrader.domain.daily_bias import DailyBias
 
 
-def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: str = "") -> Direction:
+def determine_direction(
+    ind: IndicatorSnapshot,
+    regime: RegimeSnapshot,
+    setup: str = "",
+    wl_type: str = "intraday",
+) -> Direction:
     if regime.regime == "AVOID":
         return "HOLD"
 
     _setup_upper = str(setup or "").strip().upper()
+    _is_swing = str(wl_type or "").strip().lower() == "swing"
 
     # MORNING_FADE is contrarian by design: it shorts stocks that are UP
     # >1.5% by 09:45 IST. The standard bull/bear vote will see a strong-up
@@ -77,7 +83,13 @@ def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: s
     if regime.bias == "BEARISH":
         bear += 2
 
-    if bull > bear + 2:
+    # Audit 2026-05-16 (Batch D): swing uses a 2-point margin (was 3) — daily
+    # timeframe has less noise than 5m intraday and the 3-point bar was
+    # blocking 305 rejects/week as `direction_hold` with 0 swing trades
+    # firing for 5 consecutive days. Intraday keeps the 3-point margin
+    # (bull > bear + 2) — it's exposed to per-bar whipsaw.
+    _margin = 1 if _is_swing else 2
+    if bull > bear + _margin:
         # Single-sided setup veto: a long-only setup that votes BUY is fine,
         # but if a short-only setup somehow accumulates more bull votes
         # (because of regime bias), we return HOLD rather than fire a wrong-
@@ -85,7 +97,7 @@ def determine_direction(ind: IndicatorSnapshot, regime: RegimeSnapshot, setup: s
         if _short_only:
             return "HOLD"
         return "BUY"
-    if bear > bull + 2:
+    if bear > bull + _margin:
         if _long_only:
             return "HOLD"
         return "SELL"
