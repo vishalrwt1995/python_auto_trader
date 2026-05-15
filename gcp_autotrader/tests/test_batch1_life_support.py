@@ -113,23 +113,24 @@ def test_swing_min_signal_score_env_default_matches_dataclass():
     """from_env() must use the same default as the dataclass.
 
     Divergence here means production silently uses a different threshold
-    than what tests verify. Adjusted to 65 in the 2026-05-07 audit (after
-    live data showed only 4 of 305 swing scans qualified at threshold=70).
+    than what tests verify. Adjusted to 60 in the 2026-05-16 Batch D fix
+    (after live data showed 0 qualified swing trades across 5 trading days
+    with 1424 score_below_min rejects).
     """
     # Dataclass default
-    assert StrategySettings().swing_min_signal_score == 65
+    assert StrategySettings().swing_min_signal_score == 60
     # from_env() default must match
     settings_src = Path(__file__).parent.parent / "src" / "autotrader" / "settings.py"
     text = settings_src.read_text()
-    # The env-loader line must reference the same literal 65
-    assert '_env_int("SWING_MIN_SIGNAL_SCORE", 65)' in text, (
-        "settings.from_env() SWING_MIN_SIGNAL_SCORE env default must be 65 to "
-        "match the dataclass default. See 2026-05-07 swing audit."
+    # The env-loader line must reference the same literal 60
+    assert '_env_int("SWING_MIN_SIGNAL_SCORE", 60)' in text, (
+        "settings.from_env() SWING_MIN_SIGNAL_SCORE env default must be 60 to "
+        "match the dataclass default. See 2026-05-16 Batch D audit."
     )
 
 
-def test_from_env_produces_swing_threshold_65_when_env_unset():
-    """End-to-end: with no SWING_MIN_SIGNAL_SCORE env var, from_env → 65."""
+def test_from_env_produces_swing_threshold_default_when_env_unset():
+    """End-to-end: with no SWING_MIN_SIGNAL_SCORE env var, from_env → 60."""
     # Save/restore env so the test is hermetic
     saved = os.environ.pop("SWING_MIN_SIGNAL_SCORE", None)
     try:
@@ -144,9 +145,9 @@ def test_from_env_produces_swing_threshold_65_when_env_unset():
         }
         with patch.dict(os.environ, required, clear=False):
             app = AppSettings.from_env()
-            assert app.strategy.swing_min_signal_score == 65, (
+            assert app.strategy.swing_min_signal_score == 60, (
                 f"from_env produced {app.strategy.swing_min_signal_score} — "
-                "expected 65 per 2026-05-07 audit calibration."
+                "expected 60 per 2026-05-16 Batch D calibration."
             )
     finally:
         if saved is not None:

@@ -19,29 +19,29 @@ from autotrader.settings import StrategySettings
 # ─── P1-1: swing_min_signal_score drop ────────────────────────────────────
 
 
-def test_swing_min_signal_score_is_65():
-    """Swing threshold lowered 70 → 65 (2026-05-07 audit).
+def test_swing_min_signal_score_is_60():
+    """Swing threshold dropped 65 → 60 (2026-05-16 Batch D).
 
-    Live data 2026-04-23 → 2026-05-07 (305 swing scans):
-      * 0-30 score: 88 (29%)
-      * 30-50:      84 (28%)
-      * 50-60:      33 (11%)
-      * 60-65:      16 (5%)
-      * 65-70:      27 (9%)  ← unlocked by this drop
-      * 70-75:      19 (6%)
-      * 75-80:      15 (5%)
-      * 80+:        23 (8%)
+    Layer-D audit: BQ scan_decisions over 5 trading days (May 11-15) showed
+    1424 swing rejects with `score_below_min` (52% of all swing rejections),
+    against 0 qualified swing trades fired across the entire week. The 60-65
+    band carries enough volume to materially shift firing rates while the
+    strategy gates (check_swing_entry daily trend, ADX, RSI, supertrend)
+    still filter low-quality candidates.
 
-    Only 4 qualified across 14 trading days at threshold=70 — effectively
-    zero swing trades fired in production. Lowered to 65 to unlock real
-    volume; subsequent gates (volume, RSI, daily-bias, sl_too_wide) still
-    filter low-quality candidates. Target post-deploy: 1-3 swing trades/day.
+    History:
+      * 2026-04-22: 75 → 70  (P1 drop, audit doc reference)
+      * 2026-05-07: 70 → 65  (only 4 qualified in 14 days)
+      * 2026-05-16: 65 → 60  (Batch D — 0 qualified in 5 days)
+
+    If swing trades start firing but lose money, the proper response is
+    to tighten the strategy gates (check_swing_entry), not raise this bar.
     """
     cfg = StrategySettings()
-    assert cfg.swing_min_signal_score == 65, (
-        f"swing_min_signal_score must be 65, got {cfg.swing_min_signal_score}. "
-        "Do NOT revert to 70+ without live BQ evidence the 65-69 band is "
-        "generating losing trades. See 2026-05-07 scan_decisions audit."
+    assert cfg.swing_min_signal_score == 60, (
+        f"swing_min_signal_score must be 60, got {cfg.swing_min_signal_score}. "
+        "Do NOT revert without live BQ evidence the 60-64 band is generating "
+        "losing trades. See 2026-05-16 Batch D audit."
     )
 
 
@@ -53,10 +53,15 @@ def test_swing_threshold_above_or_near_intraday_threshold():
     for genuine swing setups even when the underlying edge is real.
     """
     cfg = StrategySettings()
-    assert cfg.swing_min_signal_score >= cfg.min_signal_score - 10, (
+    # 2026-05-16 Batch D: widened to 15 points. Intraday default 72, swing 60.
+    # Swing scoring uses the same intraday-tuned formula on daily candles;
+    # daily-timeframe noise gives systematically lower numerics for genuine
+    # setups. The downstream check_swing_entry gates carry the real quality
+    # bar, not this threshold.
+    assert cfg.swing_min_signal_score >= cfg.min_signal_score - 15, (
         f"Swing threshold dropped too far below intraday "
         f"(swing={cfg.swing_min_signal_score}, intraday={cfg.min_signal_score}). "
-        "Hard floor: swing must be within 10 points of intraday."
+        "Hard floor: swing must be within 15 points of intraday."
     )
 
 
@@ -113,13 +118,13 @@ def test_breadth_filter_still_blocks_intraday_shorts_in_bullish_tape():
     )
 
 
-def test_settings_file_has_p1_comment():
+def test_settings_file_has_rationale_comment():
     """Commit hygiene: the settings file should carry the rationale so
-    future readers know why swing_min_signal_score is 65.
+    future readers know why swing_min_signal_score is 60.
     """
     path = Path(__file__).parent.parent / "src" / "autotrader" / "settings.py"
     text = path.read_text()
-    assert "swing_min_signal_score: int = 65" in text
-    # Rationale comment near the constant — both the original 2026-04-22
-    # context and the 2026-05-07 audit-driven adjustment should be cited.
-    assert "2026-05-07" in text and "swing" in text.lower()
+    assert "swing_min_signal_score: int = 60" in text
+    # Rationale comment near the constant — both the prior 2026-05-07 drop
+    # and the 2026-05-16 Batch D adjustment should be cited.
+    assert "2026-05-16" in text and "swing" in text.lower()
