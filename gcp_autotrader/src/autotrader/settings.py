@@ -222,6 +222,16 @@ class RegimeThresholds:
     trend_up_hi_breadth_min: float = 80.0
     trend_up_hi_leadership_min: float = 60.0
     trend_up_hi_stress_max: float = 48.0
+    # RANGE_ROTATING entry (audit 2026-05-15, Layer 4 Option A).
+    # Captures days when NIFTY itself ranges (so trend_score stays low)
+    # but mid-caps/sectors are trending — breadth + leadership clear a
+    # mid-range bar while index trend doesn't. Uses TREND_UP affinity
+    # multipliers so VWAP_TREND / PULLBACK / MOMENTUM aren't haircut
+    # the way they are in plain RANGE. Stress ceiling kept identical
+    # to TREND_UP's so PANIC always takes precedence.
+    range_rotating_breadth_min: float = 65.0
+    range_rotating_leadership_min: float = 55.0
+    range_rotating_stress_max: float = 55.0
     # TREND_DOWN entry
     trend_down_trend_max: float = 36.0
     trend_down_breadth_max: float = 40.0
@@ -387,6 +397,9 @@ class AppSettings:
                 trend_up_hi_breadth_min=_env_float("REGIME_TREND_UP_HI_BREADTH_MIN", 80.0),
                 trend_up_hi_leadership_min=_env_float("REGIME_TREND_UP_HI_LEADERSHIP_MIN", 60.0),
                 trend_up_hi_stress_max=_env_float("REGIME_TREND_UP_HI_STRESS_MAX", 48.0),
+                range_rotating_breadth_min=_env_float("REGIME_RANGE_ROTATING_BREADTH_MIN", 65.0),
+                range_rotating_leadership_min=_env_float("REGIME_RANGE_ROTATING_LEADERSHIP_MIN", 55.0),
+                range_rotating_stress_max=_env_float("REGIME_RANGE_ROTATING_STRESS_MAX", 55.0),
                 trend_down_trend_max=_env_float("REGIME_TREND_DOWN_TREND_MAX", 36.0),
                 trend_down_breadth_max=_env_float("REGIME_TREND_DOWN_BREADTH_MAX", 40.0),
                 trend_down_leadership_max=_env_float("REGIME_TREND_DOWN_LEADERSHIP_MAX", 45.0),
