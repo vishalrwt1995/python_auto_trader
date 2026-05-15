@@ -116,6 +116,44 @@ class FirestoreStateStore:
     def clear_fired_today(self, symbol: str, side: str) -> None:
         self.delete("fired_signals", self.fired_key(symbol, side))
 
+    def try_acquire_fired_today(self, symbol: str, side: str) -> bool:
+        """Atomic check-and-set: True if newly acquired, False if already fired.
+
+        Audit 2026-05-15 (Layer 21.1): the prior pattern was a GET
+        (`already_fired_today`) followed later by SET (`mark_fired_today`).
+        Two concurrent Cloud Run instances scanning the same symbol+side
+        could both pass the GET before either SET, then both fire orders.
+        This method does GET+SET inside a Firestore transaction, so the
+        winner is the only one that sees the slot as free.
+
+        On failure (slot already held), returns False — callers must skip
+        the entry as if `already_fired_today` had returned True.
+
+        Callers that take ownership must call `clear_fired_today(symbol, side)`
+        on any error path (e.g. broker API failure, paper-save exception)
+        so the symbol isn't permanently blocked for the day on a transient
+        outage.
+        """
+        from google.cloud import firestore
+
+        key = self.fired_key(symbol, side)
+        doc_ref = self._doc("fired_signals", key)
+        tx = self._db().transaction()
+
+        @firestore.transactional
+        def _txn(transaction) -> bool:
+            snap = doc_ref.get(transaction=transaction)
+            if snap.exists:
+                return False
+            transaction.set(doc_ref, {
+                "symbol": symbol.upper(),
+                "side": side.upper(),
+                "updated_at": now_utc(),
+            })
+            return True
+
+        return bool(_txn(tx))
+
     def save_pending_order(self, ref_id: str, payload: dict[str, Any], kind: str = "entry") -> None:
         self.set_json("pending_orders", f"{kind}:{ref_id}", {"kind": kind, **payload})
 

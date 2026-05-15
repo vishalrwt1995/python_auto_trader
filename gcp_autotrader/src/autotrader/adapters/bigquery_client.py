@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -44,16 +45,42 @@ class BigQueryClient:
     def _table_ref(self, table: str) -> str:
         return f"{self._project}.{self._dataset}.{table}"
 
+    # Audit 2026-05-15 (Layer 18): _insert was single-attempt — transient GCP
+    # blips lost scan_decisions / signals data silently. order_service had its
+    # own retry wrapper for trades only; everything else was unprotected.
+    # Now retried in-adapter so every table benefits: 3 attempts with
+    # exponential backoff (1s, 2s) for client-side exceptions; row-level
+    # `errors` from BigQuery (schema mismatch, type error) are not retried
+    # because they will fail identically on every attempt.
+    _MAX_INSERT_ATTEMPTS = 3
+
     def _insert(self, table: str, rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
-        try:
-            client = self._get_client()
-            errors = client.insert_rows_json(self._table_ref(table), rows)
-            if errors:
-                log.warning("bq_insert_errors table=%s errors=%s", table, errors[:3])
-        except Exception:
-            log.exception("bq_insert_failed table=%s rows=%d", table, len(rows))
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_INSERT_ATTEMPTS + 1):
+            try:
+                client = self._get_client()
+                errors = client.insert_rows_json(self._table_ref(table), rows)
+                if errors:
+                    # Row-level rejects (bad schema, bad types). Retrying
+                    # won't help; log once and drop.
+                    log.warning("bq_insert_errors table=%s errors=%s", table, errors[:3])
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self._MAX_INSERT_ATTEMPTS:
+                    wait = 2 ** (attempt - 1)  # 1s, 2s
+                    log.warning(
+                        "bq_insert_retry table=%s attempt=%d wait=%ds err=%s",
+                        table, attempt, wait, type(exc).__name__,
+                    )
+                    time.sleep(wait)
+        log.error(
+            "bq_insert_failed_permanent table=%s rows=%d after %d attempts err=%s",
+            table, len(rows), self._MAX_INSERT_ATTEMPTS,
+            type(last_exc).__name__ if last_exc else "unknown",
+        )
 
     # ------------------------------------------------------------------ #
     # Public insert methods

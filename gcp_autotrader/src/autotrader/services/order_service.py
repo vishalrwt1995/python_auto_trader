@@ -21,18 +21,22 @@ logger = logging.getLogger(__name__)
 
 
 def _bq_insert_with_retry(bq: BigQueryClient, trade_row: dict[str, Any], tag: str, max_attempts: int = 3) -> None:
-    """Insert a trade row to BigQuery with exponential backoff retries."""
-    for attempt in range(1, max_attempts + 1):
-        try:
-            bq.insert_trade(trade_row)
-            return
-        except Exception:
-            if attempt < max_attempts:
-                wait = 2 ** attempt
-                logger.warning("bq_trade_insert_retry tag=%s attempt=%d wait=%ds", tag, attempt, wait)
-                time.sleep(wait)
-            else:
-                logger.error("bq_trade_insert_failed_permanent tag=%s after %d attempts", tag, max_attempts)
+    """Insert a trade row to BigQuery.
+
+    Audit 2026-05-15 (Layer 18.3): retry logic moved into the adapter's
+    `_insert` so every BQ table (trades, signals, scan_decisions, ...)
+    gets the same retry treatment — previously only trades had backoff.
+    This wrapper kept for callers that want a tag-tracked log line; the
+    `max_attempts` arg is retained for backwards compatibility but
+    ignored (adapter uses its own constant).
+    """
+    del max_attempts  # retained for signature compatibility only
+    try:
+        bq.insert_trade(trade_row)
+    except Exception:
+        # `_insert` already swallows broker-side exceptions and logs them;
+        # this catch only fires on truly unexpected wrapper-level errors.
+        logger.error("bq_trade_insert_failed_permanent tag=%s", tag, exc_info=True)
 
 
 def _bq_insert_attribution_best_effort(bq: BigQueryClient, row: dict[str, Any], tag: str) -> None:
@@ -512,7 +516,15 @@ class OrderService:
         allow_live_orders: bool = False,
         wl_type: str = "intraday",
     ) -> dict[str, Any] | None:
-        if self.state.already_fired_today(symbol, side):
+        # Audit 2026-05-15 (Layer 21.1): atomic check-and-set replaces the
+        # prior check-then-set pattern. Two concurrent Cloud Run instances
+        # used to race past the bare `already_fired_today` GET and both
+        # place orders for the same symbol+side. `try_acquire_fired_today`
+        # does GET+SET in a Firestore transaction so the loser is rejected.
+        # IMPORTANT: every error path below MUST clear_fired_today(symbol,
+        # side) so a transient broker outage doesn't permanently block the
+        # symbol for the rest of the trading day.
+        if not self.state.try_acquire_fired_today(symbol, side):
             return {"skipped": "duplicate_idempotency"}
 
         # Critical safety guard: never place an order without a valid stop-loss.
@@ -523,9 +535,11 @@ class OrderService:
                 "place_entry_order blocked: sl_price=%.2f symbol=%s side=%s qty=%d — refusing to place order without valid SL",
                 sl_price, symbol, side, qty,
             )
+            self.state.clear_fired_today(symbol, side)  # release atomic acquire — no order placed
             return {"error": "sl_price_zero_or_negative", "symbol": symbol, "sl_price": sl_price}
         if qty <= 0:
             logger.error("place_entry_order blocked: qty=%d symbol=%s — refusing to place zero-qty order", qty, symbol)
+            self.state.clear_fired_today(symbol, side)  # release atomic acquire — no order placed
             return {"error": "qty_zero_or_negative", "symbol": symbol, "qty": qty}
 
         # 2026-04-21 post-mortem: SL/target side validation.
@@ -542,12 +556,14 @@ class OrderService:
                     "place_entry_order blocked: BUY with SL >= entry (%.4f >= %.4f) symbol=%s — inverted stop",
                     sl_price, entry_price, symbol,
                 )
+                self.state.clear_fired_today(symbol, side)  # release — no order placed
                 return {"error": "sl_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "sl": sl_price}
             if target <= entry_price:
                 logger.error(
                     "place_entry_order blocked: BUY with target <= entry (%.4f <= %.4f) symbol=%s — inverted target",
                     target, entry_price, symbol,
                 )
+                self.state.clear_fired_today(symbol, side)  # release — no order placed
                 return {"error": "target_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "target": target}
         elif _side_u == "SELL":
             if sl_price <= entry_price:
@@ -555,12 +571,14 @@ class OrderService:
                     "place_entry_order blocked: SELL with SL <= entry (%.4f <= %.4f) symbol=%s — inverted stop",
                     sl_price, entry_price, symbol,
                 )
+                self.state.clear_fired_today(symbol, side)  # release — no order placed
                 return {"error": "sl_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "sl": sl_price}
             if target >= entry_price:
                 logger.error(
                     "place_entry_order blocked: SELL with target >= entry (%.4f >= %.4f) symbol=%s — inverted target",
                     target, entry_price, symbol,
                 )
+                self.state.clear_fired_today(symbol, side)  # release — no order placed
                 return {"error": "target_on_wrong_side", "symbol": symbol, "side": side, "entry": entry_price, "target": target}
 
         # Minimum SL distance floor: 0.8% of entry. Stops tighter than this on
@@ -641,7 +659,8 @@ class OrderService:
                 round(entry_price, 2), 0.0, round(atr, 4),
                 "OPEN", pos_tag, "",
             ])
-            self.state.mark_fired_today(symbol, side)
+            # Audit 2026-05-15: `mark_fired_today` removed — `try_acquire_fired_today`
+            # at function top already holds the slot atomically.
             # M0.5 paper GTT — write a paper_gtts row for every paper entry
             # (intraday + swing) so ws_monitor's 60s reconciler can fire the
             # stop if the tick stream stalls. Swing paper previously had no
@@ -690,6 +709,10 @@ class OrderService:
                 )
         except Exception as exc:
             logger.exception("live_order_failed symbol=%s product=%s", symbol, product)
+            # Release the atomic acquire — Upstox API failure is typically
+            # transient (rate-limit, network blip); the next scan cycle
+            # should be free to retry rather than blocked all day.
+            self.state.clear_fired_today(symbol, side)
             return {"error": str(exc), "status": "API_FAIL"}
 
         order_id = str(
@@ -753,7 +776,7 @@ class OrderService:
                         logger.exception(
                             "emergency_exit_after_gtt_fail_failed tag=%s", pos_tag,
                         )
-            self.state.mark_fired_today(symbol, side)
+            # Audit 2026-05-15: `mark_fired_today` removed — slot acquired atomically up front.
             # Save order record to Firestore
             self.state.save_order(ref_id, {
                 "ref_id": ref_id,
@@ -796,7 +819,9 @@ class OrderService:
             },
             kind="entry",
         )
-        self.state.mark_fired_today(symbol, side)
+        # Audit 2026-05-15: `mark_fired_today` removed — slot acquired atomically up front.
+        # Pending-recon path: keep the slot held so a concurrent scan doesn't
+        # fire a second order while we wait for fill confirmation.
         return {"order_id": order_id, "order_status": "PENDING_RECON"}
 
     # ------------------------------------------------------------------ #

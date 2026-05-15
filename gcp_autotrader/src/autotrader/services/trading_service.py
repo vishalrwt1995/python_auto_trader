@@ -691,10 +691,27 @@ class TradingService:
             # that all lose together when the breakout fails (same market condition).
             _open_positions_all = self.state.list_open_positions()
             _portfolio_strategies: dict[str, int] = {}
+            _open_book_risk = 0.0
             for _op in _open_positions_all:
                 _strat = str(_op.get("strategy") or "").strip().upper()
                 if _strat and _strat not in ("AUTO", "DEFAULT", ""):
                     _portfolio_strategies[_strat] = _portfolio_strategies.get(_strat, 0) + 1
+                # Audit 2026-05-15 (Layer 21.6): sum open positional risk
+                # (= sum of max_loss across all OPEN positions) for the
+                # capital-depletion gate below. `max_loss` is the per-position
+                # qty × |entry - sl| already computed at sizing time. Falls
+                # back to qty × |entry - sl| if max_loss field missing on
+                # legacy rows.
+                try:
+                    _mloss = float(_op.get("max_loss") or 0.0)
+                    if _mloss <= 0.0:
+                        _q = float(_op.get("qty") or 0.0)
+                        _ep = float(_op.get("entry_price") or 0.0)
+                        _sp = float(_op.get("sl_price") or 0.0)
+                        _mloss = _q * abs(_ep - _sp) if _q and _ep and _sp else 0.0
+                    _open_book_risk += abs(_mloss)
+                except Exception:
+                    pass
             _MAX_SAME_STRATEGY = 2   # max 2 positions of the same setup type at once
 
             # Earnings blackout: read Firestore config/earnings_blackout document.
@@ -1207,6 +1224,18 @@ class TradingService:
                 _sym_upper = str(w.symbol).strip().upper()
                 if pos.qty == 0:
                     policy_block_reason = "sl_too_wide_for_risk_budget"
+                # Audit 2026-05-15 (Layer 21.6): capital-depletion gate.
+                # Even worst-case (every open position + this new trade hits
+                # SL) the account must remain solvent. Without this, a
+                # drawdown sequence (e.g. -₹80k of ₹100k capital + ₹25k
+                # open risk) would still allow a new ₹20k-risk trade,
+                # pushing total worst-case loss past capital.
+                # Formula: capital + today_realized_pnl (negative on a
+                # losing day) - open_book_risk must cover the new trade's
+                # max_loss. PortfolioBook channel throttles (when enabled)
+                # do not hard-block this; today_pnl gate is realized-only.
+                elif (cfg.capital + _today_pnl - _open_book_risk) < float(pos.max_loss):
+                    policy_block_reason = "capital_exhausted"
                 elif _sym_upper in _recent_exits:
                     # Batch 2.1 (2026-04-22): symbol closed a position in the
                     # last `reentry_cooldown_minutes` — re-staging immediately
