@@ -152,6 +152,10 @@ class WsMonitorService:
         # M0.5 paper GTT reconciler — 60s fallback so paper stops still fire
         # if the ws tick stream stalls.
         paper_gtt_task = asyncio.create_task(self._paper_gtt_reconciler())
+        # Audit 2026-05-15 (Layer 14.7): REST fallback for LIVE positions
+        # when WS is silent. Paper had _paper_gtt_reconciler; live had no
+        # failover at all, leaving up to ~95s unprotected on WS death.
+        live_rest_task = asyncio.create_task(self._live_position_rest_reconciler())
         await self._stop_event.wait()
         logger.info("ws_monitor stopping")
         self.ws.stop()
@@ -159,7 +163,8 @@ class WsMonitorService:
         refresh_task.cancel()
         eod_task.cancel()
         paper_gtt_task.cancel()
-        for t in (monitor_task, refresh_task, eod_task, paper_gtt_task):
+        live_rest_task.cancel()
+        for t in (monitor_task, refresh_task, eod_task, paper_gtt_task, live_rest_task):
             try:
                 await t
             except (asyncio.CancelledError, Exception):
@@ -996,6 +1001,127 @@ class WsMonitorService:
                         asyncio.create_task(self._do_exit(tag, ikey, "SL_HIT_PAPER_GTT"))
             except Exception:
                 logger.exception("paper_gtt_reconciler_cycle_failed")
+
+    # ------------------------------------------------------------------ #
+    # Live position REST fallback (Layer 14.7 — audit 2026-05-15)
+    # ------------------------------------------------------------------ #
+
+    # Tunables — exposed as class constants so they're easy to find and
+    # adjust without diving into the method body.
+    LIVE_REST_POLL_INTERVAL = 30      # seconds between cycles
+    LIVE_REST_STALE_THRESHOLD = 30    # WS-silence threshold to trigger REST
+    LIVE_REST_MAX_POSITIONS = 50      # safety cap per cycle
+
+    async def _live_position_rest_reconciler(self) -> None:
+        """REST-poll LTPs for LIVE positions when the WS goes silent.
+
+        Audit 2026-05-15 (Layer 14.7): the existing _paper_gtt_reconciler
+        covers paper positions on a 60s REST poll. LIVE positions had no
+        equivalent — a WS death plus the client's own 90s reconnect
+        timeout left up to ~95s where live trailing stops would not fire
+        even if price was crashing through SL. This task closes that gap.
+
+        Strategy:
+          - Sleep LIVE_REST_POLL_INTERVAL (30s) between cycles
+          - Skip if WS is healthy (last tick within LIVE_REST_STALE_THRESHOLD)
+          - Skip if no LIVE positions are open
+          - For each live position, fetch LTP via REST and apply a SIMPLE
+            SL/target check (no FSM, no trailing — those need WS history).
+            If price has crossed the current sl_price or target as last
+            persisted, fire `_do_exit` with reason `*_REST_FALLBACK`.
+
+        Worst-case detection lag: poll_interval + stale_threshold = ~60s,
+        down from ~95s.  REST cost cap: at most one round of get_quote
+        calls per 30s, only when WS is dead.
+        """
+        while True:
+            try:
+                await asyncio.sleep(self.LIVE_REST_POLL_INTERVAL)
+            except asyncio.CancelledError:
+                return
+            try:
+                # Gate 1: only act when the WS is actually silent. A healthy
+                # WS handles SL/target via _on_quote and we MUST NOT
+                # double-fire exits.
+                last_tick = float(getattr(self.ws, "_last_tick_ts", 0.0) or 0.0)
+                silence = time.time() - last_tick if last_tick > 0 else 0.0
+                if last_tick > 0 and silence < self.LIVE_REST_STALE_THRESHOLD:
+                    continue
+
+                # Gate 2: only LIVE positions (paper=False explicitly).
+                # Paper positions are handled by _paper_gtt_reconciler. If
+                # the `paper` field is missing or True we skip — we'd
+                # rather miss an edge case than double-route an exit.
+                live_items = [
+                    (ikey, dict(pos)) for ikey, pos in list(self._positions.items())
+                    if bool(pos) and pos.get("paper") is False
+                ]
+                if not live_items:
+                    continue
+
+                logger.warning(
+                    "live_rest_reconciler_active ws_silence_s=%.1f live_positions=%d",
+                    silence, len(live_items),
+                )
+
+                # Bound work per cycle (defensive — if 200 positions somehow
+                # open, we don't blow our REST quota in one go).
+                if len(live_items) > self.LIVE_REST_MAX_POSITIONS:
+                    live_items = live_items[: self.LIVE_REST_MAX_POSITIONS]
+
+                from autotrader.container import get_container
+                quote_svc = get_container().upstox
+
+                for ikey, pos in live_items:
+                    tag = str(pos.get("position_tag") or "")
+                    if not tag or not ikey or tag in self._exiting:
+                        continue
+                    side = str(pos.get("side", "BUY")).upper()
+                    sl = float(pos.get("sl_price") or 0.0)
+                    target = float(pos.get("target") or 0.0)
+                    if sl <= 0 or target <= 0:
+                        # Defensive: a position with no SL or no target
+                        # should never have shipped, but if it did, we
+                        # can't safely fire a REST exit either.
+                        continue
+                    try:
+                        ltp = float(quote_svc.get_quote(ikey).ltp or 0)
+                    except Exception:
+                        logger.debug(
+                            "live_rest_quote_failed tag=%s ikey=%s",
+                            tag, ikey, exc_info=True,
+                        )
+                        continue
+                    if ltp <= 0:
+                        continue
+
+                    # Simple SL/target check — the FSM/trailing logic that
+                    # runs in _on_quote needs tick history we don't have
+                    # here; fall back to the LAST PERSISTED sl_price and
+                    # target. These get updated by _on_quote when the WS
+                    # was last alive, so they reflect any breakeven move
+                    # or regime-tighten that already happened.
+                    exit_reason = ""
+                    if side == "BUY":
+                        if ltp <= sl:
+                            exit_reason = "SL_HIT_REST_FALLBACK"
+                        elif ltp >= target:
+                            exit_reason = "TARGET_HIT_REST_FALLBACK"
+                    else:  # SELL
+                        if ltp >= sl:
+                            exit_reason = "SL_HIT_REST_FALLBACK"
+                        elif ltp <= target:
+                            exit_reason = "TARGET_HIT_REST_FALLBACK"
+
+                    if exit_reason:
+                        logger.warning(
+                            "live_rest_reconciler_firing tag=%s ltp=%.2f sl=%.2f target=%.2f side=%s reason=%s",
+                            tag, ltp, sl, target, side, exit_reason,
+                        )
+                        self._exiting.add(tag)
+                        asyncio.create_task(self._do_exit(tag, ikey, exit_reason))
+            except Exception:
+                logger.exception("live_rest_reconciler_cycle_failed")
 
     # ------------------------------------------------------------------ #
     # Disconnect handler

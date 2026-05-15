@@ -123,6 +123,30 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
+    # RANGE_ROTATING (audit 2026-05-15, Layer 4 Option A).
+    # NIFTY ranges but mid-caps / one sector trends — May 13/14/15 pattern.
+    # Trend setups should get TREND_UP-ish boosts (so they aren't haircut
+    # the way they are in plain RANGE), but BREAKOUT stays hard-blocked
+    # downstream because false breakouts are the most common loser at
+    # range edges. Mean-reversion setups kept at a moderate 0.9 — they
+    # can still work on the index half of a rotating day, but they're
+    # not the primary edge here.
+    "RANGE_ROTATING": {
+        "BREAKOUT": 1.0,          # hard-blocked downstream; multiplier kept neutral
+        "SHORT_BREAKDOWN": 0.5,
+        "PULLBACK": 1.2,          # individual trending stocks pulling back are the bread-and-butter setup
+        "SHORT_PULLBACK": 0.5,
+        "MEAN_REVERSION": 0.9,    # works on the index half — not the rotating sector half
+        "VWAP_REVERSAL": 0.9,
+        "VWAP_TREND": 1.2,        # primary edge — stocks trending against a ranging index
+        "OPEN_DRIVE": 1.0,
+        "PHASE1_MOMENTUM": 1.0,
+        "PHASE1_REVERSAL": 0.8,
+        "MOMENTUM": 1.3,          # leaders in the rotating sector extend
+        "MORNING_FADE": 0.5,      # hard-blocked downstream
+        "AUTO": 1.0,
+        "DEFAULT": 1.0,
+    },
 }
 
 # Floor and ceiling to prevent extreme distortion
@@ -169,6 +193,16 @@ def regime_strategy_multiplier(
         if strategy_upper not in _counter_trend_strategies:
             mult = min(mult, 0.6)
     elif regime_upper == "TREND_DOWN" and direction == "BUY":
+        if strategy_upper not in _counter_trend_strategies:
+            mult = min(mult, 0.6)
+    elif regime_upper == "RANGE_ROTATING" and direction == "SELL":
+        # Audit 2026-05-15 (Layer 4 Option A): RANGE_ROTATING fires on
+        # bullish-breadth + leadership-up days (the sector that's rotating
+        # is rotating UP — that's why breadth and leadership are elevated
+        # while NIFTY itself ranges). SELL trades in that environment are
+        # counter-trend by definition; dampen them the same way TREND_UP
+        # does, except for the explicit counter-trend setups whose edge
+        # IS shorting strength.
         if strategy_upper not in _counter_trend_strategies:
             mult = min(mult, 0.6)
 
@@ -254,6 +288,18 @@ _HARD_BLOCKS: dict[str, set[str]] = {
     # Pre-fix RECOVERY had no entry in _HARD_BLOCKS → silently allowed all
     # strategies. Add MORNING_FADE explicitly.
     "RECOVERY":   {"MORNING_FADE"},
+    # RANGE_ROTATING (audit 2026-05-15): block the same loser set as TREND_UP
+    # so the regime-loosening doesn't silently re-admit known-bad strategies.
+    # MORNING_FADE block matches all other regimes (thesis dead). BREAKOUT
+    # blocked because false-breakouts at range edges are this regime's
+    # signature failure mode.
+    "RANGE_ROTATING": {
+        "BREAKOUT",
+        "SHORT_BREAKDOWN",
+        "SHORT_PULLBACK",
+        "PHASE1_MOMENTUM",
+        "MORNING_FADE",
+    },
 }
 
 

@@ -870,6 +870,23 @@ class MarketBrainService:
             and volatility_stress_score <= t.trend_up_hi_stress_max
         ):
             regime = "TREND_UP"
+        # RANGE_ROTATING (audit 2026-05-15, Layer 4 Option A).
+        # Captures the sector-rotation pattern that produced 3 consecutive
+        # 0-trade days on May 13/14/15: NIFTY itself ranged (trend_score
+        # well below 70) but mid-caps / one sector ETF trended sharply.
+        # The high-breadth alternative above wants breadth ≥ 80; that
+        # cliff misses rotation days where breadth lands in the 60-75
+        # zone. RANGE_ROTATING fires when breadth + leadership clear a
+        # mid-range bar AND stress isn't elevated. It uses TREND_UP-like
+        # affinity multipliers (see regime_affinity.py) so VWAP_TREND /
+        # PULLBACK / MOMENTUM aren't haircut by 0.7-0.8× the way they
+        # are in plain RANGE.
+        elif (
+            breadth_score >= t.range_rotating_breadth_min
+            and leadership_score >= t.range_rotating_leadership_min
+            and volatility_stress_score <= t.range_rotating_stress_max
+        ):
+            regime = "RANGE_ROTATING"
         elif (
             trend_score <= t.trend_down_trend_max
             and breadth_score <= t.trend_down_breadth_max

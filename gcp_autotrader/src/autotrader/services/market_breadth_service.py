@@ -177,7 +177,17 @@ class MarketBreadthService:
             + 0.05 * self._norm(vw_ad_ratio, 0.6, 1.8)
         )
         if sector_scores:
-            score01 = (score01 * 0.95) + (0.05 * self._norm(sector_breadth_pct, 35.0, 80.0))
+            # Audit 2026-05-15 (Layer 4 Issue 2): sector_breadth was weighted
+            # at 5% — with stock-level breadth at ~50% and sectors at 80%,
+            # final breadth shifted by only ~2.5 points. Result: on
+            # sector-rotation days (May 13/14/15) breadth_score stayed
+            # below the TREND_UP gate (62) and the day was misclassified
+            # as RANGE → trend-setup haircut → 0 trades. Bumped to 25%
+            # so a strong sector-breadth pulls the score across the gate
+            # when stock-level participation is mid-range. Paired with the
+            # RANGE_ROTATING regime added in market_brain_service so the
+            # increased weight has somewhere to land.
+            score01 = (score01 * 0.75) + (0.25 * self._norm(sector_breadth_pct, 35.0, 80.0))
         score = max(0.0, min(100.0, score01 * 100.0))
 
         quality = "HIGH" if processed >= 120 else ("MEDIUM" if processed >= 60 else "LOW")
