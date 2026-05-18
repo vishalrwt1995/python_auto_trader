@@ -14,6 +14,7 @@ def determine_direction(
     regime: RegimeSnapshot,
     setup: str = "",
     wl_type: str = "intraday",
+    daily_bias: "DailyBias | None" = None,
 ) -> Direction:
     if regime.regime == "AVOID":
         return "HOLD"
@@ -30,6 +31,41 @@ def determine_direction(
     # can decide on the actual fade-thesis gates instead.
     if _setup_upper == "MORNING_FADE":
         return "SELL"
+
+    # MEAN_REVERSION / VWAP_REVERSAL are also contrarian by construction —
+    # BUY at oversold, SELL at overbought, HOLD in between. Audit 2026-05-19
+    # (Batch E) found 105 misfired swing MR SELLs/day on May 18 where
+    # intraday RSI was ~37 (oversold) but the democratic vote went SELL
+    # because EMA stack was bearish + MACD was bearish. The downstream
+    # gate then vetoed with `swing_mr_daily_rsi_not_overbought` because
+    # the stock wasn't actually overbought on the daily timeframe.
+    #
+    # Fix: force-direction purely from RSI, ALIGNED TO THE GATE'S TIMEFRAME.
+    # - Intraday MR uses ind.rsi.curr (matches intraday MR gate at line 529)
+    # - Swing MR uses daily_bias.rsi_daily (matches swing MR gate at line 789)
+    # Regime-aware thresholds match the gate's RANGE/CHOP vs other bands.
+    if _setup_upper in ("MEAN_REVERSION", "VWAP_REVERSAL"):
+        _regime_str = str(getattr(regime, "regime", "") or "").strip().upper()
+        _is_range_like = _regime_str in ("RANGE", "CHOP")
+        if _is_swing and daily_bias is not None and float(daily_bias.rsi_daily or 0) > 0:
+            _rsi = float(daily_bias.rsi_daily)
+            # Match swing MR gate (scoring.py ~789):
+            #   RANGE/CHOP:  BUY ≤ 45, SELL ≥ 55
+            #   Other:       BUY ≤ 35, SELL ≥ 65
+            _buy_max = 45.0 if _is_range_like else 35.0
+            _sell_min = 55.0 if _is_range_like else 65.0
+        else:
+            _rsi = float(ind.rsi.curr)
+            # Match intraday MR gate (scoring.py ~529):
+            #   RANGE/CHOP:  BUY ≤ 45, SELL ≥ 58
+            #   Other:       BUY ≤ 40, SELL ≥ 60
+            _buy_max = 45.0 if _is_range_like else 40.0
+            _sell_min = 58.0 if _is_range_like else 60.0
+        if _rsi <= _buy_max:
+            return "BUY"
+        if _rsi >= _sell_min:
+            return "SELL"
+        return "HOLD"
 
     bull = 0
     bear = 0

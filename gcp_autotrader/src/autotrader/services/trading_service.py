@@ -968,6 +968,7 @@ class TradingService:
                 direction = determine_direction(
                     ind, regime, setup=w.strategy,
                     wl_type=("swing" if _is_swing else "intraday"),
+                    daily_bias=_daily_bias,
                 )
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy, daily_bias=_daily_bias, setup=w.strategy)
                 # Apply regime-strategy affinity multiplier
