@@ -11,7 +11,18 @@ from autotrader.time_utils import IST, parse_any_ts
 
 @dataclass
 class MarketLeadershipService:
-    leader_sample_size: int = 120
+    # Audit 2026-05-19 (Batch G — Layer 4 Bug #3):
+    # Sample size was 120 (top-by-turnover). Captures only mega/large caps.
+    # On May 18-19, NIFTY-large-caps held up while mid/small caps crashed
+    # (breadth=26-43). Top-120 leadership stayed high (~71) → brain stuck
+    # in RANGE → SHORT setups blocked → 0-1 trades/day for a week.
+    # Widening to 400 covers ~Nifty500-equivalent (large + mid caps),
+    # so leadership score falls when mid-caps break, allowing brain to
+    # transition to TREND_DOWN and unlock short setups.
+    # Trade-off: leadership becomes more reactive to broad weakness;
+    # thresholds tuned to top-120 (TREND_UP entry 56, TREND_DOWN entry 45)
+    # may need recalibration if false-positives emerge.
+    leader_sample_size: int = 400
     min_daily_bars: int = 40
 
     @staticmethod
