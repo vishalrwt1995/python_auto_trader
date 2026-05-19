@@ -16,7 +16,14 @@ from autotrader.time_utils import now_ist, now_utc, parse_any_ts
 app = FastAPI(title="GCP AutoTrader", version="0.1.0")
 
 _DASHBOARD_ORIGINS = [
+    # Cloud Run gives every service BOTH a project-number-based URL and a
+    # service-hash-based URL ("legacy"). The browser actually loads whichever
+    # the user pastes; we need to whitelist both or CORS preflight 400s and
+    # the dashboard sees no data. Audit 2026-05-19: dashboard at the hash
+    # URL was returning 400 on OPTIONS because only the project-number URL
+    # was listed here.
     "https://autotrader-dashboard-147177395303.asia-south1.run.app",
+    "https://autotrader-dashboard-eakz7v7lda-el.a.run.app",
     # Allow localhost for local development
     "http://localhost:3000",
     "http://localhost:3001",
