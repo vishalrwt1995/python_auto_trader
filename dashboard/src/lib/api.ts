@@ -1,4 +1,13 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+// Audit 2026-05-19: NEXT_PUBLIC_API_URL was not set on any dashboard Cloud
+// Run revision; Next.js bakes NEXT_PUBLIC_* at build time, so a runtime env
+// var doesn't help. With the prior empty-string fallback every API call
+// went to the dashboard's own origin (Next.js 404 HTML), explaining why
+// pages loaded but data didn't. Hardcoding the production API URL as the
+// fallback is the lowest-friction fix; setting NEXT_PUBLIC_API_URL at
+// build time still overrides this (useful for dev/staging).
+const API_URL =
+  process.env.NEXT_PUBLIC_API_URL ??
+  "https://autotrader-147177395303.asia-south1.run.app";
 
 async function getAuthToken(): Promise<string> {
   const { auth } = await import("./firebase");
