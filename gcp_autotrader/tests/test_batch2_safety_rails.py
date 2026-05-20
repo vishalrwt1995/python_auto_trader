@@ -85,16 +85,22 @@ def test_firestore_state_exposes_recently_exited_symbols():
 # ─── 2.2: entry-window cutoff 14:00 → 13:30 ────────────────────────────
 
 
-def test_entry_window_cutoff_is_13_30():
-    """Cut-off must be 13:30 IST (810 minutes)."""
+def test_entry_window_cutoff_is_13_30_for_intraday():
+    """Intraday cut-off must remain 13:30 IST (810 minutes).
+
+    2026-05-20 (Batch H): `is_entry_window_open_ist` now takes a wl_type
+    parameter. The intraday branch keeps the 13:30 cutoff (810 min). Swing
+    has its own wider window (09:15-15:00). This test verifies the intraday
+    side hasn't drifted.
+    """
     src = inspect.getsource(time_utils)
-    assert "ist_minutes() <= 810" in src, (
-        "entry window cutoff is no longer 13:30 (810 min) — Batch 2.2. "
+    assert "m <= 810" in src or "ist_minutes() <= 810" in src, (
+        "Intraday entry window cutoff is no longer 13:30 (810 min). "
         "If this needs to shift again, update the test WITH a post-mortem "
         "reference, don't revert silently."
     )
-    assert "ist_minutes() <= 840" not in src, (
-        "14:00 (840 min) cutoff still present — did Batch 2.2 get reverted?"
+    assert "<= 840" not in src.split("swing")[0], (
+        "14:00 (840 min) cutoff present in intraday branch — did Batch 2.2 get reverted?"
     )
 
 

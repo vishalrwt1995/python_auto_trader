@@ -1373,7 +1373,7 @@ class TradingService:
                 # Force mode is for scanner diagnostics/backfill only; live/paper entries still respect entry window.
                 # Swing uses _affinity_score (pre-brain-haircut); intraday uses adjusted_score. See note above.
                 _score_for_threshold = _affinity_score if _is_swing else adjusted_score
-                if direction != "HOLD" and _score_for_threshold >= dynamic_min_score and is_entry_window_open_ist() and not policy_block_reason:
+                if direction != "HOLD" and _score_for_threshold >= dynamic_min_score and is_entry_window_open_ist("swing" if _is_swing else "intraday") and not policy_block_reason:
                     qualified += 1
                     reason = (
                         f"Score={adjusted_score} RSI={ind.rsi.curr:.1f} VolR={ind.volume.ratio:.2f} "

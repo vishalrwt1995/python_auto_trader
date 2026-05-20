@@ -246,7 +246,13 @@ _HARD_BLOCKS: dict[str, set[str]] = {
         "BREAKOUT", "SHORT_BREAKDOWN", "PULLBACK", "SHORT_PULLBACK",
         "OPEN_DRIVE", "PHASE1_MOMENTUM",
         "MOMENTUM",    # relative-strength leaders fail when index whipsaws
-        "MORNING_FADE",  # 2026-05-08: backtest 17% WR even in 1.3× affinity regime
+        # 2026-05-20 (Batch H): MORNING_FADE re-enabled in CHOP. The
+        # 2026-05-08 17%-WR backtest was 30 trades — small sample, possibly
+        # tainted by the buggy replay infrastructure. Live data 2026-05-20
+        # produced 10 score-100 MORNING_FADE signals that ALL got blocked
+        # by hard_block — zero shot at validating in live paper. Re-enable
+        # in CHOP/RANGE (the mean-reverting regimes where the fade thesis
+        # is structurally correct) to gather real evidence.
     },
     # RANGE: block pure-breakout strategies (fakeouts common) and OPEN_DRIVE
     # (needs gap/momentum at open). Allow VWAP_TREND — individual stocks trend
@@ -258,7 +264,9 @@ _HARD_BLOCKS: dict[str, set[str]] = {
                                             #   live OLECTRA loss + audit data (3963
                                             #   PHASE1_MOMENTUM scans, 0 qualified)
         "SHORT_PULLBACK",  # 2026-05-08: 4/4 backtest losses; shorting in RANGE without bearish structure
-        "MORNING_FADE",  # 2026-05-08: backtest 17% WR / -₹64k in 1.4× affinity regime
+        # 2026-05-20 (Batch H): MORNING_FADE re-enabled in RANGE (see CHOP
+        # comment). The strategy was hard-blocked everywhere on a 30-trade
+        # backtest; live evidence is needed.
     },
     # PANIC: only allow counter-trend oversold bounces (MR) or short-breakdown
     # continuation. Everything else gets shredded.
@@ -283,7 +291,7 @@ _HARD_BLOCKS: dict[str, set[str]] = {
                              #   Allowed in PANIC/TREND_DOWN/RECOVERY where Phase 2 may
                              #   struggle and Phase 1 fallback adds value.
     },
-    "TREND_DOWN": {"BREAKOUT", "MORNING_FADE"},  # 2026-05-08: MORNING_FADE thesis dead in all regimes
+    "TREND_DOWN": {"BREAKOUT"},  # 2026-05-20 (Batch H): MORNING_FADE re-enabled — a pop in a down market is a legitimate fade thesis
     # 2026-05-08: RECOVERY added to enforce MORNING_FADE block consistently.
     # Pre-fix RECOVERY had no entry in _HARD_BLOCKS → silently allowed all
     # strategies. Add MORNING_FADE explicitly.

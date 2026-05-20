@@ -38,28 +38,51 @@ from autotrader.domain.regime_affinity import (
 # ─── 1. MORNING_FADE kill ────────────────────────────────────────────────
 
 
-def test_morning_fade_hard_blocked_in_all_regimes():
-    """MORNING_FADE was previously only blocked in TREND_UP. Backtest data
-    showed 17% WR even in RANGE (its supposed 1.4× affinity sweet spot).
-    Now hard-blocked everywhere pending fundamental redesign."""
-    for regime in ("TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"):
+def test_morning_fade_hard_blocked_only_in_trend_up_panic_recovery():
+    """2026-05-20 (Batch H): MORNING_FADE re-enabled in CHOP, RANGE, TREND_DOWN.
+
+    The 2026-05-08 blanket hard-block was based on a 30-trade backtest with
+    17% WR — small sample, possibly affected by buggy backtest infra. Live
+    data 2026-05-20 produced 10 score-100 MORNING_FADE signals that ALL
+    got blocked, meaning we never got real evidence either way.
+
+    Re-enabled in the mean-reverting / fade-friendly regimes:
+      - CHOP:       pure mean-revert regime, fade thesis correct
+      - RANGE:      mean-revert regime, fade thesis correct
+      - TREND_DOWN: a morning pop in a down market is a valid fade
+
+    Still blocked where fading is structurally wrong:
+      - TREND_UP:   fading rallies in a bull market = catching knives
+      - PANIC:      PANIC opens often gap-down, inverts the "stock popped" thesis
+      - RECOVERY:   continuation regime, fading goes against the trend
+    """
+    blocked_regimes = ("TREND_UP", "PANIC", "RECOVERY")
+    allowed_regimes = ("CHOP", "RANGE", "TREND_DOWN")
+    for regime in blocked_regimes:
         assert regime_hard_blocks_strategy(regime, "MORNING_FADE"), (
-            f"MORNING_FADE must be hard-blocked in {regime} regime — "
-            "2026-05-08 audit found 17% WR in RANGE backtest, thesis dead. "
-            "Re-enabling without bearish-confirmation gates (rejection candle, "
-            "RSI>70, volume fade) will silently bleed."
+            f"MORNING_FADE must stay hard-blocked in {regime} (fading is "
+            f"structurally wrong in this regime)"
+        )
+    for regime in allowed_regimes:
+        assert not regime_hard_blocks_strategy(regime, "MORNING_FADE"), (
+            f"MORNING_FADE must be ALLOWED in {regime} regime — re-enabled by "
+            f"Batch H 2026-05-20 to gather live evidence after blanket hard-block"
         )
 
 
-def test_morning_fade_in_every_regime_set_individually():
-    """Belt-and-suspenders: assert MORNING_FADE membership directly in each
-    regime's hard-block set. Catches drift if someone reorganises the
-    `regime_hard_blocks_strategy` lookup but leaves the sets stale."""
-    for regime in ("TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"):
+def test_morning_fade_in_blocked_regime_sets_individually():
+    """Belt-and-suspenders: assert MORNING_FADE membership in the regime sets
+    where it stays blocked, and ABSENCE from the regimes where it's allowed."""
+    for regime in ("TREND_UP", "PANIC", "RECOVERY"):
         block_set = _HARD_BLOCKS.get(regime, set())
         assert "MORNING_FADE" in block_set, (
-            f"MORNING_FADE missing from _HARD_BLOCKS[{regime!r}]. "
-            "All six regimes must include MORNING_FADE post 2026-05-08 audit."
+            f"MORNING_FADE missing from _HARD_BLOCKS[{regime!r}]"
+        )
+    for regime in ("CHOP", "RANGE", "TREND_DOWN"):
+        block_set = _HARD_BLOCKS.get(regime, set())
+        assert "MORNING_FADE" not in block_set, (
+            f"MORNING_FADE incorrectly present in _HARD_BLOCKS[{regime!r}] — "
+            f"should be allowed per Batch H 2026-05-20"
         )
 
 
