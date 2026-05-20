@@ -68,7 +68,8 @@ def is_market_open_ist() -> bool:
     return is_weekday_ist() and 555 <= m <= 930
 
 
-def is_entry_window_open_ist() -> bool:
+def is_entry_window_open_ist(wl_type: str = "intraday") -> bool:
+    # INTRADAY window (09:45-13:30) — tuned around FLAT_TIMEOUT and EOD close.
     # 2026-04-21 post-mortem: Cut-off tightened from 15:00 → 14:00 (840 min).
     # With FLAT_TIMEOUT reverted to 120 min, entries after 13:25 cannot complete
     # their timeout before EOD force-close at 15:25, guaranteeing a premature
@@ -80,18 +81,27 @@ def is_entry_window_open_ist() -> bool:
     # FLAT_TIMEOUT, so every 14:00 entry that doesn't hit SL or target in
     # 85 min is pre-committed to EOD_CLOSE exits at whatever price the market
     # gives. 13:30 gives 115 min, which is effectively the full timeout
-    # window and leaves room for intraday continuation/reversal. Post-mortem
-    # showed 04-16/04-20/04-21 had multiple late-afternoon entries exiting
-    # EOD_CLOSE flat-to-losing (see trades table exit_reason distribution).
+    # window and leaves room for intraday continuation/reversal.
     #
     # 2026-05-06: Added a LOWER bound at 09:45 IST (585 min). The opening
     # 30 min is the noisy "auction-discovery" period — VWAP isn't reliable
     # (only 6 5-min bars), opening-range hasn't formed, and wide bid/ask
-    # spreads inflate slippage. Live data 2026-04-16 → 2026-05-04: hour 09
-    # had 1 trade (lost) and hour 10 had 23 trades at 30% WR (the worst
-    # block of the day). 09:45+ removes the chaotic first half-hour without
-    # excluding 10:xx entirely (which would slash trade volume by a third).
-    return is_market_open_ist() and ist_minutes() >= 585 and ist_minutes() <= 810
+    # spreads inflate slippage.
+    #
+    # SWING window (09:15-15:00) — Batch H (2026-05-20).
+    # Swing positions hold overnight and have no FLAT_TIMEOUT. The intraday
+    # cutoff at 13:30 doesn't apply — there's no risk of EOD-truncated holds.
+    # Today (May 20) the swing 14:30 cron scanned the watchlist but EVERY
+    # qualified signal was blocked by `entry_window_closed_or_blocked` (TCS
+    # SHORT at score 75 was one example). Widening to 09:15-15:00 unblocks
+    # those scans. Stops before 15:25 EOD-recon so a swing entry doesn't
+    # collide with the EOD pass.
+    m = ist_minutes()
+    if not is_market_open_ist():
+        return False
+    if str(wl_type or "").strip().lower() == "swing":
+        return 555 <= m <= 900  # 09:15-15:00
+    return 585 <= m <= 810  # 09:45-13:30 intraday
 
 
 def parse_any_ts(value: str | int | float | None) -> datetime | None:
