@@ -20,11 +20,18 @@ def calc_swing_position_size(
 
     raw_qty = int(cfg.swing_risk_per_trade // sl_dist) if sl_dist > 0 else 0
     qty = min(raw_qty, int((cfg.capital * 0.20) // max(entry_price, 1)))  # 20% max capital per swing
-    # Skip swing trade only if even 1 share exceeds 1.5× risk budget.
-    if qty < 1 and sl_dist > cfg.swing_risk_per_trade * 1.5:
+    # Risk-budget enforcement.
+    #
+    # Audit 2026-05-21: prior logic forced `qty=max(1, qty)` even when
+    # raw_qty=0 (i.e. SL distance > risk_budget). With sl_dist between
+    # 1.0× and 1.5× risk_budget, this risked 33-50% MORE than configured
+    # budget per trade. The 1.5× tolerance was a workaround for expensive
+    # stocks with wide SLs, but it violates the position-sizing contract.
+    #
+    # New rule: if even 1 share of the trade would risk more than the
+    # configured budget, refuse the trade. No "slight over-risk" shortcut.
+    if qty < 1:
         qty = 0
-    else:
-        qty = max(1, qty)
     brokerage = calc_brokerage(qty, entry_price)
     max_loss = round(qty * sl_dist + brokerage, 2)
     max_gain = round(qty * sl_dist * cfg.swing_rr - brokerage, 2)

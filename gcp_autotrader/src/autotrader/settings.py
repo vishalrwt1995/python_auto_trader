@@ -101,9 +101,13 @@ class StrategySettings:
     # the past trading week — the score distribution peaks in the 58-67
     # band; dropping the bar to 60 captures ~30-40% of that cluster while
     # the strategy gates (check_swing_entry: daily trend, ADX, RSI band,
-    # supertrend) still filter the lowest-quality candidates. Paired with
-    # the direction-margin 2→1 swing fix above, expected to convert from
-    # 0 swing trades/day to 1-3/day on rotation/trending sessions.
+    # supertrend) still filter the lowest-quality candidates.
+    #
+    # Alpha-finder audit 2026-05-21: BACKTEST suggests 60 → 45 would
+    # capture +₹12k of alpha (40-49 band has +₹6,445 / 48.5% WR; 50-59
+    # band has +₹6,144 / 50.8% WR). NOT applied to default to keep
+    # production-replica validation accurate; deploy via env var override
+    # `SWING_MIN_SIGNAL_SCORE=45` after paper-mode validation.
     swing_min_signal_score: int = 60
     # Batch 2.1 (2026-04-22): re-entry cooldown. When a position closes
     # (SL hit, target hit, or timeout), the scanner should NOT immediately
