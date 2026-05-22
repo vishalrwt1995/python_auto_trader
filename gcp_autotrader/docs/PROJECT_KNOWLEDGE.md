@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-05-08 13:00 IST · **Last verified live state:** 2026-05-08 13:00 IST
+> **Last updated:** 2026-05-22 03:50 IST · **Last verified live state:** 2026-05-22 03:50 IST
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -253,6 +253,28 @@ Currently disabled in some regimes. Discussion pending.
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-05-22 03:50 IST — Pre-market readiness verified (before Friday open)
+**Live revision:** `autotrader-00234-7rt` · 100% traffic on latest · 0 errors in last 12h
+
+**Verified production state (via direct Cloud APIs — gcloud auth was expired, used ADC refresh token):**
+- `PAPER_TRADE=true`, `USE_PLAYBOOK_V1=true`, `SWING_MIN_SIGNAL_SCORE=45` — all set correctly
+- `VIX_TREND_MAX` is **unset** in env → code default `15` applies (`settings.py:69`). Earlier session notes had this as `18 production override` — that was incorrect carry-over. Backtest `prod_replica_v2.py` uses 18; should be reconciled to 15 for accuracy.
+- 28 Cloud Scheduler jobs ENABLED (swing scans at 09:22/11:00/13:00/14:30, intraday `*/3` 9-14, brain snaps, EOD reconcile, etc.)
+- Brain snapshots: 56 days available, May 21 had 59 snapshots (last at 15:21 IST close)
+
+**0 trades in last 3 days (May 19, 20, 21) — verified CORRECT, not a bug:**
+- Brain was RANGE → DEFENSIVE risk_mode all week
+- Market confidence 33-39 (very low), participation WEAK
+- May 20: 2,137 scans, 0 qualified (1,598 score_below_min, 466 direction_hold, 47 regime_hard_block)
+- May 21: 2,200 scans, 0 qualified (1,571 score_below_min, 424 direction_hold, 67 morning_fade_outside_time_window)
+- Last signals placed: May 19, 2× POWERGRID BUY @ score 63 in RANGE/NORMAL
+
+**Backtest progress this session:**
+- Built `phase7_v2_with_gates.py` applying real production gates (hard_block, affinity multiplier, adjust_signal, MarketPolicy.allowed_strategies)
+- Short test (May 1-21, 3 weeks, 47 days): -₹5,874 net (PULLBACK -₹5,315 dominant)
+- Medium test (Mar 9 - May 21, 47 days, 100% real brain snapshots): **-₹549 net (essentially flat)**, PULLBACK +₹2, MOMENTUM +₹241, MR -₹793
+- PULLBACK 3-week loss was regime outlier, not structural
 
 ### 2026-05-08 — Mid-session pipeline batch (8 fixes)
 **Commit `4cb36ab`** (merged into `5620f7a` on main) · **Revision `00225-zjt`** · 594 tests passing
