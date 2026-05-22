@@ -456,7 +456,19 @@ class WsMonitorService:
         _breakeven_buffer = 0.15 if is_swing else 0.1    # buffer above entry
 
         # ── Breakeven SL: once price reaches N× ATR profit, move SL to entry ──
-        if not pos.get("sl_moved") and entry_price > 0 and atr > 0:
+        #
+        # 2026-05-22 (Phase E swing exit validation):
+        # SKIP this block for SWING positions. Backtest V3 variant tested
+        # moving SL to BE on swing trades (-₹113,564 over 1yr / 5775 trades
+        # vs +₹11,478 baseline). Normal post-entry retracement of 0.2-0.3 ATR
+        # is common; moving SL to entry knocks off the remaining 50% qty
+        # before the trade can ride to TARGET / MAX_HOLD. The V2 swing
+        # scale-out below (50% at 0.5R) requires the original SL to stay
+        # in place on the remaining 50% to capture the full V2 edge
+        # (+₹204,071 over 1yr vs +₹11,478 baseline).
+        #
+        # Intraday positions still get the breakeven SL behavior.
+        if not is_swing and not pos.get("sl_moved") and entry_price > 0 and atr > 0:
             if side == "BUY" and best >= entry_price + atr * _breakeven_atr_mult:
                 pos["sl_price"] = entry_price + (atr * _breakeven_buffer)
                 pos["sl_moved"] = True
@@ -657,6 +669,63 @@ class WsMonitorService:
                     logger.warning("partial_persist_failed tag=%s err=%s", tag, _e)
                 logger.info("partial_exit_qty2 tag=%s qty=%d ltp=%.2f sl_moved_to=%.2f", tag, _exit_qty_1, ltp, sl)
                 asyncio.create_task(self._do_partial_exit(tag, instrument_key, _exit_qty_1, "PARTIAL_1R_QTY2"))
+
+        # ── Swing scale-out: 50% off at 0.5R (V2 rule) ─────────────────────
+        # Backtest evidence (Phase E, 1-year, 5,775 swing trades):
+        #   V0 baseline (no scale-out):              +₹11,478
+        #   V1 (exit ALL at 0.5R):                   -₹2,459  (cuts winners short)
+        #   V2 (THIS rule: scale 50% off, hold rest): +₹204,071  ⭐
+        #   V3 (trail SL to BE after 0.5R):          -₹113,564 (BE gets knocked off)
+        #
+        # Validated across 4 windows (1mo / 3mo / 6mo / 1yr) — improvement
+        # consistent in every window, every strategy:
+        #   PULLBACK:        +₹8,319 → +₹135,477  (+₹127k over baseline)
+        #   MOMENTUM:        +₹1,849 → +₹52,070   (+₹50k)
+        #   MEAN_REVERSION:  +₹1,309 → +₹16,524   (+₹15k)
+        #
+        # MFE-capture context: backtest showed swing trades reach +0.54R to
+        # +0.61R MFE on average, but realize only +0.04R because targets
+        # are 2R away and rarely hit. Locking in 50% qty at 0.5R captures
+        # the actual edge while letting the other half ride to target/SL/
+        # MAX_HOLD for the occasional big winner.
+        #
+        # IMPORTANT — do NOT move SL to breakeven after the partial fill.
+        # V3 backtest variant tested exactly that (-₹125k vs baseline).
+        # Normal market noise after a 0.5R move triggers BE stops on the
+        # remaining 50%, killing the runners that make the strategy work.
+        # Keep the original SL on the remaining qty.
+        if is_swing and sl_dist > 0 and original_qty >= 2:
+            _swing_t1_price = (
+                entry_price + sl_dist * 0.5
+            ) if side == "BUY" else (
+                entry_price - sl_dist * 0.5
+            )
+            _swing_t1_hit = (
+                (side == "BUY" and ltp >= _swing_t1_price)
+                or (side == "SELL" and ltp <= _swing_t1_price)
+            )
+            if _swing_t1_hit and not pos.get("partial_exit_1_done"):
+                _exit_qty_swing = max(1, original_qty // 2)
+                pos["partial_exit_1_done"] = True
+                try:
+                    self.state.update_position(
+                        tag, {"partial_exit_1_done": True},
+                    )
+                except Exception as _e:
+                    logger.warning(
+                        "swing_partial_persist_failed tag=%s err=%s", tag, _e,
+                    )
+                logger.info(
+                    "swing_partial_exit_0_5R tag=%s exit_qty=%d remaining=%d ltp=%.2f trigger=%.2f sl_unchanged=%.2f",
+                    tag, _exit_qty_swing, original_qty - _exit_qty_swing,
+                    ltp, _swing_t1_price, sl,
+                )
+                asyncio.create_task(
+                    self._do_partial_exit(
+                        tag, instrument_key, _exit_qty_swing,
+                        "SWING_PARTIAL_0_5R",
+                    )
+                )
 
         # ── Trailing stop: once past breakeven (or target), trail SL at N× ATR from best ──
         _sl_changed = False

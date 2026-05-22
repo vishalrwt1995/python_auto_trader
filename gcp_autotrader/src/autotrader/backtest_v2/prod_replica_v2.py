@@ -86,11 +86,15 @@ class ProdReplicaV2:
         brain_loader: BrainSnapshotLoader | None = None,
     ) -> None:
         from dataclasses import replace
-        # Production Cloud Run runs with VIX_TREND_MAX=18 (env override of
-        # the settings.py default of 15). Without this override, regime
-        # layer scores in score_signal differ by 4 points (3 → 7) for any
-        # scan when VIX is in (15, 18) range. Discovered 2026-05-21 via
-        # BHEL May 8 score-match debugging.
+        # VIX_TREND_MAX: 18.0 matches historical production behavior used
+        # to generate the scan_decisions table this replica is validated
+        # against. The 2026-05-22 live check showed env var UNSET (so live
+        # is at the settings.py default of 15.0), but that is a config
+        # drift — historical data (May 21 and earlier) was generated with
+        # the env override at 18.0. Use 18.0 for equivalence/historical
+        # backtests; use 15.0 only when explicitly modeling current-config.
+        # The 4-point regime-layer swing happens at VIX in [15.0, 18.0).
+        # See: scoring.py:194 `if regime.vix < cfg.vix_trend_max:`
         base_cfg = cfg or StrategySettings()
         try:
             base_cfg = replace(base_cfg, vix_trend_max=18.0)
@@ -149,7 +153,21 @@ class ProdReplicaV2:
         regime_state = snap.state
         regime_str = regime_state.regime
         risk_mode = regime_state.risk_mode
-        regime_obj = snap.to_regime_snapshot()
+        # PROD-MATCH (2026-05-22): Production uses `from_market_brain_state()`
+        # which builds RegimeSnapshot from MarketBrainState ONLY — it does NOT
+        # populate vix / fii / nifty.change_pct (those default to 0.0). The
+        # scoring rule in scoring.py:188-203 evaluates against those defaults,
+        # giving a fixed regime layer of +4(nifty) +7(vix<15) +2(fii=0) = 13
+        # for every BUY scan. (For SELL: similar but fii.fii<-500 is False so
+        # fii=+2 also.) Audit on 187 sample scans showed score_regime is
+        # ALWAYS exactly 13 in production.
+        #
+        # Previously we used `snap.to_regime_snapshot()` which loaded real
+        # vix/fii values from the brain snapshot — making the replica score
+        # regime layer DIFFERENTLY than production. Switching to
+        # from_market_brain_state() mirrors production exactly.
+        from autotrader.services.regime_service import MarketRegimeService
+        regime_obj = MarketRegimeService.from_market_brain_state(snap.state)
         # Use brain snapshot's VIX (production scoring uses same Upstox
         # fetch as brain, so snapshot VIX = scoring VIX).
         # Leave nifty.change_pct = 0.0 — production's Upstox get_quote()
