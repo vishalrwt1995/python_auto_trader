@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-05-22 03:50 IST · **Last verified live state:** 2026-05-22 03:50 IST
+> **Last updated:** 2026-05-22 20:15 IST · **Last verified live state:** 2026-05-22 20:15 IST
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -253,6 +253,40 @@ Currently disabled in some regimes. Discussion pending.
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-05-22 20:15 IST — V2 swing exit logic DEPLOYED (live revision autotrader-00235-gtb)
+**PR #10 merged · Revision `autotrader-00235-gtb` · 100% traffic on latest**
+
+Shipped two related changes:
+1. **100% production-match replica fix** (`prod_replica_v2.py`): use `MarketRegimeService.from_market_brain_state()` instead of `snap.to_regime_snapshot()` to construct the RegimeSnapshot. This matches production's behavior (which doesn't populate vix/fii/nifty.change_pct, defaulting them to 0, scoring regime layer at constant +13 for every BUY scan). Validated on 200/200 random scans = 100% direction + 100% raw_score match.
+2. **V2 swing exit logic** (`ws_monitor_service.py`): scale out 50% of swing position at 0.5R, hold remaining 50% to TARGET/SL/MAX_HOLD. Also disabled breakeven SL move for swing (V3 variant tested moving SL to BE = -₹125k loss vs baseline). Intraday positions unaffected.
+
+**Backtest evidence (Phase E, bar-by-bar simulation, 4 windows):**
+| Window | Trades | V0 baseline | V2 (now live) | Improvement |
+|---|---|---|---|---|
+| 1 month | 480 | -₹8,948 | +₹11,037 | +₹19,985 |
+| 3 months | 530 | -₹1,918 | +₹15,972 | +₹17,890 |
+| 6 months | 1,795 | -₹41,420 | +₹39,693 | +₹81,113 |
+| **1 year** | **5,775** | **+₹11,478** | **+₹204,071** | **+₹192,593** |
+
+Per-strategy 1-year improvement: PULLBACK +₹127k, MOMENTUM +₹50k, MEAN_REVERSION +₹15k.
+
+**Variants rejected:**
+- V1 (exit ALL at 0.5R): -₹13,936 over 1yr — cuts winners short.
+- V3 (trail SL to breakeven after 0.5R partial): -₹125,042 — BE knocked off by normal noise.
+
+**Root cause why V2 works:** Swing trades reach +0.54R to +0.61R MFE on average but realize only +0.04R because 2R targets are rarely hit. Locking in 50% at 0.5R captures the structural edge that's already there.
+
+**Post-deploy validation (e2e):** Equivalence test unchanged (65% gate-ordering noise, expected). Phase E 6mo re-run confirmed V2 still +₹85,569 over baseline. Code-level diff confirmed backtest V2 = deployed ws_monitor swing block (same formula, qty split, trigger, no SL movement).
+
+**Monitor tomorrow (Monday 2026-05-25):**
+- First swing scan at 09:22 IST. When any swing position reaches 0.5R, expect log line: `swing_partial_exit_0_5R tag=... exit_qty=... at_0.5R=...`
+- `signals` table: entries with `entry_placed=true` continue as before.
+- `attribution` table: new exit reason `SWING_PARTIAL_0_5R` for the partial-fill leg.
+- `trades` table: partial-fill PnL recorded; full-close PnL recorded when remaining 50% exits via SL/TARGET/MAX_HOLD.
+- Intraday positions: no behavior change (still use 1R/1.5R tiered partials).
+
+**Rollback:** revert commit + redeploy (paper mode = zero real-money risk).
 
 ### 2026-05-22 03:50 IST — Pre-market readiness verified (before Friday open)
 **Live revision:** `autotrader-00234-7rt` · 100% traffic on latest · 0 errors in last 12h
