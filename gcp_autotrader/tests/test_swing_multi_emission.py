@@ -44,12 +44,23 @@ def test_mean_reversion_no_longer_in_swing_intraday_only_set():
     wlType=swing rows to intraday — that was burning watchlist scoring
     effort on a legitimate swing edge.
 
-    The veto set was originally
+    Historical veto set:
         {MOMENTUM, OPEN_DRIVE, VWAP_REVERSAL, VWAP_TREND, MEAN_REVERSION}
-    and the comment justified the inclusion of MOMENTUM with bar-count
-    timing. MEAN_REVERSION had no such timing dependency — its watchlist
-    score is computed on daily candles end-to-end (RSI<35 + range_pos<0.30
-    + atr_pct sane). Removing it from the veto set is the entire fix.
+
+    Current veto set (after MEAN_REVERSION + MOMENTUM removal):
+        {OPEN_DRIVE, VWAP_REVERSAL, VWAP_TREND}
+
+    Removal history:
+        - 2026-05-07: MEAN_REVERSION removed (daily-frame edge: RSI<35 +
+          range_pos<0.30 + atr_pct sane)
+        - 2026-05-26 (E2E audit): MOMENTUM removed. The original "bar-count
+          timing" justification predated the daily-calibrated
+          `check_swing_entry()` MOMENTUM branch at scoring.py:804-838 which
+          uses ALL daily indicators (trend, ema_stack, supertrend_dir, ADX,
+          strength, RSI). Universe also computes MOMENTUM score on daily
+          candles (universe_service.py:4769-4786). Real-data impact of the
+          veto: 0 MOMENTUM swing scans across 13 trading days (2026-05-12 →
+          2026-05-25) — the score was computed and silently discarded.
     """
     src = inspect.getsource(ts_mod)
     # The set-literal must still exist (we kept the veto for genuine
@@ -58,9 +69,7 @@ def test_mean_reversion_no_longer_in_swing_intraday_only_set():
         "expected the veto set to still be defined — only its membership "
         "should change, not its existence"
     )
-    # Locate the set definition and verify MEAN_REVERSION is NOT a member.
-    # Use a regex slice rather than literal-string match so the test is
-    # robust to formatting changes.
+    # Locate the set definition.
     import re
     m = re.search(
         r"_intraday_only_strategies\s*=\s*\{([^}]*)\}",
@@ -74,21 +83,27 @@ def test_mean_reversion_no_longer_in_swing_intraday_only_set():
         for s in members_blob.replace("\n", " ").split(",")
         if s.strip()
     }
-    assert "MEAN_REVERSION" not in members, (
-        f"MEAN_REVERSION must not be in _intraday_only_strategies (got {members}). "
-        "Reverting this re-introduces the bug where wl_type=swing + "
-        "strategy=MEAN_REVERSION rows are silently retagged to intraday, "
-        "wasting watchlist scoring effort. See 2026-05-07 swing investigation."
-    )
+    # Strategies that have been verified as daily-frame-safe MUST NOT be in the set.
+    # Re-adding them re-introduces the bug where swing rows get silently retagged
+    # to intraday, wasting watchlist scoring effort on legitimate swing edges.
+    for must_not_be_present in ("MEAN_REVERSION", "MOMENTUM"):
+        assert must_not_be_present not in members, (
+            f"{must_not_be_present} must NOT be in _intraday_only_strategies "
+            f"(got {members}). Re-adding it re-introduces the bug where "
+            f"wl_type=swing + strategy={must_not_be_present} rows are silently "
+            "retagged to intraday."
+        )
     # Strategies that DO have an intraday-clock dependency must stay vetoed
-    # (defensive — guards against accidental over-removal).
-    for must_stay in ("MOMENTUM", "OPEN_DRIVE", "VWAP_REVERSAL", "VWAP_TREND"):
+    # (defensive — guards against accidental over-removal). These setups use
+    # `ind.vwap` (intraday VWAP), bar-count timing, or fall through
+    # `check_swing_entry()` with no swing-specific gate.
+    for must_stay in ("OPEN_DRIVE", "VWAP_REVERSAL", "VWAP_TREND"):
         assert must_stay in members, (
             f"{must_stay} must remain in _intraday_only_strategies — "
             "its strategy code uses intraday-clock structure (open auction, "
-            "VWAP cross, bar-count timing) and cannot run on daily candles. "
-            "Lifting the veto here without a strategy-side refactor would "
-            "produce broken swing trades."
+            "VWAP cross, bar-count timing) or falls through check_swing_entry "
+            "with no daily-frame gate. Lifting the veto here without a "
+            "strategy-side refactor would produce broken swing trades."
         )
 
 
