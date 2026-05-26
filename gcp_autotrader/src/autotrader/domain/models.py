@@ -9,7 +9,12 @@ Direction = Literal["BUY", "SELL", "HOLD"]
 RegimeKind = Literal["TREND", "RANGE", "AVOID"]
 Bias = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 MarketPhase = Literal["PREMARKET", "POST_OPEN", "LIVE", "EOD"]
-MarketRegimeV2 = Literal["TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"]
+MarketRegimeV2 = Literal[
+    "TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY",
+    "RANGE_ROTATING",     # added 2026-05-15 (Batch C) — present in classifier
+    "EARLY_TREND_UP",     # added 2026-05-26 (Phase D) — fast-trend confirms before structural
+    "EARLY_TREND_DOWN",   # added 2026-05-26 (Phase D)
+]
 ParticipationKind = Literal["STRONG", "MODERATE", "WEAK"]
 RiskModeKind = Literal["AGGRESSIVE", "NORMAL", "DEFENSIVE", "LOCKDOWN"]
 IntradayStateKind = Literal["PREOPEN", "OPEN_DRIVE", "OPEN_FADE", "TREND_DAY", "CHOP_DAY", "EVENT_RISK"]
@@ -299,6 +304,12 @@ class MarketBrainState:
     allowed_strategies: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     trend_score: float = 50.0
+    # E2E audit 2026-05-26 (Phase D): fast-trend signal. Complements
+    # `trend_score` (EMA50/200, lags 10-15d) with EMA20/EMA50 + 10-day return
+    # (lags 3-5d). Enables EARLY_TREND_UP/DOWN regime detection.
+    # Default 50.0 keeps existing brain behaviour for state loaded from pre-
+    # Phase-D Firestore docs (the field is missing in old documents).
+    tactical_trend_score: float = 50.0
     breadth_score: float = 50.0
     leadership_score: float = 50.0
     volatility_stress_score: float = 50.0

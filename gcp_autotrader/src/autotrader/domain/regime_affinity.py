@@ -147,6 +147,44 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
+    # Phase D 2026-05-26 — EARLY_TREND_UP / EARLY_TREND_DOWN.
+    # Multipliers ~70-80% of full TREND_* values. Rationale: fast tactical
+    # signal confirms direction but structural EMAs haven't yet — direction
+    # is plausible but not confirmed. Use moderate multipliers (not 1.4×)
+    # to size into the move conservatively. If structural catches up,
+    # regime becomes full TREND_UP/DOWN automatically.
+    "EARLY_TREND_UP": {
+        "BREAKOUT": 1.0,          # hard-blocked downstream (no pattern detector yet)
+        "SHORT_BREAKDOWN": 0.4,   # shorting nascent rally = wrong side
+        "PULLBACK": 1.1,          # buying dips in early uptrend is sound
+        "SHORT_PULLBACK": 0.5,
+        "MEAN_REVERSION": 0.7,    # not the primary edge but acceptable
+        "VWAP_REVERSAL": 0.6,
+        "VWAP_TREND": 1.0,        # neutral — let scoring decide
+        "OPEN_DRIVE": 1.0,
+        "PHASE1_MOMENTUM": 1.0,
+        "PHASE1_REVERSAL": 0.8,
+        "MOMENTUM": 1.2,          # near-full bonus — leading stocks extend
+        "MORNING_FADE": 0.4,
+        "AUTO": 1.0,
+        "DEFAULT": 1.0,
+    },
+    "EARLY_TREND_DOWN": {
+        "BREAKOUT": 0.5,          # hard-blocked downstream
+        "SHORT_BREAKDOWN": 1.1,   # primary edge but conservative until structural confirms
+        "PULLBACK": 0.6,
+        "SHORT_PULLBACK": 1.1,
+        "MEAN_REVERSION": 0.8,
+        "VWAP_REVERSAL": 0.7,
+        "VWAP_TREND": 0.7,
+        "OPEN_DRIVE": 0.8,
+        "PHASE1_MOMENTUM": 0.7,
+        "PHASE1_REVERSAL": 1.1,   # oversold bounces work in early decline
+        "MOMENTUM": 0.4,          # chasing strength in early decline is wrong
+        "MORNING_FADE": 1.0,
+        "AUTO": 0.9,
+        "DEFAULT": 0.9,
+    },
 }
 
 # Floor and ceiling to prevent extreme distortion
@@ -315,6 +353,23 @@ _HARD_BLOCKS: dict[str, set[str]] = {
         "SHORT_PULLBACK",
         "PHASE1_MOMENTUM",
         "MORNING_FADE",
+    },
+    # Phase D 2026-05-26 — EARLY_TREND_UP / EARLY_TREND_DOWN.
+    # New regimes detected when the fast tactical_trend_score confirms
+    # direction before structural trend_score does (3-5d lead vs EMA50/200
+    # framework). Inherit the same blocks as their parent TREND_* regimes
+    # so the system can't accidentally short in EARLY_TREND_UP or chase
+    # breakouts in EARLY_TREND_DOWN.
+    "EARLY_TREND_UP": {
+        "BREAKOUT",        # mirrors TREND_UP block; pattern detection still missing
+        "MORNING_FADE",    # fading early rallies is structurally wrong
+        "SHORT_BREAKDOWN", # no shorting strength in confirmed up-move
+        "SHORT_PULLBACK",  # ditto
+        "PHASE1_MOMENTUM", # stale picks — Phase 2 is correct path here
+    },
+    "EARLY_TREND_DOWN": {
+        "BREAKOUT",        # mirrors TREND_DOWN block
+        # NB: MORNING_FADE intentionally NOT blocked (Batch H rule for TREND_DOWN)
     },
 }
 

@@ -92,6 +92,9 @@ class MarketBrainService:
             allowed_strategies=[str(x) for x in (payload.get("allowed_strategies") or []) if str(x).strip()],
             reasons=[str(x) for x in (payload.get("reasons") or []) if str(x).strip()],
             trend_score=float(payload.get("trend_score") or 50.0),
+            # Phase D 2026-05-26: read tactical_trend_score, default 50.0 (neutral)
+            # for backward compat with pre-Phase-D Firestore documents.
+            tactical_trend_score=float(payload.get("tactical_trend_score") or 50.0),
             breadth_score=float(payload.get("breadth_score") or 50.0),
             leadership_score=float(payload.get("leadership_score") or 50.0),
             volatility_stress_score=float(payload.get("volatility_stress_score") or 50.0),
@@ -215,6 +218,9 @@ class MarketBrainService:
             # these in insert_errors). The `self.bq.insert` wrapper logs but
             # does not raise, so a pre-migration deploy stays safe.
             "options_positioning_score": state.options_positioning_score,
+            # Phase D 2026-05-26: tactical_trend_score (BQ ALTER TABLE needed).
+            # Safe to add — bq.insert wrapper silently drops unknown columns.
+            "tactical_trend_score": state.tactical_trend_score,
             "flow_score": state.flow_score,
             "breadth_roc_score": state.breadth_roc_score,
             "prev_regime": state.prev_regime,
@@ -510,6 +516,62 @@ class MarketBrainService:
             + 0.25 * (1.0 if trend_up else (0.0 if trend_down else 0.5))
             + 0.20 * close_component
             + 0.20 * vol_component
+        )
+        return float(round(self._clip(score01 * 100.0, 0.0, 100.0), 2))
+
+    def _compute_tactical_trend(self, regime_ctx: dict[str, Any]) -> float:
+        """Fast trend signal (EMA20/EMA50, 10-day return).
+
+        Complements `_compute_trend_score` which is anchored on EMA50/EMA200
+        and lags 10-15 sessions. The tactical signal reacts in 3-5 sessions,
+        allowing the brain to detect trend transitions before the structural
+        EMA framework catches up.
+
+        Industry-standard approach: this is the same dual-timeframe pattern
+        used by Stan Weinstein (slow MA + price action), AQR/Winton CTAs
+        (multi-timeframe trend voting), and Mark Minervini's Trend Template.
+
+        Inputs read from regime_ctx.daily:
+          - close
+          - ema20 (fast EMA — NEW from universe_service)
+          - ema50 (existing)
+          - ret10 (10-day return % — NEW from universe_service)
+
+        Returns 0-100 score. 50 = neutral. <30 = bearish, >70 = bullish.
+
+        Safe defaults: if ema20 or ret10 missing (pre-deploy state), returns
+        the structural trend_score directly to preserve backward behaviour.
+        """
+        daily = regime_ctx.get("daily", {}) if isinstance(regime_ctx.get("daily"), dict) else {}
+        close = float(daily.get("close") or 0.0)
+        ema20 = float(daily.get("ema20") or 0.0)
+        ema50 = float(daily.get("ema50") or 0.0)
+        ret10 = float(daily.get("ret10") or 0.0)
+
+        # Backward compat: if ema20/ret10 aren't populated (pre-deploy state
+        # or partial data), return neutral. Brain falls back to using only
+        # structural trend_score for regime decisions.
+        if ema20 <= 0 or ema50 <= 0 or close <= 0:
+            return 50.0
+
+        # Component 1 (40%): EMA20 vs EMA50 spread (% of EMA50)
+        # Range: -2% (strongly bearish) to +2% (strongly bullish)
+        ema_spread_pct = ((ema20 - ema50) / ema50) * 100.0
+        ema_component = self._norm(ema_spread_pct, -2.0, 2.0)
+
+        # Component 2 (30%): 10-day return
+        # Range: -3% (strong decline) to +3% (strong rally)
+        ret_component = self._norm(ret10, -3.0, 3.0)
+
+        # Component 3 (30%): close vs EMA20 — current price above fast EMA?
+        # Range: -1% (below) to +1% (above)
+        close_vs_ema20_pct = ((close - ema20) / ema20) * 100.0
+        close_component = self._norm(close_vs_ema20_pct, -1.0, 1.0)
+
+        score01 = (
+            0.40 * ema_component
+            + 0.30 * ret_component
+            + 0.30 * close_component
         )
         return float(round(self._clip(score01 * 100.0, 0.0, 100.0), 2))
 
@@ -848,6 +910,7 @@ class MarketBrainService:
         data_quality_score: float,
         risk_appetite: float,
         prev: MarketBrainState | None,
+        tactical_trend_score: float = 50.0,
     ) -> str:
         t = self.thresholds
         regime = "RANGE"
@@ -907,6 +970,39 @@ class MarketBrainService:
             and leadership_score >= t.recovery_leadership_min
         ):
             regime = "RECOVERY"
+
+        # E2E audit 2026-05-26 — EARLY_TREND_UP / EARLY_TREND_DOWN.
+        #
+        # The structural regime classification above lags by 10-15 sessions
+        # because trend_score is anchored on EMA50/EMA200. When the market
+        # transitions (e.g., NIFTY crosses EMA50 from below), this code
+        # stays in RANGE long after the new trend has begun.
+        #
+        # tactical_trend_score (EMA20/EMA50 + 10-day return) reacts in
+        # 3-5 sessions. We upgrade RANGE → EARLY_TREND_UP/DOWN when the
+        # fast signal confirms direction AND the structural signal hasn't
+        # contradicted it.
+        #
+        # Industry validation: Stan Weinstein's stage transitions, AQR/
+        # Winton 2-of-3 timeframe voting, Carver's "Tribend" concept.
+        #
+        # Downstream: EARLY_* regimes inherit TREND_* hard-blocks but get
+        # smaller affinity multipliers (see regime_affinity.py). Position
+        # sizing applies normally — half-size could be added later as a
+        # separate change.
+        if regime == "RANGE":
+            # Don't override if vol_stress is high (RANGE-with-vol is
+            # legitimate, fast signal could whipsaw).
+            _safe_vol = volatility_stress_score <= 65.0
+            # Don't override on data-quality issues.
+            _safe_dq = data_quality_score >= 60.0
+            if _safe_vol and _safe_dq:
+                # Fast bullish but structural not yet confirmed
+                if tactical_trend_score >= 70.0 and trend_score >= 25.0:
+                    regime = "EARLY_TREND_UP"
+                # Fast bearish but structural not yet confirmed
+                elif tactical_trend_score <= 30.0 and trend_score <= 75.0:
+                    regime = "EARLY_TREND_DOWN"
 
         if prev is None:
             return regime
@@ -1068,6 +1164,10 @@ class MarketBrainService:
             premarket=premarket,
         )
         trend_score = self._compute_trend_score(regime_ctx)
+        # E2E audit 2026-05-26: fast trend signal complementing slow trend_score.
+        # Enables EARLY_TREND_UP/DOWN regime detection 5-10 days before
+        # the EMA50/EMA200-based trend_score catches up.
+        tactical_trend_score = self._compute_tactical_trend(regime_ctx)
         breadth = self.compute_breadth_snapshot(expected_lcd=expected_lcd, rows=rows)
         # Guard against false PANIC from breadth data fetch failure.
         # If processedCount < 10 and score < 5, it's likely a data miss — use neutral 50.0.
@@ -1131,6 +1231,7 @@ class MarketBrainService:
         }
         regime = self._map_regime(
             trend_score=trend_score,
+            tactical_trend_score=tactical_trend_score,
             breadth_score=float(breadth.get("score") or 0.0),
             leadership_score=float(leadership.get("score") or 0.0),
             volatility_stress_score=volatility_stress_score,
@@ -1355,6 +1456,7 @@ class MarketBrainService:
             allowed_strategies=allowed_strategies,
             reasons=reasons,
             trend_score=round(trend_score, 2),
+            tactical_trend_score=round(tactical_trend_score, 2),
             breadth_score=round(float(breadth.get("score") or 0.0), 2),
             leadership_score=round(float(leadership.get("score") or 0.0), 2),
             volatility_stress_score=round(volatility_stress_score, 2),
