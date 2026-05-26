@@ -280,6 +280,14 @@ _HARD_BLOCKS: dict[str, set[str]] = {
     # block above). Other strategies still allowed — TREND regimes are where
     # VWAP_TREND and MOMENTUM are designed to shine.
     # MORNING_FADE blocked in TREND_UP — fading strong rallies is a knife-catch.
+    # E2E audit 2026-05-26: considered re-enabling BREAKOUT in TREND_UP but
+    # the regression test guard (test_breakout_still_hard_blocked_in_trend_regimes)
+    # documents that VCP/cup-handle pattern detection is required before
+    # re-enable. Current check_swing_entry() gates (ADX≥25, trend=UP, vol≥1.3)
+    # check that trend exists but NOT that the stock is breaking out of a
+    # base. MOMENTUM swing (re-enabled in this audit) serves as the trend-
+    # following entry that BREAKOUT was meant to be — without the base
+    # requirement — see comment at universe_service.py:4824.
     "TREND_UP":   {
         "BREAKOUT",
         "MORNING_FADE",

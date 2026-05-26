@@ -870,8 +870,16 @@ class TradingService:
                 # opening-auction / VWAP-cross intraday clock structure and
                 # cannot be evaluated on daily candles.
                 _strategy_upper = str(w.strategy or "").strip().upper()
+                # E2E audit 2026-05-26: removed MOMENTUM from intraday-only list.
+                # check_swing_entry() for MOMENTUM (scoring.py:804-838) is
+                # fully daily-calibrated — it gates on daily trend, EMA stack,
+                # SuperTrend, ADX, strength, RSI. The "bar-count timing logic"
+                # justification in the MOTHERSON 2026-04-22 incident comment
+                # was true for OLD intraday-only MOMENTUM but the swing path
+                # already exists. Also re-emit MOMENTUM in
+                # universe_service.py:4831 _long_candidates.
                 _intraday_only_strategies = {
-                    "MOMENTUM", "OPEN_DRIVE", "VWAP_REVERSAL", "VWAP_TREND",
+                    "OPEN_DRIVE", "VWAP_REVERSAL", "VWAP_TREND",
                 }
                 if _is_swing and _strategy_upper in _intraday_only_strategies:
                     logger.warning(

@@ -4821,17 +4821,26 @@ class UniverseService:
             # stock legitimately occupies more slots than a weak single-pattern
             # stock, which is the desired outcome.
             #
-            # MOMENTUM is intentionally NOT emitted as swing — trading_service
-            # vetoes (wl_type=swing, strategy=MOMENTUM) because the MOMENTUM
-            # strategy code path uses bar-count timing logic that's intraday-
-            # calibrated. Lifting that veto requires a strategy-side refactor,
-            # not a watchlist change. Component score is still computed (and
-            # preserved on each row for debugging) so it can be re-enabled in
-            # one place once the strategy is parameterized.
+            # E2E audit 2026-05-26: re-enabled MOMENTUM swing emission.
+            # The original comment claimed MOMENTUM "uses bar-count timing
+            # logic that's intraday-calibrated" — that was true historically
+            # but the current check_swing_entry() for MOMENTUM at
+            # scoring.py:804-838 uses ALL daily-frame indicators (trend,
+            # ema_stack, supertrend_dir, ADX, strength, RSI). The setup IS
+            # daily-calibrated; the comment is stale.
+            # Real-data impact of the disable: 0 MOMENTUM swing scans in 13
+            # days (2026-05-12 → 2026-05-25) despite computing its score.
+            # MOMENTUM is one of the most academically-validated retail
+            # trading edges (relative-strength momentum: IBD CANSLIM,
+            # AQR, etc.). We were computing its score and discarding it.
+            # Also requires removing MOMENTUM from
+            # trading_service.py:_intraday_only_strategies (which silently
+            # retags swing MOMENTUM rows to intraday).
             _long_candidates: list[tuple[str, str, float]] = [
                 ("BREAKOUT", "BUY", breakout),
                 ("PULLBACK", "BUY", pullback),
                 ("MEAN_REVERSION", "BUY", mean_rev),
+                ("MOMENTUM", "BUY", momentum),
             ]
 
             # Fix 3: short-side scoring in bearish regimes (PANIC / TREND_DOWN)
