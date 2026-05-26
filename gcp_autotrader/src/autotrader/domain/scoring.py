@@ -608,9 +608,13 @@ def check_strategy_entry(
         # 27 bars → actual trend signal. Two additional gates:
         #   1. Bars-since-open >= 12 (60 min) — VWAP statistically settled
         #   2. Last 3 bars all on trade side of VWAP — not coincidental crossing
-        # (VWAP slope check deferred — needs vwap_history on IndicatorSnapshot,
-        # bigger change; the bars-since-open + sustained-side gates capture
-        # most of the morning-failure pattern.)
+        #
+        # 2026-05-26 audit (Phase B intraday): added ADX bump (18→22), volume
+        # confirmation (≥1.3×), RSI band (BUY 50-70, SELL 30-50). Real-data
+        # evidence: 58 VWAP_TREND trades, 5 wins, 8.6% WR, -₹170 net. The
+        # existing gates pass the price/time structure check but don't verify
+        # the move has CONVICTION. Tightening these three reduces low-quality
+        # signals that were the bulk of the loss.
         bar_ts = str(ind.candles[-1][0]) if ind.candles else ""
         bar_min = _ist_minutes_from_ts(bar_ts)
         # 60 min after session-open: 09:15 + 60 = 10:15 = 615 min.
@@ -628,8 +632,22 @@ def check_strategy_entry(
             return False, "strategy_vwap_trend_price_below_vwap"
         if not is_buy and ind.close >= ind.vwap:
             return False, "strategy_vwap_trend_price_above_vwap"
-        if ind.adx < 18:
+        # E2E audit 2026-05-26: bumped ADX threshold 18 → 22. At ADX < 22 the
+        # "trend" is too weak — most VWAP_TREND losers showed sideways tape
+        # with brief VWAP crosses. ADX ≥ 22 selects genuine directional moves.
+        if ind.adx < 22:
             return False, "strategy_vwap_trend_adx_too_low"
+        # E2E audit 2026-05-26: require volume confirmation. VWAP without
+        # volume = noise. Most VWAP_TREND losers had vol_ratio < 1.3.
+        if ind.volume.ratio < 1.3:
+            return False, "strategy_vwap_trend_volume_insufficient"
+        # E2E audit 2026-05-26: RSI band — VWAP_TREND fires on momentum
+        # continuation. RSI < 50 = stalling momentum. RSI > 70 = exhaustion.
+        # Sweet spot 50-70 for BUY, 30-50 for SELL.
+        if is_buy and not (50 <= ind.rsi.curr <= 70):
+            return False, "strategy_vwap_trend_buy_rsi_outside_zone"
+        if not is_buy and not (30 <= ind.rsi.curr <= 50):
+            return False, "strategy_vwap_trend_sell_rsi_outside_zone"
         return True, ""
 
     if s == "PHASE1_MOMENTUM":
