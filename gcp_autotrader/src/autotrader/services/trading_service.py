@@ -714,6 +714,87 @@ class TradingService:
                     pass
             _MAX_SAME_STRATEGY = 2   # max 2 positions of the same setup type at once
 
+            # E2E audit 2026-05-26 (R4): Regime-flip soft-exit for swing positions.
+            #
+            # When a swing position was opened in regime X, and the current
+            # regime Y hard-blocks that setup (i.e., the regime that ENABLED
+            # the entry has flipped to one that won't enter it), AND the
+            # position has meaningful adverse excursion (MAE > 0.5R), close
+            # 100% at market.
+            #
+            # Real-world motivation (2026-05-25): 3 SHORT_BREAKDOWN entries at
+            # 09:29 IST in TREND_DOWN regime. Brain flipped TREND_DOWN→RANGE
+            # at 09:50 IST (21 min later). RANGE hard-blocks SHORT_BREAKDOWN.
+            # Positions persisted; SUNTV went to -0.80R MAE, COROMANDEL to
+            # -0.40R, still open 24h later. This logic would have closed them
+            # at the regime flip detection (next swing scan tick).
+            #
+            # Safety: only fires on swing positions ≤2 days old (so we don't
+            # cut profitable swings just because brain happened to flip).
+            # Triggers via place_exit_order (same path as SL/target close).
+            _current_regime_upper = str(brain_state.regime).strip().upper() if brain_state else ""
+            if _current_regime_upper:
+                from autotrader.time_utils import parse_any_ts
+                for _op in _open_positions_all:
+                    try:
+                        if str(_op.get("wl_type") or "").strip().lower() != "swing":
+                            continue
+                        _entry_regime = str(_op.get("regime") or "").strip().upper()
+                        _setup = str(_op.get("strategy") or "").strip().upper()
+                        # Need entry regime + setup recorded to evaluate.
+                        if not _entry_regime or not _setup:
+                            continue
+                        # No flip if regimes match.
+                        if _entry_regime == _current_regime_upper:
+                            continue
+                        # Current regime must hard-block this setup
+                        # (i.e., we couldn't enter this setup now if we tried).
+                        if not regime_hard_blocks_strategy(_current_regime_upper, _setup):
+                            continue
+                        # Require meaningful adverse excursion (≥0.5R MAE).
+                        _mae_r = float(_op.get("max_adverse_excursion_r") or 0.0)
+                        if abs(_mae_r) < 0.5:
+                            continue
+                        # Age check — only protect positions ≤2 calendar days old.
+                        _entry_ts_str = str(_op.get("entry_ts") or "")
+                        _entry_dt = parse_any_ts(_entry_ts_str)
+                        if _entry_dt is None:
+                            continue
+                        from datetime import timedelta
+                        _age = now_ist() - _entry_dt.astimezone(now_ist().tzinfo)
+                        if _age > timedelta(days=2):
+                            continue
+                        # All conditions met. Fire the exit.
+                        _tag = str(_op.get("position_tag") or "")
+                        _ikey = str(_op.get("instrument_key") or "")
+                        if not _tag:
+                            continue
+                        logger.warning(
+                            "regime_flip_soft_exit_firing tag=%s setup=%s entry_regime=%s "
+                            "current_regime=%s mae_r=%.3f age_days=%.1f",
+                            _tag, _setup, _entry_regime, _current_regime_upper,
+                            _mae_r, _age.total_seconds() / 86400.0,
+                        )
+                        self.log_sink.action(
+                            "TradingService", "regime_flip_soft_exit", "FIRED",
+                            f"closing {_setup} (entered in {_entry_regime}, now {_current_regime_upper}) MAE={_mae_r:.2f}R",
+                            {
+                                "position_tag": _tag, "setup": _setup,
+                                "entry_regime": _entry_regime,
+                                "current_regime": _current_regime_upper,
+                                "mae_r": round(_mae_r, 3),
+                                "age_days": round(_age.total_seconds() / 86400.0, 2),
+                            },
+                        )
+                        # Place exit order — sync call, returns dict
+                        self.order_service.place_exit_order(
+                            position_tag=_tag,
+                            instrument_key=_ikey,
+                            exit_reason="REGIME_FLIP_SOFT_EXIT",
+                        )
+                    except Exception:
+                        logger.exception("regime_flip_soft_exit_check_failed pos=%s", _op.get("position_tag"))
+
             # Earnings blackout: read Firestore config/earnings_blackout document.
             # Format: {"symbols": {"RELIANCE": "2026-04-25"}, "blackout_days": 2}
             # Maintained manually (or via a weekly update script). Prevents entering
@@ -1286,6 +1367,24 @@ class TradingService:
                     policy_block_reason = "nifty_breadth_too_bullish_for_shorts"
                 elif market_policy is not None and not self._strategy_allowed(w.strategy, market_policy.allowed_strategies):
                     policy_block_reason = "policy_strategy_blocked"
+                # E2E audit 2026-05-26 (R1 fix): block SHORT_BREAKDOWN before
+                # 10:00 IST. Real-data evidence (2026-05-25): 3 SHORT_BREAKDOWN
+                # entries at 09:29 IST during morning LOCKDOWN; NIFTY rallied
+                # +1.3% on the day; all 3 went underwater. The "panic open" is
+                # noise — institutional flow buys the gap-down by 10:00. By
+                # delaying SHORT_BREAKDOWN entries to ≥10:00 IST we skip the
+                # noisiest window while preserving signal for the rest of day.
+                # Only applies to SHORT_BREAKDOWN (swing). SHORT_PULLBACK +
+                # MR-SELL remain at full window — those have different theses.
+                elif (
+                    _is_swing
+                    and (
+                        str(w.strategy or "").strip().upper() == "SHORT_BREAKDOWN"
+                        or (str(w.strategy or "").strip().upper() == "BREAKOUT" and direction == "SELL")
+                    )
+                    and (now_ist().hour < 10)
+                ):
+                    policy_block_reason = "swing_short_breakdown_pre_10am"
                 elif regime_hard_blocks_strategy(_brain_regime, w.strategy):
                     # Regime playbook: hard-block mismatched strategies (e.g. BREAKOUT in RANGE,
                     # any entry in CHOP). Stronger than the affinity multiplier — prevents
