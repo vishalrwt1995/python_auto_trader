@@ -4114,6 +4114,14 @@ class UniverseService:
         close = float(closes[-1]) if closes else 0.0
         ema50 = self._ema_last(closes, 50)
         ema200 = self._ema_last(closes, 200)
+        # E2E audit 2026-05-26: tactical_trend support — adds fast EMA + recent
+        # return so the brain can detect trend transitions in 5-7 days instead
+        # of the 10-15 day lag of the EMA50/EMA200 framework. Validated against
+        # Weinstein/AQR/Minervini multi-timeframe approaches.
+        ema20 = self._ema_last(closes, 20)
+        ret10 = 0.0
+        if len(closes) >= 11 and closes[-11] > 0:
+            ret10 = (closes[-1] - closes[-11]) / closes[-11] * 100.0
         atr14 = float(calc_atr(daily[-260:], period=14) or 0.0) if len(daily) >= 20 else 0.0
         atr_pct = float((atr14 / close) if close > 0 else 0.0)
         atr_pct_series = self._rolling_atr_pct_series(daily[-320:], period=14)
@@ -4177,6 +4185,9 @@ class UniverseService:
                 "close": close,
                 "ema50": ema50,
                 "ema200": ema200,
+                # E2E audit 2026-05-26: tactical_trend inputs
+                "ema20": ema20,
+                "ret10": ret10,
                 "atr14": atr14,
                 "atrPct": atr_pct,
                 "atrMedian252": atr_median_252,
