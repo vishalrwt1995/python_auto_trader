@@ -712,6 +712,17 @@ class TradingService:
                     _open_book_risk += abs(_mloss)
                 except Exception:
                     pass
+            # Same-symbol dedup (2026-05-28): never open a NEW position in a
+            # (symbol, direction) we already hold open. The max-2-same-strategy
+            # cap below counts by SETUP, not symbol — so it allowed DMART to be
+            # held twice (2× MEAN_REVERSION BUY, entries 05-22 + 05-27),
+            # unintentionally doubling single-name exposure. This set is the
+            # precise guard.
+            _open_symbol_dirs = {
+                (str(_op.get("symbol") or "").strip().upper(),
+                 str(_op.get("side") or "").strip().upper())
+                for _op in _open_positions_all
+            }
             _MAX_SAME_STRATEGY = 2   # max 2 positions of the same setup type at once
 
             # E2E audit 2026-05-26 (R4): Regime-flip soft-exit for swing positions.
@@ -1390,6 +1401,11 @@ class TradingService:
                     # any entry in CHOP). Stronger than the affinity multiplier — prevents
                     # wasting a position slot on a setup that can't work in this regime.
                     policy_block_reason = "regime_strategy_hard_block"
+                elif (str(w.symbol).strip().upper(), str(direction).strip().upper()) in _open_symbol_dirs:
+                    # Same-symbol dedup: already hold this (symbol, direction)
+                    # open. Blocks unintended doubling-up on one name (DMART
+                    # was held twice). Applies to swing + intraday alike.
+                    policy_block_reason = "symbol_already_held"
                 elif _is_swing and _open_swing_count >= self.settings.strategy.swing_max_positions:
                     policy_block_reason = "swing_max_positions_reached"
                 elif not _is_swing and qualified >= max_signals_allowed:
