@@ -4,11 +4,13 @@ Computes realistic frictions for a backtest fill: brokerage, STT (Securities
 Transaction Tax), exchange transaction charges, SEBI charges, GST on
 brokerage+exchange, stamp duty, DP charges (delivery only).
 
-Defaults match Zerodha-style discount-broker fees as of 2026; the user can
-override via `CostConfig` to model their actual broker.
+Defaults match UPSTOX published rates as of 2026 (the broker this system
+trades on). Zerodha rates remain available via `CostConfig.zerodha()` for
+comparison / legacy backtests.
 
 References:
-    https://zerodha.com/charges  (rates change annually — verify before use)
+    https://upstox.com/brokerage-charges/   (rates change — verify before use)
+    https://zerodha.com/charges
 
 Conventions
 -----------
@@ -29,11 +31,15 @@ class CostConfig:
     (0.001 = 0.1%, NOT 0.1). Rupee values are flat fees."""
 
     # ── Brokerage ──────────────────────────────────────────────────────
-    # Zerodha-style: ₹20 per executed order or 0.03% (whichever lower)
-    # for intraday. Delivery: ₹0 brokerage. Capped at ₹20.
-    brokerage_intraday_pct: float = 0.0003     # 0.03%
+    # Upstox (verified upstox.com/brokerage-charges, 2026):
+    #   intraday = ₹20/order or 0.1% (whichever lower)
+    #   delivery = ₹20/order or 2.5% (whichever lower) — ₹20 cap binds for
+    #              any order ≥ ₹800, so effectively ₹20 flat. NOT free.
+    # Zerodha defaults (0.03% intraday, free delivery) via CostConfig.zerodha().
+    brokerage_intraday_pct: float = 0.001      # 0.1%
     brokerage_intraday_cap: float = 20.0       # ₹ per order
-    brokerage_delivery_pct: float = 0.0        # delivery is free at most discount brokers
+    brokerage_delivery_pct: float = 0.025      # 2.5% SEBI cap; ₹20 cap dominates
+    brokerage_delivery_cap: float = 20.0       # ₹ per order (Upstox delivery is NOT free)
 
     # ── STT (paid only on the SELL leg) ────────────────────────────────
     # Intraday: 0.025% on sell side only.
@@ -57,9 +63,29 @@ class CostConfig:
     stamp_delivery_buy_pct: float = 0.00015
 
     # ── DP charges (delivery only, charged on SELL leg) ────────────────
-    # ₹13.5 + GST per scrip per day, regardless of qty.
-    dp_charge_flat: float = 13.5
+    # Upstox: ₹20 + GST per scrip per day, regardless of qty (Zerodha = ₹13.5).
+    dp_charge_flat: float = 20.0
     dp_gst_pct: float = 0.18                   # GST on DP charge separately
+
+    @classmethod
+    def upstox(cls) -> "CostConfig":
+        """Upstox published rates — this is the module default."""
+        return cls()
+
+    @classmethod
+    def zerodha(cls) -> "CostConfig":
+        """Zerodha rates — kept for comparison and legacy backtests.
+
+        Intraday brokerage 0.03% (cap ₹20), delivery brokerage free,
+        DP charge ₹13.5. Everything else (STT, exchange, SEBI, GST,
+        stamp) is statutory and identical to Upstox.
+        """
+        return cls(
+            brokerage_intraday_pct=0.0003,
+            brokerage_delivery_pct=0.0,
+            brokerage_delivery_cap=0.0,
+            dp_charge_flat=13.5,
+        )
 
 
 def compute_leg_cost(
@@ -93,7 +119,7 @@ def compute_leg_cost(
 
     # 1. Brokerage
     if is_swing:
-        brokerage = notional * cfg.brokerage_delivery_pct
+        brokerage = min(cfg.brokerage_delivery_cap, notional * cfg.brokerage_delivery_pct)
     else:
         brokerage = min(cfg.brokerage_intraday_cap, notional * cfg.brokerage_intraday_pct)
 

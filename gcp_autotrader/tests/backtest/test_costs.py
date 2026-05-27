@@ -37,17 +37,53 @@ def test_intraday_sell_includes_stt():
     assert 18 <= diff <= 26   # STT 25 minus stamp 3 = 22
 
 
-def test_delivery_charges_no_brokerage_but_dp_on_sell():
-    """Delivery (swing): zero brokerage, full STT both sides, DP on sell."""
-    cfg = CostConfig()
+def test_delivery_charges_brokerage_and_dp_on_sell():
+    """Delivery (swing) on Upstox default: ₹20 brokerage/leg, full STT both
+    sides, DP ₹20 on sell. (Zerodha had free delivery — see zerodha() test.)"""
+    cfg = CostConfig()  # Upstox default
     buy = compute_leg_cost(side="BUY", qty=100, price=1000.0, is_swing=True, cfg=cfg)
     sell = compute_leg_cost(side="SELL", qty=100, price=1000.0, is_swing=True, cfg=cfg)
-    # Buy: STT 100 + exchange 2.97 + sebi 0.1 + GST(0.55) + stamp 15 → ~118.6
-    # Sell: STT 100 + exchange 2.97 + sebi 0.1 + GST(0.55) + DP 15.93 → ~119.5
+    # Buy: brokerage 20 + STT 100 + exchange 2.97 + sebi 0.1 + GST + stamp 15
+    # Sell: brokerage 20 + STT 100 + exchange 2.97 + sebi 0.1 + GST + DP 23.6
     assert buy > 100  # STT alone is 100
-    assert sell > buy  # DP charge present, stamp absent — sell slightly higher
-    # DP is 13.5 + 18% GST = 15.93
+    assert sell > buy  # DP (₹23.6) > stamp (₹15) — sell higher
     assert (sell - buy) > 0
+
+
+def test_zerodha_delivery_is_free_brokerage():
+    """Backward compat: CostConfig.zerodha() keeps delivery brokerage at ₹0."""
+    cfg = CostConfig.zerodha()
+    buy = compute_leg_cost(side="BUY", qty=100, price=1000.0, is_swing=True, cfg=cfg)
+    upstox_buy = compute_leg_cost(side="BUY", qty=100, price=1000.0, is_swing=True)
+    # Zerodha has no delivery brokerage; Upstox adds ₹20 brokerage + 18% GST on it
+    assert abs((upstox_buy - buy) - 20.0 * (1 + 0.18)) < 0.01
+
+
+def test_default_config_is_upstox():
+    """The module default must be Upstox, not Zerodha."""
+    assert CostConfig() == CostConfig.upstox()
+    assert CostConfig() != CostConfig.zerodha()
+
+
+def test_verified_roundtrip_values_20k():
+    """Lock the externally-verified round-trip costs on a ₹20k position.
+
+    Verified 2026-05-27 against Upstox's published rates + an independent
+    worked example. These are regression guards — if they drift, a rate
+    changed and the intraday/swing viability math must be re-checked.
+    """
+    qty, px = 40, 500.0  # ₹20,000 notional
+    # Upstox (default)
+    intraday_up = compute_round_trip_cost(qty=qty, entry_price=px, exit_price=px, is_swing=False)
+    swing_up = compute_round_trip_cost(qty=qty, entry_price=px, exit_price=px, is_swing=True)
+    assert abs(intraday_up - 54.25) < 0.5, f"Upstox intraday RT drifted: {intraday_up}"
+    assert abs(swing_up - 115.25) < 0.5, f"Upstox swing RT drifted: {swing_up}"
+    # Zerodha (legacy)
+    z = CostConfig.zerodha()
+    intraday_z = compute_round_trip_cost(qty=qty, entry_price=px, exit_price=px, is_swing=False, cfg=z)
+    swing_z = compute_round_trip_cost(qty=qty, entry_price=px, exit_price=px, is_swing=True, cfg=z)
+    assert abs(intraday_z - 21.20) < 0.5, f"Zerodha intraday RT drifted: {intraday_z}"
+    assert abs(swing_z - 60.37) < 0.5, f"Zerodha swing RT drifted: {swing_z}"
 
 
 def test_round_trip_consistency():
