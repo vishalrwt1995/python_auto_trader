@@ -270,7 +270,7 @@ Currently disabled in some regimes. Discussion pending.
 **KEY FINDINGS (decision-grade, honest):**
 - **Swing edge is MARGINAL after real Upstox costs.** 2019-26 backtest: only `swing_50` net-positive; 55/60 lose at all sizes. Edge is thin (~35% WR, +0.06R), lumpy (79% of profit from 2023 alone, 2025 was a losing year), ~4–9%/yr at best on deployed capital. NOT a money-printer.
 - **The dominant lever at ₹1L is POSITION SIZE, not gates** — Upstox's flat fees (₹20 brokerage + ₹20 DP) crush small positions. Bigger positions amortize them.
-- **Intraday is cost-disadvantaged at ₹1L** — 5 trades/day ≈ 68% annual drag. Only "few + large" trades viable. → reconsider Phase E scope.
+- **Intraday is BROKEN at the strategy level, not just costs.** Old-strategy backtest (2025-12→2026-05): **gross −₹440k BEFORE any brokerage** (−₹595k after). It loses on its own merits — sizing/cost tweaks can't fix negative gross edge. Plus cost-disadvantaged at ₹1L (5 trades/day ≈ 68% annual drag). → Phase E #64 must **gate on proving POSITIVE GROSS edge** (build simulator + test ORB/VWAP_TREND gross-first) before any build/fund decision.
 - **Capital decision:** stay at ₹1L for now.
 
 **INCIDENT (resolved):** a `gcloud run deploy --source` from a STALE main working dir (7 commits behind origin/main) silently rolled back the day's work (caught via brain `tactical_trend=NULL`). Fixed by ff-syncing main dir + redeploy. → added deploy-hygiene note in §3.
