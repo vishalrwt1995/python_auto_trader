@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-05-22 20:15 IST · **Last verified live state:** 2026-05-22 20:15 IST
+> **Last updated:** 2026-05-28 01:00 IST · **Last verified live state:** 2026-05-28 00:45 IST
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -104,17 +104,22 @@ gcp_autotrader/
 
 > ⚠️ Always pass `--project grow-profit-machine --account vishalrwt1995@gmail.com` to every gcloud command. Active config alone is not sufficient.
 
-| Service | Latest revision (verified 2026-05-08) | Notes |
+| Service | Latest revision (verified 2026-05-28) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00225-zjt` | min-instances=1, CPU=2 (raised 2026-05-08) |
+| `autotrader` | `autotrader-00244-s52` | PAPER mode; dedup + risk ₹1,500 live (2026-05-28) |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00040-n5c` | min-instances=1, holds Upstox WS loop |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
-**Live trading flags (autotrader env):**
-- `PAPER_TRADE=false` — live orders enabled
-- `allow_live_orders=true` (Firestore runtime)
-- `GCP_PROJECT_ID=grow-profit-machine`
-- `BQ_DATASET=autotrader`
+**Live trading flags (autotrader env, verified 2026-05-28):**
+- `PAPER_TRADE=true` — **PAPER mode** (was `false` on 2026-05-08; flipped to paper since)
+- `CAPITAL=100000` (₹1L)
+- `SWING_RISK_PER_TRADE=1500` (raised 600→1500 on 2026-05-28, validated — see Recent History)
+- `SWING_MIN_SIGNAL_SCORE=45`
+- `GCP_PROJECT_ID=grow-profit-machine` · `BQ_DATASET=autotrader`
+
+> ⚠️ **Deploy auth (2026-05-28):** the `vishalrwt1995@gmail.com` account has NO on-disk credentials. Deploys work via ADC token:
+> `export CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth application-default print-access-token)` then `gcloud run deploy ...`.
+> **Deploy hygiene:** `gcloud run deploy --source` builds from `/Users/.../gcp_autotrader` (the MAIN dir). ALWAYS `git fetch origin main && git merge --ff-only origin/main` in that dir FIRST — on 2026-05-27 a deploy from a stale main dir rolled back a day's work. Verify `git log origin/main..HEAD` is empty before deploying.
 
 **Cloud Scheduler — current jobs (post-2026-05-08 fix):**
 - `autotrader-upstox-token-request` — `35 3 * * 1-5` (08:35 IST UTC offset)
@@ -253,6 +258,24 @@ Currently disabled in some regimes. Discussion pending.
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-05-27/28 — Cost-model correction + swing sizing (live revision autotrader-00244-s52, PAPER)
+
+**Shipped (4 changes, all live):**
+1. **MORNING_FADE vwap-guard fix** (PR #16) — `live_price_above_vwap` was blocking the strategy's own entries (price-above-VWAP IS the fade entry condition). Added MORNING_FADE to the exception tuple.
+2. **costs.py → Upstox rates** (PR #17, commit e492df4) — was modeling **Zerodha** fees; understated real cost **2–4×**. Now defaults to Upstox (intraday 0.1%/cap₹20, delivery ₹20/order, DP ₹20), `.zerodha()` kept. Backtest-only. Verified RT on ₹20k: intraday ₹54.25 / swing ₹115.25.
+3. **Swing sizing `SWING_RISK_PER_TRADE` 600→1500** (env var, rev 00243) — validated on real engine @ ₹1L: net +₹28k/3yr vs +₹4k at ₹600 (costs as % of gross: 84%→51%). Caveat: validated on favorable 2023-26 window; ~27% maxDD.
+4. **Same-symbol dedup** (PR #17, commit 52eaeeb, rev 00244) — new gate `symbol_already_held` blocks holding a (symbol,direction) twice (DMART was held 2×). `_MAX_SAME_STRATEGY=2` already existed for setup-concentration.
+
+**KEY FINDINGS (decision-grade, honest):**
+- **Swing edge is MARGINAL after real Upstox costs.** 2019-26 backtest: only `swing_50` net-positive; 55/60 lose at all sizes. Edge is thin (~35% WR, +0.06R), lumpy (79% of profit from 2023 alone, 2025 was a losing year), ~4–9%/yr at best on deployed capital. NOT a money-printer.
+- **The dominant lever at ₹1L is POSITION SIZE, not gates** — Upstox's flat fees (₹20 brokerage + ₹20 DP) crush small positions. Bigger positions amortize them.
+- **Intraday is cost-disadvantaged at ₹1L** — 5 trades/day ≈ 68% annual drag. Only "few + large" trades viable. → reconsider Phase E scope.
+- **Capital decision:** stay at ₹1L for now.
+
+**INCIDENT (resolved):** a `gcloud run deploy --source` from a STALE main working dir (7 commits behind origin/main) silently rolled back the day's work (caught via brain `tactical_trend=NULL`). Fixed by ff-syncing main dir + redeploy. → added deploy-hygiene note in §3.
+
+**OPEN TODOS:** #68 all-weather re-validate ₹1,500 on full 2019-26 (favorable-window risk); #69 watch live paper swing @ ₹1,500 (10-15 days); #64 Phase E intraday (reconsider scope vs cost reality — gate on ORB+VWAP_TREND first); #61 capital split (deferred until intraday proven).
 
 ### 2026-05-22 20:15 IST — V2 swing exit logic DEPLOYED (live revision autotrader-00235-gtb)
 **PR #10 merged · Revision `autotrader-00235-gtb` · 100% traffic on latest**
