@@ -1408,7 +1408,17 @@ class TradingService:
                 # Only fires when we have a fresh live LTP (_live > 0) — not when falling back to candle close.
                 elif direction == "BUY" and _live > 0 and ltp < ind.vwap and _vwap_guard_active and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
                     policy_block_reason = "live_price_below_vwap"
-                elif direction == "SELL" and _live > 0 and ltp > ind.vwap and _vwap_guard_active and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL"):
+                elif direction == "SELL" and _live > 0 and ltp > ind.vwap and _vwap_guard_active and w.strategy not in ("MEAN_REVERSION", "VWAP_REVERSAL", "MORNING_FADE"):
+                    # E2E audit 2026-05-27: MORNING_FADE added to exception list.
+                    # MORNING_FADE's entire thesis is shorting a stock that
+                    # POPPED above VWAP (gap-up + 1.5% intraday rally) expecting
+                    # fade-back-to-VWAP. The live_price_above_vwap guard was
+                    # incorrectly blocking the exact entries it's designed for.
+                    # Real-data evidence: 0 MORNING_FADE qualifying trades ever
+                    # in production (Mar 7 → May 27), 1,615+ score-100 signals
+                    # blocked by either this guard or related VWAP gates.
+                    # Same pattern as VWAP_REVERSAL (overstretched price + fade
+                    # thesis) — both correctly exempted.
                     policy_block_reason = "live_price_above_vwap"
                 else:
                     # Strategy-specific hard gates: validate that the current market
