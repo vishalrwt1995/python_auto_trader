@@ -106,7 +106,7 @@ gcp_autotrader/
 
 | Service | Latest revision (verified 2026-05-28) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00244-s52` | PAPER mode; dedup + risk ₹1,500 live (2026-05-28) |
+| `autotrader` | `autotrader-00245-b8s` | PAPER; risk ₹1,500, dedup, daily loss/profit ₹3k/₹6k (2026-05-28) |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00040-n5c` | min-instances=1, holds Upstox WS loop |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
@@ -114,6 +114,8 @@ gcp_autotrader/
 - `PAPER_TRADE=true` — **PAPER mode** (was `false` on 2026-05-08; flipped to paper since)
 - `CAPITAL=100000` (₹1L)
 - `SWING_RISK_PER_TRADE=1500` (raised 600→1500 on 2026-05-28, validated — see Recent History)
+- `RISK_PER_TRADE=250` (intraday)
+- `MAX_DAILY_LOSS=3000` · `DAILY_PROFIT_TARGET=6000` (raised 2026-05-28 from stale ₹300/₹375 defaults — now coherent with ₹1,500 swing risk = 2×/4× per-trade; SHARED across swing+intraday)
 - `SWING_MIN_SIGNAL_SCORE=45`
 - `GCP_PROJECT_ID=grow-profit-machine` · `BQ_DATASET=autotrader`
 
