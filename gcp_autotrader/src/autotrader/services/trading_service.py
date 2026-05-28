@@ -658,12 +658,28 @@ class TradingService:
                     _weekly_pnl = self.state.get_realized_pnl_since(_week_start)
                     _monthly_pnl = self.state.get_realized_pnl_since(_month_start)
                     _open_risk = self.state.get_open_risk_by_channel()
+                    # Phase C (2026-05-28 late): when per-channel capital is
+                    # configured (CAPITAL_SWING + CAPITAL_INTRADAY both set),
+                    # derive the PortfolioBook channel_pct from those rupee
+                    # values rather than using the default 40/40/15/5 split.
+                    # This keeps the PortfolioBook channel-budget gate aligned
+                    # with the actual user-configured allocation.
+                    _channel_pct_override = None
+                    _total = float(cfg.capital or 0.0)
+                    if cfg.capital_swing > 0 and cfg.capital_intraday > 0 and _total > 0:
+                        _channel_pct_override = {
+                            "swing":      cfg.capital_swing / _total,
+                            "intraday":   cfg.capital_intraday / _total,
+                            "positional": 0.0,
+                            "hedge":      0.0,
+                        }
                     _portfolio_book = build_portfolio_book(
                         capital=float(cfg.capital or 0.0),
                         open_risk_by_channel=_open_risk,
                         daily_pnl=_today_pnl,
                         weekly_pnl=_weekly_pnl,
                         monthly_pnl=_monthly_pnl,
+                        channel_pct=_channel_pct_override,
                     )
                 except Exception:
                     # Fail-closed on book construction: if we can't read the
