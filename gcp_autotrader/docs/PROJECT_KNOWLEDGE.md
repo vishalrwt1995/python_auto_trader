@@ -106,7 +106,7 @@ gcp_autotrader/
 
 | Service | Latest revision (verified 2026-05-28) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00250-875` | PAPER; **Phase C v2** (per-channel daily limits + position-size caps + capital-exhausted gate + PortfolioBook 50/50), ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware (2026-05-28) |
+| `autotrader` | `autotrader-00252-v7w` | PAPER; **Phase C v2.1** (per-channel daily limits + caps + capital-exhausted + `max_loss` persisted on writes + DAILY_LOSS/PROFIT_PCT explicit), ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00040-n5c` | min-instances=1, holds Upstox WS loop |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
