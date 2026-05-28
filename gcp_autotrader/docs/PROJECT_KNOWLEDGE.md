@@ -11,10 +11,15 @@
 
 ## 0. Quick start for a new chat
 
+> **NEW (2026-05-29):** the canonical entry point is `/Users/vishalrawat/Auto Trading Python GCP/CLAUDE.md` — read that FIRST, then this file. CLAUDE.md has the deploy hygiene rules, gcloud auth gotchas, working-style conventions, and routes to all knowledge docs. Don't skip it.
+>
+> Companion: `gcp_autotrader/docs/GLOSSARY.md` decodes project-specific terms (channel, tact, R-multiple, regime, etc.).
+
 The user's preferred bootstrap prompt for any new chat:
 
 ```
-Read /Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader/docs/PROJECT_KNOWLEDGE.md first.
+Read /Users/vishalrawat/Auto Trading Python GCP/CLAUDE.md and
+/Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader/docs/PROJECT_KNOWLEDGE.md first.
 Then verify production state and tell me what's open. We'll decide together what to work on.
 ```
 
