@@ -106,16 +106,16 @@ gcp_autotrader/
 
 | Service | Latest revision (verified 2026-05-28) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00246-9gc` | PAPER; risk ₹1,500, dedup, ₹3k/₹6k limits, **NSE holiday-aware** (2026-05-28) |
+| `autotrader` | `autotrader-00248-6lx` | PAPER; **Phase C v1 live** (per-channel limits, ₹1L swing + ₹1L intraday), risk ₹1,500, dedup, holiday-aware (2026-05-28) |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00040-n5c` | min-instances=1, holds Upstox WS loop |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
 **Live trading flags (autotrader env, verified 2026-05-28):**
 - `PAPER_TRADE=true` — **PAPER mode** (was `false` on 2026-05-08; flipped to paper since)
-- `CAPITAL=100000` (₹1L)
-- `SWING_RISK_PER_TRADE=1500` (raised 600→1500 on 2026-05-28, validated — see Recent History)
+- **`CAPITAL=200000` (₹2L total)** · `CAPITAL_SWING=100000` · `CAPITAL_INTRADAY=100000` ← Phase C v1 (2026-05-28, late): per-channel capital separation. Each channel has independent daily loss/profit circuit breakers — bad swing day no longer halts intraday and vice versa.
+- `SWING_RISK_PER_TRADE=1500` (raised 600→1500 on 2026-05-28, validated)
 - `RISK_PER_TRADE=250` (intraday)
-- `MAX_DAILY_LOSS=3000` · `DAILY_PROFIT_TARGET=6000` (raised 2026-05-28 from stale ₹300/₹375 defaults — now coherent with ₹1,500 swing risk = 2×/4× per-trade; SHARED across swing+intraday)
+- `MAX_DAILY_LOSS=3000` · `DAILY_PROFIT_TARGET=6000` (LEGACY shared, fallback only — Phase C uses `daily_loss_pct=0.03` / `daily_profit_pct=0.06` per channel: 3%×₹1L=₹3k loss halt, 6%×₹1L=₹6k profit target per channel)
 - `SWING_MIN_SIGNAL_SCORE=45`
 - `GCP_PROJECT_ID=grow-profit-machine` · `BQ_DATASET=autotrader`
 
@@ -270,6 +270,7 @@ Currently disabled in some regimes. Discussion pending.
 4. **Same-symbol dedup** (PR #17, commit 52eaeeb, rev 00244) — new gate `symbol_already_held` blocks holding a (symbol,direction) twice (DMART was held 2×). `_MAX_SAME_STRATEGY=2` already existed for setup-concentration.
 5. **Daily loss/profit limits raised 300/375 → 3000/6000** (env-var, rev 00245) — stale ₹50K-era defaults would've halted system after first swing trade resolved.
 6. **NSE holiday awareness** (PR #18, commit fd0c71a, rev 00246) — `is_market_open_ist()` was weekday+clock only, NO holiday check. Discovered 2026-05-28 Bakri Eid: system thought market was open; only saved by Upstox returning no data. Hardcoded full 2026 NSE calendar (16 dates) in `time_utils.NSE_TRADING_HOLIDAYS` + new `is_trading_day_ist()` helper. Annual maintenance: add next year's list each Dec.
+7. **Phase C v1 — per-channel capital separation** (PR #19, commit 54b1a44, rev 00248, activated 2026-05-28 late evening on Bakri Eid market-closed window). New `CAPITAL_SWING` / `CAPITAL_INTRADAY` env vars + `daily_loss_pct=3%` / `daily_profit_pct=6%` per channel + `channel_capital()` helper in settings + `get_today_realized_pnl_by_channel()` state method. trading_service.py replaces shared daily-limit gate with per-channel logic when both channel capitals are set; legacy shared-pool path preserved as fallback. **Total ₹2L = ₹1L swing + ₹1L intraday.** Bad swing day no longer halts intraday and vice versa. Code shipped behind runtime gate (`capital_swing > 0 AND capital_intraday > 0`); activated by env-var update. 13 new tests + 236 regression — all green. **Phase C v2** (full PortfolioBookV1 activation + per-channel position-size caps + per-channel capital-exhausted gate + dashboard) planned for weekend (offline, market closed Sat/Sun).
 
 **KEY FINDINGS (decision-grade, honest):**
 - **Swing edge is MARGINAL after real Upstox costs.** 2019-26 backtest: only `swing_50` net-positive; 55/60 lose at all sizes. Edge is thin (~35% WR, +0.06R), lumpy (79% of profit from 2023 alone, 2025 was a losing year), ~4–9%/yr at best on deployed capital. NOT a money-printer.
