@@ -61,6 +61,10 @@ class DdThresholds:
     daily_halt_pct: float = 0.030       # 3.0% of capital → no new entries
     weekly_halt_pct: float = 0.050      # 5% of capital in a rolling week
     monthly_halt_pct: float = 0.080     # 8% of capital in a rolling month
+    # Phase C (2026-05-28): daily profit halt — lock gains, stop the channel
+    # for the day once realized PNL crosses this fraction of capital. Applied
+    # per channel when per-channel DD is active.
+    daily_profit_halt_pct: float = 0.060  # 6.0% of capital → halt for the day
 
 
 @dataclass(frozen=True)
