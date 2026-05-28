@@ -35,6 +35,19 @@ def _env_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class StrategySettings:
     capital: float = 50_000.0
+    # Phase C (2026-05-28): per-channel capital allocation. When both non-zero,
+    # PortfolioBookV1 routes each channel's risk gates, daily DD halts, and
+    # position-size caps against its own allocation instead of the shared
+    # `capital`. Both default 0 → falls back to shared `capital` (back-compat).
+    # Typical config: CAPITAL_SWING=100000, CAPITAL_INTRADAY=100000, CAPITAL=200000.
+    capital_swing: float = 0.0
+    capital_intraday: float = 0.0
+    # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
+    # of channel capital. Used by the per-channel daily-limit gate in
+    # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
+    # When 0, falls back to absolute max_daily_loss / daily_profit_target.
+    daily_loss_pct: float = 0.03
+    daily_profit_pct: float = 0.06
     risk_per_trade: float = 125.0
     max_daily_loss: float = 300.0
     daily_profit_target: float = 375.0
@@ -140,6 +153,25 @@ class StrategySettings:
     # the price or not at all.
     paper_entry_slippage_pct: float = 0.0010   # 0.10%
     paper_sl_slippage_pct: float = 0.0020      # 0.20%
+
+    def channel_capital(self, channel: str) -> float:
+        """Return capital allocated to a channel (Phase C 2026-05-28).
+
+        When `capital_swing` / `capital_intraday` are non-zero, each channel
+        operates on its own logical capital pool — used by PortfolioBookV1
+        DD math, position-size caps in `risk.py`, and the capital-exhausted
+        gate. When unset (0), falls back to the shared `capital` field for
+        backward compatibility with single-pool deployments.
+
+        Unknown channel names also fall back to shared capital (fail-open
+        on routing — the channel gate itself handles unknown channels).
+        """
+        ch = str(channel or "").strip().lower()
+        if ch == "swing" and self.capital_swing > 0:
+            return self.capital_swing
+        if ch == "intraday" and self.capital_intraday > 0:
+            return self.capital_intraday
+        return self.capital
 
 
 @dataclass(frozen=True)
@@ -303,6 +335,10 @@ class AppSettings:
     def from_env() -> "AppSettings":
         strategy = StrategySettings(
             capital=_env_float("CAPITAL", 50000),
+            capital_swing=_env_float("CAPITAL_SWING", 0.0),
+            capital_intraday=_env_float("CAPITAL_INTRADAY", 0.0),
+            daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
+            daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
             max_daily_loss=_env_float("MAX_DAILY_LOSS", 300),
             daily_profit_target=_env_float("DAILY_PROFIT_TARGET", 375),

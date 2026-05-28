@@ -549,22 +549,66 @@ class TradingService:
             except Exception:
                 logger.warning("runtime_settings_overrides_failed — using defaults", exc_info=True)
 
-            if _today_pnl <= -abs(cfg.max_daily_loss):
-                _pnl_block_reason = "daily_loss_limit_hit"
-            elif _today_pnl >= cfg.daily_profit_target:
-                _pnl_block_reason = "daily_profit_target_hit"
-            if _pnl_block_reason:
-                self.log_sink.action(
-                    "TradingService", "run_scan_once", "SKIP", _pnl_block_reason,
-                    {"todayPnl": _today_pnl, "maxLoss": cfg.max_daily_loss, "profitTarget": cfg.daily_profit_target},
-                )
-                # Daily loss limit: don't hard-stop — counter-trend setups (MEAN_REVERSION,
-                # VWAP_REVERSAL) work best AFTER sharp down moves. Only block directional
-                # momentum strategies. Profit target: block all new entries (protect the gain).
-                if _pnl_block_reason == "daily_profit_target_hit":
-                    return {"skipped": _pnl_block_reason, "today_pnl": _today_pnl}
-                # Daily loss: continue scan but restrict to counter-trend only (handled per-symbol below)
-                # We'll pass _pnl_block_reason through as a flag consumed later in the loop
+            # Phase C (2026-05-28): per-channel daily-limit gate.
+            # When CAPITAL_SWING and CAPITAL_INTRADAY are BOTH non-zero, the
+            # daily loss/profit halts evaluate PER CHANNEL — so a bad swing
+            # day doesn't halt intraday and vice versa. Falls back to the
+            # legacy shared logic when per-channel capital isn't configured.
+            _per_channel_limits_active = (cfg.capital_swing > 0 and cfg.capital_intraday > 0)
+            _swing_pnl_block_reason = ""
+            _intraday_pnl_block_reason = ""
+            _today_pnl_by_channel: dict[str, float] = {}
+            if _per_channel_limits_active:
+                try:
+                    _today_pnl_by_channel = self.state.get_today_realized_pnl_by_channel(now_ist_str()[:10])
+                except Exception:
+                    logger.exception("daily_pnl_by_channel_failed — failing closed")
+                    self.log_sink.action(
+                        "TradingService", "run_scan_once", "SKIP",
+                        "daily_pnl_by_channel_read_failed_fail_closed",
+                    )
+                    return {"skipped": "daily_pnl_by_channel_read_failed"}
+                for _ch in ("swing", "intraday"):
+                    _ch_cap = cfg.channel_capital(_ch)
+                    _ch_pnl = float(_today_pnl_by_channel.get(_ch, 0.0))
+                    _ch_loss_limit = _ch_cap * cfg.daily_loss_pct
+                    _ch_profit_target = _ch_cap * cfg.daily_profit_pct
+                    _ch_block = ""
+                    if _ch_pnl <= -abs(_ch_loss_limit):
+                        _ch_block = "daily_loss_limit_hit"
+                    elif _ch_pnl >= _ch_profit_target:
+                        _ch_block = "daily_profit_target_hit"
+                    if _ch == "swing":
+                        _swing_pnl_block_reason = _ch_block
+                    else:
+                        _intraday_pnl_block_reason = _ch_block
+                    if _ch_block:
+                        self.log_sink.action(
+                            "TradingService", "run_scan_once", "BLOCK", f"{_ch}_{_ch_block}",
+                            {"channel": _ch, "todayPnl": _ch_pnl,
+                             "lossLimit": _ch_loss_limit, "profitTarget": _ch_profit_target,
+                             "channelCapital": _ch_cap},
+                        )
+                # Note: no early return — if only one channel halts, the
+                # other continues processing the rest of the scan.
+            else:
+                # Legacy shared-pool logic (unchanged when per-channel inactive).
+                if _today_pnl <= -abs(cfg.max_daily_loss):
+                    _pnl_block_reason = "daily_loss_limit_hit"
+                elif _today_pnl >= cfg.daily_profit_target:
+                    _pnl_block_reason = "daily_profit_target_hit"
+                if _pnl_block_reason:
+                    self.log_sink.action(
+                        "TradingService", "run_scan_once", "SKIP", _pnl_block_reason,
+                        {"todayPnl": _today_pnl, "maxLoss": cfg.max_daily_loss, "profitTarget": cfg.daily_profit_target},
+                    )
+                    # Daily loss limit: don't hard-stop — counter-trend setups (MEAN_REVERSION,
+                    # VWAP_REVERSAL) work best AFTER sharp down moves. Only block directional
+                    # momentum strategies. Profit target: block all new entries (protect the gain).
+                    if _pnl_block_reason == "daily_profit_target_hit":
+                        return {"skipped": _pnl_block_reason, "today_pnl": _today_pnl}
+                    # Daily loss: continue scan but restrict to counter-trend only (handled per-symbol below)
+                    # We'll pass _pnl_block_reason through as a flag consumed later in the loop
 
             # ── Daily trade count cap (max_trades_day) ─────────────────────
             # Batch 1.1 (2026-04-22): previously the setting existed in
@@ -1410,6 +1454,17 @@ class TradingService:
                     policy_block_reason = "swing_max_positions_reached"
                 elif not _is_swing and qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
+                elif _per_channel_limits_active and (_swing_pnl_block_reason if _is_swing else _intraday_pnl_block_reason):
+                    # Phase C: per-channel daily-limit block. Looks up the
+                    # candidate's channel-specific block reason set at scan
+                    # start. profit_target_hit → full block; loss_limit_hit →
+                    # restrict to counter-trend setups (same policy as legacy).
+                    _ch_block = _swing_pnl_block_reason if _is_swing else _intraday_pnl_block_reason
+                    _ch_label = "swing" if _is_swing else "intraday"
+                    if _ch_block == "daily_profit_target_hit":
+                        policy_block_reason = f"{_ch_label}_daily_profit_target_hit"
+                    elif _ch_block == "daily_loss_limit_hit" and str(w.strategy or "").strip().upper() not in ("MEAN_REVERSION", "VWAP_REVERSAL", "PHASE1_REVERSAL"):
+                        policy_block_reason = f"{_ch_label}_daily_loss_limit_strategy_restricted"
                 elif _pnl_block_reason == "daily_loss_limit_hit" and str(w.strategy or "").strip().upper() not in ("MEAN_REVERSION", "VWAP_REVERSAL", "PHASE1_REVERSAL"):
                     policy_block_reason = "daily_loss_limit_strategy_restricted"
                 # Staleness gate: if live LTP has moved > 2% away from the candle

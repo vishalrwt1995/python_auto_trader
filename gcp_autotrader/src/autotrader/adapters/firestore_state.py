@@ -281,6 +281,39 @@ class FirestoreStateStore:
             pass
         return round(total, 2)
 
+    def get_today_realized_pnl_by_channel(self, today: str) -> dict[str, float]:
+        """Phase C (2026-05-28) — sum realized PnL today, split by channel.
+
+        Returns a dict like {"swing": ₹, "intraday": ₹}. Channels not present
+        in the data map to 0.0. Used by the per-channel daily-limit gate so a
+        bad swing day doesn't halt intraday and vice versa.
+
+        Channel routing follows `get_open_risk_by_channel` precedent: positions
+        carry a `channel` field (defaults to 'intraday' for legacy rows that
+        don't have it). Best-effort — Firestore outage returns empty dict.
+        """
+        out: dict[str, float] = {"swing": 0.0, "intraday": 0.0}
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                exit_ts = str(row.get("exit_ts", "") or "")
+                if not exit_ts.startswith(today):
+                    continue
+                # Back-compat: prefer explicit `channel`, else derive from wl_type,
+                # else default 'intraday' (matches get_open_risk_by_channel).
+                ch = str(row.get("channel") or "").strip().lower()
+                if not ch:
+                    wlt = str(row.get("wl_type") or "").strip().lower()
+                    ch = "swing" if wlt == "swing" else "intraday"
+                if ch not in out:
+                    out[ch] = 0.0
+                out[ch] += float(row.get("pnl", 0) or 0)
+        except Exception:
+            return {"swing": 0.0, "intraday": 0.0}
+        return {k: round(v, 2) for k, v in out.items()}
+
     def get_realized_pnl_since(self, start_date_iso: str) -> float:
         """M4 — sum realized PnL of positions closed on/after start_date_iso.
 
