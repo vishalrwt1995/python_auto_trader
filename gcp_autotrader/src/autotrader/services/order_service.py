@@ -166,6 +166,14 @@ class OrderService:
         instrument_key: str = "",
     ) -> None:
         _sl_dist = round(abs(entry_price - sl_price), 4)
+        # Phase C v2 (2026-05-28): persist max_loss so downstream consumers
+        # (channel-budget, capital-exhausted gate, future analytics) don't have
+        # to recompute from qty × |entry - sl|. The runtime fallback at
+        # trading_service.py:766-771 uses the same formula, so the stored value
+        # is consistent. Excludes brokerage (matches the fallback) — over the
+        # 4 open pre-fix positions max_loss was empty, causing PortfolioBook
+        # channel-budget to be a no-op. This fix closes that gap going forward.
+        _max_loss = round(qty * _sl_dist, 2)
         doc = {
             "position_tag": position_tag,
             "symbol": symbol,
@@ -175,6 +183,7 @@ class OrderService:
             "qty": qty,
             "original_qty": qty,        # never mutated — used for partial exit sizing
             "sl_dist": _sl_dist,        # distance from entry to SL — used for R-multiple targets
+            "max_loss": _max_loss,      # qty × sl_dist (gross, no brokerage)
             "entry_price": round(entry_price, 2),
             "sl_price": round(sl_price, 2),
             "target": round(target, 2),
