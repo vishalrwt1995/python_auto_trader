@@ -63,9 +63,53 @@ def is_weekday_ist() -> bool:
     return now_ist().weekday() < 5
 
 
+# NSE equity trading holidays — hardcoded annual list (requires update each year).
+# Source: https://zerodha.com/marketintel/holiday-calendar/  (mirrors NSE circular).
+# Note: universe_service has a parallel Upstox-API-driven holiday cache used for
+# lookback / expected-LCD logic — that one is data-driven but had a gap on
+# 2026-05-28 Bakri Eid (system thought market was open). This hardcoded set is
+# the single source of truth for the runtime market-open gate.
+# Last updated 2026-05-28 with full 2026 calendar. Add 2027 next year.
+NSE_TRADING_HOLIDAYS: frozenset[str] = frozenset({
+    "2026-01-15",  # Municipal Corporation Elections (Maharashtra)
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Shri Ram Navami
+    "2026-03-31",  # Shri Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Baba Saheb Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Eid                  ← today, missing before this fix
+    "2026-06-26",  # Moharram
+    "2026-09-14",  # Ganesh Chaturthi
+    "2026-10-02",  # Mahatma Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali-Balipratipada
+    "2026-11-24",  # Prakash Gurpurb Sri Guru Nanak Dev
+    "2026-12-25",  # Christmas
+})
+
+
+def is_trading_holiday_ist(date_str: str | None = None) -> bool:
+    """True if the given date (or today IST) is an NSE equity trading holiday.
+
+    date_str: optional ISO date 'YYYY-MM-DD'; defaults to today_ist().
+    """
+    return (date_str or today_ist()) in NSE_TRADING_HOLIDAYS
+
+
+def is_trading_day_ist() -> bool:
+    """True if today is a weekday AND not an NSE trading holiday."""
+    return is_weekday_ist() and not is_trading_holiday_ist()
+
+
 def is_market_open_ist() -> bool:
+    """True if the IST clock is inside the NSE equity session AND it's a trading
+    day (Mon-Fri excluding holidays). 2026-05-28 fix: now consults the
+    NSE_TRADING_HOLIDAYS set; previously only checked weekday + clock.
+    """
     m = ist_minutes()
-    return is_weekday_ist() and 555 <= m <= 930
+    return is_trading_day_ist() and 555 <= m <= 930
 
 
 def is_entry_window_open_ist(wl_type: str = "intraday") -> bool:
