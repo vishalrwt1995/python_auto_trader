@@ -752,6 +752,12 @@ class TradingService:
             _open_positions_all = self.state.list_open_positions()
             _portfolio_strategies: dict[str, int] = {}
             _open_book_risk = 0.0
+            # Phase C v2 (2026-05-28): track open risk PER CHANNEL too — used
+            # by the per-channel capital-exhausted gate below + makes the
+            # PortfolioBook channel-budget check materially enforce (was a
+            # no-op while max_loss was empty in Firestore; runtime fallback
+            # via qty × |entry - sl| populates real values).
+            _open_book_risk_by_channel: dict[str, float] = {"swing": 0.0, "intraday": 0.0}
             for _op in _open_positions_all:
                 _strat = str(_op.get("strategy") or "").strip().upper()
                 if _strat and _strat not in ("AUTO", "DEFAULT", ""):
@@ -770,6 +776,15 @@ class TradingService:
                         _sp = float(_op.get("sl_price") or 0.0)
                         _mloss = _q * abs(_ep - _sp) if _q and _ep and _sp else 0.0
                     _open_book_risk += abs(_mloss)
+                    # Phase C v2: also aggregate per channel (same wl_type/channel
+                    # routing as get_today_realized_pnl_by_channel).
+                    _op_ch = str(_op.get("channel") or "").strip().lower()
+                    if not _op_ch:
+                        _op_wlt = str(_op.get("wl_type") or "").strip().lower()
+                        _op_ch = "swing" if _op_wlt == "swing" else "intraday"
+                    if _op_ch not in _open_book_risk_by_channel:
+                        _open_book_risk_by_channel[_op_ch] = 0.0
+                    _open_book_risk_by_channel[_op_ch] += abs(_mloss)
                 except Exception:
                     pass
             # Same-symbol dedup (2026-05-28): never open a NEW position in a
@@ -1398,7 +1413,17 @@ class TradingService:
                 # losing day) - open_book_risk must cover the new trade's
                 # max_loss. PortfolioBook channel throttles (when enabled)
                 # do not hard-block this; today_pnl gate is realized-only.
-                elif (cfg.capital + _today_pnl - _open_book_risk) < float(pos.max_loss):
+                elif _per_channel_limits_active and (
+                    cfg.channel_capital("swing" if _is_swing else "intraday")
+                    + float(_today_pnl_by_channel.get("swing" if _is_swing else "intraday", 0.0))
+                    - _open_book_risk_by_channel.get("swing" if _is_swing else "intraday", 0.0)
+                ) < float(pos.max_loss):
+                    # Phase C v2: per-channel capital-exhausted check.
+                    # Same formula as legacy, but channel-scoped: only this
+                    # channel's capital + its realized PnL today - its committed
+                    # open risk must cover the new trade's worst-case loss.
+                    policy_block_reason = "channel_capital_exhausted"
+                elif not _per_channel_limits_active and (cfg.capital + _today_pnl - _open_book_risk) < float(pos.max_loss):
                     policy_block_reason = "capital_exhausted"
                 elif _sym_upper in _recent_exits:
                     # Batch 2.1 (2026-04-22): symbol closed a position in the
