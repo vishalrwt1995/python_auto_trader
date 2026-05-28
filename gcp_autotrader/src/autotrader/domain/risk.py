@@ -19,7 +19,11 @@ def calc_swing_position_size(
     target = entry_price + sl_dist * cfg.swing_rr if direction == "BUY" else entry_price - sl_dist * cfg.swing_rr
 
     raw_qty = int(cfg.swing_risk_per_trade // sl_dist) if sl_dist > 0 else 0
-    qty = min(raw_qty, int((cfg.capital * 0.20) // max(entry_price, 1)))  # 20% max capital per swing
+    # Phase C v2 (2026-05-28): cap uses SWING channel capital when per-channel
+    # capital is configured (CAPITAL_SWING set) — falls back to total `capital`
+    # otherwise via channel_capital("swing"). 20% max position per swing.
+    _swing_cap = cfg.channel_capital("swing")
+    qty = min(raw_qty, int((_swing_cap * 0.20) // max(entry_price, 1)))
     # Risk-budget enforcement.
     #
     # Audit 2026-05-21: prior logic forced `qty=max(1, qty)` even when
@@ -114,7 +118,10 @@ def calc_position_size(
     target = entry_price + sl_dist * rr if direction == "BUY" else entry_price - sl_dist * rr
 
     raw_qty = int(cfg.risk_per_trade // sl_dist) if sl_dist > 0 else 0
-    qty = min(raw_qty, int((cfg.capital * 0.15) // max(entry_price, 1)))
+    # Phase C v2 (2026-05-28): cap uses INTRADAY channel capital when configured.
+    # 15% max position per intraday trade (tighter than 20% swing).
+    _intraday_cap = cfg.channel_capital("intraday")
+    qty = min(raw_qty, int((_intraday_cap * 0.15) // max(entry_price, 1)))
     # Skip trade only if even 1 share would exceed 1.5× risk budget (SL too wide).
     # Previously this was 2× which forced qty=1 for stocks with SL between 1-2× risk
     # budget, turning them into trades that risked ₹2,000–4,000 for a ₹2,000 budget.
