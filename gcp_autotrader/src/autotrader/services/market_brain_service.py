@@ -5,13 +5,13 @@ import math
 import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, get_args
 
 from autotrader.adapters.bigquery_client import BigQueryClient
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.pubsub_client import PubSubClient
-from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot
+from autotrader.domain.models import MarketBrainState, MarketPolicy, MarketRegimeV2, RegimeSnapshot
 from autotrader.services.market_breadth_service import MarketBreadthService
 from autotrader.services.market_leadership_service import MarketLeadershipService
 from autotrader.services.market_policy_service import MarketPolicyService
@@ -159,7 +159,12 @@ class MarketBrainService:
     ) -> None:
         # Sanity validation before persisting — prevents corrupted state from becoming
         # "last-known-good" and contaminating future fallback reads.
-        _valid_regimes = {"TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"}
+        # Whitelist derived from the MarketRegimeV2 type = single source of truth,
+        # so it can never drift from the classifier again. (Bug 2026-06-01: the old
+        # hardcoded set was missing Phase-D EARLY_TREND_UP/DOWN + RANGE_ROTATING,
+        # silently blocking persistence whenever the brain produced them → brain
+        # froze at the last valid regime, e.g. stuck at 09:42 on June 1.)
+        _valid_regimes = {str(r).upper() for r in get_args(MarketRegimeV2)}
         _valid_risk_modes = {"NORMAL", "DEFENSIVE", "AGGRESSIVE", "LOCKDOWN"}
         if str(state.regime or "").upper() not in _valid_regimes:
             logger.error(
