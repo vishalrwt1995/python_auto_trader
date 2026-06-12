@@ -4940,6 +4940,11 @@ class UniverseService:
                     {
                         **r,
                         "score": float(_score),
+                        # 2026-06 swing-config: regime-weighted final blend — the
+                        # scan-time slot-ranking key (validated as 'wl_score' in the
+                        # multi-year backtest). Distinct from 'score' (per-setup
+                        # component), which drives watchlist selection only.
+                        "wl_score": float(round(final_score, 2)),
                         "setupLabel": _label,
                         "tradeDirection": _direction,
                         "breakout": breakout,
@@ -4972,6 +4977,7 @@ class UniverseService:
                     {
                         **r,
                         "score": float(_fallback_score),
+                        "wl_score": float(round(final_score, 2)),
                         "setupLabel": _top_label,
                         "tradeDirection": "BUY",
                         "breakout": breakout,
@@ -4998,7 +5004,26 @@ class UniverseService:
         if market_policy is not None:
             swing_target = max(1, math.floor(float(swing_target) * float(market_policy.watchlist_target_multiplier or 1.0)))
         swing_target = min(swing_target, 150)
-        swing_selected = _select_rows(swing_scored, target=swing_target)
+        # 2026-06 swing-config: per-setup diversified slates (multi-emit selection).
+        # The old single _select_rows() call deduped to ONE row per symbol, so the
+        # highest-component setup (usually MOMENTUM in a strong tape) hid the same
+        # symbol's PULLBACK / MEAN_REVERSION rows — and the regime gate then had
+        # nothing to trade on RANGE days. Mirror the validated backtest selection
+        # (backtest_v2/swing_s2_shorts): run the SAME diversified selection once per
+        # active setup, so a symbol may appear once PER SETUP. Scan-time slot
+        # ranking uses the regime-weighted wl_score; these per-setup component
+        # scores drive watchlist selection only. BREAKOUT is intentionally absent —
+        # hard-blocked in every regime (no VCP/base detection yet); emitting its
+        # rows would only burn scan cycles. Re-enabling BREAKOUT must add it here.
+        _MULTI_EMIT_SETUPS = ("MOMENTUM", "PULLBACK", "MEAN_REVERSION")
+        swing_selected = []
+        for _setup_name in _MULTI_EMIT_SETUPS:
+            _setup_rows = [
+                r for r in swing_scored
+                if str(r.get("setupLabel") or "").strip().upper() == _setup_name
+            ]
+            if _setup_rows:
+                swing_selected.extend(_select_rows(_setup_rows, target=swing_target))
 
         intraday_phase1: list[dict[str, Any]] = []
         intraday_is_bearish = canonical_regime in {"PANIC", "TREND_DOWN"}
@@ -5580,6 +5605,7 @@ class UniverseService:
                         "atrPct14D": float(round(float(r.get("atrPct14D") or 0.0), 6)),
                         "rs_vs_mkt": float(round(float(r.get("rs_vs_mkt") or 0.0), 6)),
                         "breadth_pct": float(round(breadth_pct, 2)),
+                        "wl_score": float(round(float(r.get("wl_score") or 0.0), 2)),
                         "wlType": "swing",
                         "wl_type": "swing",  # dual-write snake_case for hook compatibility
                     })

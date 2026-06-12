@@ -420,3 +420,17 @@ def swing_setup_allowed_in_regime(setup: str, regime: str) -> bool:
     if allowed is None:
         return True
     return str(regime or "").strip().upper() in allowed
+
+
+# Reserve-2-trend slot allocation (2026-06 swing-config): the RANGE-bucket cell
+# (MEAN_REVERSION) may hold at most 3 of the 5 swing slots concurrently, keeping
+# 2 free for the TREND-bucket cells (MOMENTUM/PULLBACK). Backtest evidence: MR
+# signals are ~5× more frequent and otherwise crowd out the trend trades exactly
+# when a new uptrend starts — the reserve added ~+8k NET at ₹1L vs no cap.
+SWING_RANGE_GROUP_CAP = 3
+_SWING_RANGE_GROUP = {"MEAN_REVERSION"}
+
+
+def swing_setup_group(setup: str) -> str:
+    """Slot-allocation group: 'RANGE' for MEAN_REVERSION, 'TREND' for the rest."""
+    return "RANGE" if str(setup or "").strip().upper() in _SWING_RANGE_GROUP else "TREND"
