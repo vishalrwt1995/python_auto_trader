@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-05-28 01:00 IST · **Last verified live state:** 2026-05-28 00:45 IST
+> **Last updated:** 2026-06-13 07:15 IST · **Last verified live state:** 2026-06-13 07:05 IST
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -109,9 +109,9 @@ gcp_autotrader/
 
 > ⚠️ Always pass `--project grow-profit-machine --account vishalrwt1995@gmail.com` to every gcloud command. Active config alone is not sufficient.
 
-| Service | Latest revision (verified 2026-05-28) | Notes |
+| Service | Latest revision (verified 2026-06-13) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00252-v7w` | PAPER; **Phase C v2.1** (per-channel daily limits + caps + capital-exhausted + `max_loss` persisted on writes + DAILY_LOSS/PROFIT_PCT explicit), ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
+| `autotrader` | `autotrader-00254-wqk` | PAPER; **Swing overhaul 2026-06-13** (PR #23: daily 1R trailing exit + validated 3-cell selection — see §8) on top of Phase C v2.1; ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00040-n5c` | min-instances=1, holds Upstox WS loop |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
@@ -265,6 +265,25 @@ Currently disabled in some regimes. Discussion pending.
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-13 — SWING OVERHAUL: trailing exit + validated 3-cell selection (PR #23, rev autotrader-00254-wqk, PAPER)
+
+**Why:** multi-year faithful backtest (2022–2026, 58,430-signal pool) showed the old swing config nets **−56,820 at ₹1L (−12.9%/yr)** — the 0.5R-partial/2R-target exit churns into costs, momentum/pullback fire in edge-less regimes, the single-emit watchlist hides the profitable setups, and slots fill first-come.
+
+**Shipped (merge f141f83; PR1 c10b82e + PR2 dce43a6/1ceacdb):**
+1. **Exit → daily 1R trailing** (`domain/swing_exit.py`, single source of truth): ride full size, arm at +1R, trail = stored `sl_dist` below the running peak; 20 **trading-day** max-hold (was 10 calendar). `swing_reconciliation_service` ratchets the stop premarket (dropped TARGET_HIT_DAILY + SUPERTREND_FLIP exits; kept daily-close SL backstop); `ws_monitor` swing path = resting-SL only (0.5R partial + 2R target + intraday ATR-trail removed/gated for swing).
+2. **Regime gate** (`swing_setup_allowed_in_regime`): MOMENTUM/PULLBACK only in {TREND_UP, EARLY_TREND_UP}; MEAN_REVERSION only in {RANGE, RANGE_ROTATING}; nothing in PANIC/TREND_DOWN/CHOP/RECOVERY. Block reason `swing_setup_regime_gate`.
+3. **Shorts disabled** (`_ALLOW_SHORT_SETUPS=False` in universe_service) — no cash-executable short edge (PANIC V-bounce squeeze).
+4. **Multi-emit watchlist**: per-setup diversified slates for {MOMENTUM, PULLBACK, MEAN_REVERSION} (a symbol may appear once per setup); BREAKOUT not emitted (hard-blocked everywhere).
+5. **wl_score slot ranking**: regime-weighted `final_score` persisted per row; scan fills the 5 swing slots best-first (`_read_watchlist_with_fallback` re-sorts swing rows desc).
+6. **Per-cell filters**: MR+PULLBACK need `rs_vs_mkt>0` (ret60 − universe-mean ret60); PULLBACK needs `breadth_pct≥60` (% of swing universe > 50d SMA). Fail closed on legacy docs until next premarket build. Block reasons `swing_rs_below_market` / `swing_breadth_below_60`.
+7. **Reserve-2-trend**: MEAN_REVERSION ≤ 3 of 5 concurrent slots (`SWING_RANGE_GROUP_CAP=3`, block reason `swing_range_slots_full`).
+
+**Evidence:** fidelity gate (`backtest_v2/prod_replay_validate.py`, artifacts log 2026-06-13) — prod predicates reproduce the validated config **to the rupee** (+39,310 ₹1L NET). **Honest deployable expectation** (prod RS = as-of timing, no look-ahead): **+29,969 NET ₹1L (+6.8%/yr)**; ₹2L +57,111 / ₹3L +94,777 / ₹5L +211,595 (+9.6%/yr). Discovery: the backtest RS carried a 1-day look-ahead worth ~−18k; prod's arithmetic-mean leg recovers ~+9k; RS filter still honestly earns +17,949 (no-RS control = +12,020). OOS-realistic: **~+3–5%/yr at ₹1L, lumpy** (2026 H1 negative: bear leg + V-bounce with 1 TREND_UP day; MR dip-buying bleeds in down-RANGE — known weakness, mitigations on). Tests: 399 passed (30 new: `test_swing_exit` incl. exit ≡ backtest on all 58,430 entries, `test_swing_regime_gate`, `test_swing_selection`, `test_ws_monitor_swing_exit`); 4 pre-existing date-dependent `test_watchlist_v2` phase2 failures unrelated (stash-verified; holiday-calendar AttributeError — open item).
+
+**Live verification (2026-06-13 ~07:00 IST, Saturday):** rev `autotrader-00254-wqk` serving 100%; env preserved (PAPER_TRADE=true, CAPITAL_SWING=100000, SWING_RISK_PER_TRADE=1500, SWING_MIN_SIGNAL_SCORE=45); manual `/jobs/swing-reconcile` smoke on the 5 open PAPER positions (4 SHORT_BREAKDOWN + 1 MEAN_REVERSION): `checked=5 errors=0`, no exits (correct: 1–5 days held vs 20d max, no SL breach), no trail updates (correct: none at +1R yet), **no `swing_recon_no_sl_dist` warnings** (all positions trail-capable).
+
+**Watch Monday (2026-06-16):** 08:30 premarket build must write `wl_score`/`rs_vs_mkt`/`breadth_pct` on swing rows (until then RS/breadth gates fail closed); 09:22 swing scan should show new block reasons in scan_decisions; no new shorts ever; open shorts exit via trail/SL/20d max-hold only.
 
 ### 2026-05-27/28 — Cost-model correction + swing sizing (live revision autotrader-00244-s52, PAPER)
 
