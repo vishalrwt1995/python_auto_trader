@@ -92,7 +92,11 @@ class StrategySettings:
     # qty math envelope without changing the SL distance per share.
     swing_risk_per_trade: float = 300.0
     swing_max_positions: int = 5
-    swing_max_hold_days: int = 10
+    # 2026-06: 10 → 20. The backtest-validated daily 1R trailing exit
+    # (domain/swing_exit) lets winners ride; a 20-bar max-hold gives trend trades
+    # room while the trail caps give-back. Counted in TRADING days in
+    # swing_reconciliation_service (holiday/weekend-proof via daily-bar count).
+    swing_max_hold_days: int = 20
     # P1 (2026-04-22): dropped 75 → 70 after live observation that scorer-eligible
     # daily-uptrending names (WELCORP daily_strength=82, LLOYDSME=84, STLTECH=88)
     # cluster at adjusted_score 62–73 in RANGE/NORMAL regimes. Intraday uses a

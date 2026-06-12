@@ -4618,6 +4618,8 @@ class UniverseService:
 
         swing_work: list[dict[str, Any]] = []
         ret60_values: list[float] = []
+        _breadth_above = 0  # 2026-06: SMA-50 market breadth (% of universe > 50d SMA)
+        _breadth_total = 0
         for r in swing_candidates:
             daily = self._watchlist_daily_candles(r, expected_lcd)
             if len(daily) < 60:
@@ -4630,6 +4632,11 @@ class UniverseService:
             ret_20 = ((close / closes[-21]) - 1.0) if len(closes) >= 21 and closes[-21] > 0 else 0.0
             ret_60 = ((close / closes[-61]) - 1.0) if len(closes) >= 61 and closes[-61] > 0 else ret_20
             ret60_values.append(ret_60)
+            if len(closes) >= 50 and close > 0:
+                _sma50 = sum(closes[-50:]) / 50.0
+                _breadth_total += 1
+                if close > _sma50:
+                    _breadth_above += 1
             vol_med20 = float(statistics.median(vols[-20:])) if vols[-20:] else 0.0
             vol_ratio = float((vols[-1] / vol_med20) if vol_med20 > 0 else 1.0)
             ema20 = self._ema_last(closes, 20)
@@ -4678,6 +4685,12 @@ class UniverseService:
 
         ret_mean = float(statistics.mean(ret60_values)) if ret60_values else 0.0
         ret_std = float(statistics.pstdev(ret60_values)) if len(ret60_values) > 1 else 0.0
+        # 2026-06 swing-config: market breadth = % of the swing universe trading
+        # above its 50-day SMA. Gates the PULLBACK cell (breadth >= 60). Matches the
+        # backtest's SMA-50 breadth definition (final_config.build_market), computed
+        # here over the eligible-swing universe (live universe differs from the
+        # backtest's full daily set — a documented approximation).
+        breadth_pct = (100.0 * _breadth_above / _breadth_total) if _breadth_total else 0.0
 
         # Fix 5: sector-relative RS — z-score within peer group, not universe-wide
         sector_ret60_map: dict[str, list[float]] = {}
@@ -4699,6 +4712,10 @@ class UniverseService:
             # Fix 5: sector-blended RS (60% sector-relative, 40% universe-relative)
             ret60_val = float(r.get("ret60") or 0.0)
             z_universe = ((ret60_val - ret_mean) / ret_std) if ret_std > 1e-9 else 0.0
+            # 2026-06 swing-config: equal-weight relative strength vs the universe.
+            # rs_vs_mkt > 0  ⟺  ret60 beat the universe mean 60d return (≡ z_universe>0).
+            # Gates MEAN_REVERSION + PULLBACK (rs_vs_mkt > 0). See trading_service.
+            r["rs_vs_mkt"] = ret60_val - ret_mean
             sec_key = str(r.get("sector") or "UNKNOWN").upper()
             sec_mean, sec_std = sector_ret_stats.get(sec_key, (ret_mean, ret_std))
             z_sector = ((ret60_val - sec_mean) / sec_std) if sec_std > 1e-9 else z_universe
@@ -4865,8 +4882,15 @@ class UniverseService:
             _stock_bearish_structure = (
                 ema50 > 0 and ema200 > 0 and ema50 < ema200 and close < ema50
             )
-            _allow_short_scoring = is_bearish_regime or (
-                _stock_bearish_structure and canonical_regime != "TREND_UP"
+            # 2026-06 swing-config: SHORT setups DISABLED. The multi-year backtest
+            # found no cash-executable short edge — SHORT_BREAKDOWN×PANIC is a
+            # V-bounce squeeze trap (negative net of cost) and SHORT_PULLBACK was
+            # dormant (5 signals). Keep the scoring below for a future validated
+            # re-enable, but emit no short candidates. Flip the flag to restore.
+            _ALLOW_SHORT_SETUPS = False
+            _allow_short_scoring = _ALLOW_SHORT_SETUPS and (
+                is_bearish_regime
+                or (_stock_bearish_structure and canonical_regime != "TREND_UP")
             )
             short_breakout = 0.0
             short_pullback = 0.0
@@ -4916,6 +4940,11 @@ class UniverseService:
                     {
                         **r,
                         "score": float(_score),
+                        # 2026-06 swing-config: regime-weighted final blend — the
+                        # scan-time slot-ranking key (validated as 'wl_score' in the
+                        # multi-year backtest). Distinct from 'score' (per-setup
+                        # component), which drives watchlist selection only.
+                        "wl_score": float(round(final_score, 2)),
                         "setupLabel": _label,
                         "tradeDirection": _direction,
                         "breakout": breakout,
@@ -4948,6 +4977,7 @@ class UniverseService:
                     {
                         **r,
                         "score": float(_fallback_score),
+                        "wl_score": float(round(final_score, 2)),
                         "setupLabel": _top_label,
                         "tradeDirection": "BUY",
                         "breakout": breakout,
@@ -4974,7 +5004,26 @@ class UniverseService:
         if market_policy is not None:
             swing_target = max(1, math.floor(float(swing_target) * float(market_policy.watchlist_target_multiplier or 1.0)))
         swing_target = min(swing_target, 150)
-        swing_selected = _select_rows(swing_scored, target=swing_target)
+        # 2026-06 swing-config: per-setup diversified slates (multi-emit selection).
+        # The old single _select_rows() call deduped to ONE row per symbol, so the
+        # highest-component setup (usually MOMENTUM in a strong tape) hid the same
+        # symbol's PULLBACK / MEAN_REVERSION rows — and the regime gate then had
+        # nothing to trade on RANGE days. Mirror the validated backtest selection
+        # (backtest_v2/swing_s2_shorts): run the SAME diversified selection once per
+        # active setup, so a symbol may appear once PER SETUP. Scan-time slot
+        # ranking uses the regime-weighted wl_score; these per-setup component
+        # scores drive watchlist selection only. BREAKOUT is intentionally absent —
+        # hard-blocked in every regime (no VCP/base detection yet); emitting its
+        # rows would only burn scan cycles. Re-enabling BREAKOUT must add it here.
+        _MULTI_EMIT_SETUPS = ("MOMENTUM", "PULLBACK", "MEAN_REVERSION")
+        swing_selected = []
+        for _setup_name in _MULTI_EMIT_SETUPS:
+            _setup_rows = [
+                r for r in swing_scored
+                if str(r.get("setupLabel") or "").strip().upper() == _setup_name
+            ]
+            if _setup_rows:
+                swing_selected.extend(_select_rows(_setup_rows, target=swing_target))
 
         intraday_phase1: list[dict[str, Any]] = []
         intraday_is_bearish = canonical_regime in {"PANIC", "TREND_DOWN"}
@@ -5554,6 +5603,9 @@ class UniverseService:
                         "liquidityBucket": str(r.get("liquidityBucket", "")),
                         "turnoverRank60D": r.get("turnoverRank60D"),
                         "atrPct14D": float(round(float(r.get("atrPct14D") or 0.0), 6)),
+                        "rs_vs_mkt": float(round(float(r.get("rs_vs_mkt") or 0.0), 6)),
+                        "breadth_pct": float(round(breadth_pct, 2)),
+                        "wl_score": float(round(float(r.get("wl_score") or 0.0), 2)),
                         "wlType": "swing",
                         "wl_type": "swing",  # dual-write snake_case for hook compatibility
                     })

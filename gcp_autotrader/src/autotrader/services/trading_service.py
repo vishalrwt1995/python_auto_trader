@@ -14,7 +14,13 @@ from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.daily_bias import compute_daily_bias
-from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regime_strategy_multiplier
+from autotrader.domain.regime_affinity import (
+    SWING_RANGE_GROUP_CAP,
+    regime_hard_blocks_strategy,
+    regime_strategy_multiplier,
+    swing_setup_allowed_in_regime,
+    swing_setup_group,
+)
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
 from autotrader.domain.expected_edge import evaluate as evaluate_expected_edge
 from autotrader.domain.playbook import check_playbook
@@ -75,8 +81,24 @@ class TradingService:
                         enabled=True,
                         note=str(r.get("reason", r.get("notes", "")) or ""),
                         wl_type=wl_type,
+                        wl_score=float(r.get("wl_score", 0.0) or 0.0),
+                        rs_vs_mkt=float(r.get("rs_vs_mkt", 0.0) or 0.0),
+                        breadth_pct=float(r.get("breadth_pct", 0.0) or 0.0),
                     ))
                 if rows:
+                    # 2026-06 swing-config: rank swing rows by the regime-weighted
+                    # wl_score (desc) so the 5-slot book fills BEST-first within a
+                    # scan, mirroring the backtest's slot allocation. The old doc
+                    # order was per-setup component score — first-come slot fill on
+                    # that order is what the backtest showed costs real money.
+                    # Intraday rows keep their original relative order (their slot
+                    # accounting is unaffected by swing ordering).
+                    _intraday_rows = [x for x in rows if x.wl_type != "swing"]
+                    _swing_rows = sorted(
+                        (x for x in rows if x.wl_type == "swing"),
+                        key=lambda x: -float(x.wl_score or 0.0),
+                    )
+                    rows = _intraday_rows + _swing_rows
                     logger.debug("watchlist_read_source=firestore count=%d", len(rows))
                     return rows
         except Exception:
@@ -906,11 +928,17 @@ class TradingService:
                 )
                 return {"skipped": "earnings_blackout_read_failed"}
 
-            # Count existing swing positions for separate cap
-            _open_swing_count = sum(
-                1 for p in self.state.list_open_positions()
-                if str(p.get("wl_type") or "").strip().lower() == "swing"
-            )
+            # Count existing swing positions for separate cap — total and the
+            # RANGE-group subset (2026-06 reserve-2-trend: MEAN_REVERSION may hold
+            # at most SWING_RANGE_GROUP_CAP of the swing slots concurrently).
+            _open_swing_count = 0
+            _open_swing_range_count = 0
+            for p in self.state.list_open_positions():
+                if str(p.get("wl_type") or "").strip().lower() != "swing":
+                    continue
+                _open_swing_count += 1
+                if swing_setup_group(str(p.get("strategy") or "")) == "RANGE":
+                    _open_swing_range_count += 1
 
             # ── Re-entry cooldown (Batch 2.1, 2026-04-22) ──────────────────
             # Suppress symbols whose last position closed within the last
@@ -1486,6 +1514,33 @@ class TradingService:
                     # any entry in CHOP). Stronger than the affinity multiplier — prevents
                     # wasting a position slot on a setup that can't work in this regime.
                     policy_block_reason = "regime_strategy_hard_block"
+                elif _is_swing and not swing_setup_allowed_in_regime(w.strategy, _brain_regime):
+                    # 2026-06 swing-config: the three validated long cells fire only in
+                    # their regime bucket — MOMENTUM/PULLBACK in {TREND_UP, EARLY_TREND_UP},
+                    # MEAN_REVERSION in {RANGE, RANGE_ROTATING}. Every other regime trades
+                    # none of the three. See regime_affinity._SWING_SETUP_REGIMES.
+                    policy_block_reason = "swing_setup_regime_gate"
+                elif (
+                    _is_swing
+                    and str(w.strategy or "").strip().upper() in ("MEAN_REVERSION", "PULLBACK")
+                    and float(w.rs_vs_mkt or 0.0) <= 0.0
+                ):
+                    # 2026-06 swing-config: MR + PULLBACK require relative strength
+                    # ABOVE the universe (ret60 > equal-weight universe mean). Removes
+                    # falling-knife entries; backtest: MR×RANGE NET +22,900 → +48,655
+                    # at ₹1L with this filter. Fail-closed on legacy watchlist docs
+                    # (missing field reads 0.0 → blocked) until the next premarket build.
+                    policy_block_reason = "swing_rs_below_market"
+                elif (
+                    _is_swing
+                    and str(w.strategy or "").strip().upper() == "PULLBACK"
+                    and float(w.breadth_pct or 0.0) < 60.0
+                ):
+                    # 2026-06 swing-config: PULLBACK additionally needs broad
+                    # participation (≥60% of the swing universe above its 50d SMA) —
+                    # buying dips only works when the rising tide is wide. Validated
+                    # threshold from the backtest breadth sweep (50/60/70 plateau).
+                    policy_block_reason = "swing_breadth_below_60"
                 elif (str(w.symbol).strip().upper(), str(direction).strip().upper()) in _open_symbol_dirs:
                     # Same-symbol dedup: already hold this (symbol, direction)
                     # open. Blocks unintended doubling-up on one name (DMART
@@ -1493,6 +1548,16 @@ class TradingService:
                     policy_block_reason = "symbol_already_held"
                 elif _is_swing and _open_swing_count >= self.settings.strategy.swing_max_positions:
                     policy_block_reason = "swing_max_positions_reached"
+                elif (
+                    _is_swing
+                    and swing_setup_group(w.strategy) == "RANGE"
+                    and _open_swing_range_count >= SWING_RANGE_GROUP_CAP
+                ):
+                    # 2026-06 reserve-2-trend: MEAN_REVERSION (RANGE group) may hold at
+                    # most 3 of the 5 swing slots; 2 stay reserved for MOMENTUM/PULLBACK
+                    # so frequent MR signals can't crowd out trend entries at the start
+                    # of a new uptrend. Backtest: ~+8k NET at ₹1L vs no reserve.
+                    policy_block_reason = "swing_range_slots_full"
                 elif not _is_swing and qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
                 elif _per_channel_limits_active and (_swing_pnl_block_reason if _is_swing else _intraday_pnl_block_reason):
@@ -1653,6 +1718,8 @@ class TradingService:
                             _scan_row_rich.update({"status": "filtered", "reason": "swing_race_condition_blocked"})
                             continue
                         _open_swing_count += 1
+                        if swing_setup_group(w.strategy) == "RANGE":
+                            _open_swing_range_count += 1
                     if w.sector and w.sector.upper() != "UNKNOWN":
                         _portfolio_sectors.setdefault(w.sector.upper(), []).append(w.symbol)
                     _strat_key = str(w.strategy or "").strip().upper()

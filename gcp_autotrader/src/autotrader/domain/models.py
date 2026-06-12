@@ -281,6 +281,10 @@ class WatchlistRow:
     enabled: bool = True
     note: str = ""
     wl_type: str = "intraday"  # "intraday" or "swing"
+    # 2026-06 swing-config (populated for swing rows; 0.0 on intraday/legacy docs):
+    wl_score: float = 0.0    # regime-weighted final score — swing slot-ranking key
+    rs_vs_mkt: float = 0.0   # ret60 − universe-mean ret60; MR/PULLBACK require > 0
+    breadth_pct: float = 0.0  # % of swing universe above 50d SMA; PULLBACK needs ≥ 60
 
 
 @dataclass
