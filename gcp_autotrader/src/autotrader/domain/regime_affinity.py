@@ -385,3 +385,38 @@ def regime_hard_blocks_strategy(regime: str, strategy: str) -> bool:
     if not strategy_upper or strategy_upper in ("AUTO", "DEFAULT"):
         return False
     return strategy_upper in _HARD_BLOCKS.get(regime_upper, set())
+
+
+# ── 2026-06 swing-config: per-setup regime gate ─────────────────────────────
+# The multi-year backtest validated exactly three long swing cells:
+#   MOMENTUM × TREND_UP, PULLBACK × TREND_UP, MEAN_REVERSION × RANGE.
+# It reconstructed regimes in "core-4" mode (backtest_v2/brain_reconstruct.CORE_MAP),
+# folding the live brain's refinement regimes into their base:
+#   EARLY_TREND_UP → TREND_UP,  EARLY_TREND_DOWN → TREND_DOWN,  RANGE_ROTATING → RANGE
+# So to reproduce the backtest LIVE, momentum/pullback must fire in the UPTREND
+# bucket {TREND_UP, EARLY_TREND_UP} and mean-reversion in the RANGE bucket
+# {RANGE, RANGE_ROTATING}. In every other regime (PANIC, TREND_DOWN, CHOP,
+# RECOVERY, EARLY_TREND_DOWN) none of the three fire — matching the config, which
+# attributes zero profit to those regimes. Gating on the literal "TREND_UP" only
+# would under-trade live, since the live brain splits backtest-TREND_UP days into
+# TREND_UP + EARLY_TREND_UP. This is a SWING-ONLY gate layered on top of
+# _HARD_BLOCKS (which still governs BREAKOUT, the shorts and intraday setups).
+_SWING_SETUP_REGIMES: dict[str, set[str]] = {
+    "MOMENTUM":       {"TREND_UP", "EARLY_TREND_UP"},
+    "PULLBACK":       {"TREND_UP", "EARLY_TREND_UP"},
+    "MEAN_REVERSION": {"RANGE", "RANGE_ROTATING"},
+}
+
+
+def swing_setup_allowed_in_regime(setup: str, regime: str) -> bool:
+    """Return True if this swing setup may fire in this regime (2026-06 config).
+
+    Only the three backtest-validated long cells are gated here; any other label
+    (BREAKOUT, the shorts, intraday setups) returns True and is governed by
+    _HARD_BLOCKS / affinity instead. {TREND_UP, EARLY_TREND_UP} is the uptrend
+    bucket; {RANGE, RANGE_ROTATING} the range bucket (see note above).
+    """
+    allowed = _SWING_SETUP_REGIMES.get(str(setup or "").strip().upper())
+    if allowed is None:
+        return True
+    return str(regime or "").strip().upper() in allowed

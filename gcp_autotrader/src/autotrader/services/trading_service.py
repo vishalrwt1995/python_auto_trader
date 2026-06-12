@@ -14,7 +14,7 @@ from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.daily_bias import compute_daily_bias
-from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regime_strategy_multiplier
+from autotrader.domain.regime_affinity import regime_hard_blocks_strategy, regime_strategy_multiplier, swing_setup_allowed_in_regime
 from autotrader.domain.risk import calc_position_size, calc_swing_position_size
 from autotrader.domain.expected_edge import evaluate as evaluate_expected_edge
 from autotrader.domain.playbook import check_playbook
@@ -1486,6 +1486,12 @@ class TradingService:
                     # any entry in CHOP). Stronger than the affinity multiplier — prevents
                     # wasting a position slot on a setup that can't work in this regime.
                     policy_block_reason = "regime_strategy_hard_block"
+                elif _is_swing and not swing_setup_allowed_in_regime(w.strategy, _brain_regime):
+                    # 2026-06 swing-config: the three validated long cells fire only in
+                    # their regime bucket — MOMENTUM/PULLBACK in {TREND_UP, EARLY_TREND_UP},
+                    # MEAN_REVERSION in {RANGE, RANGE_ROTATING}. Every other regime trades
+                    # none of the three. See regime_affinity._SWING_SETUP_REGIMES.
+                    policy_block_reason = "swing_setup_regime_gate"
                 elif (str(w.symbol).strip().upper(), str(direction).strip().upper()) in _open_symbol_dirs:
                     # Same-symbol dedup: already hold this (symbol, direction)
                     # open. Blocks unintended doubling-up on one name (DMART
