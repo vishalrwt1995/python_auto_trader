@@ -1,14 +1,17 @@
 """Swing position reconciliation — runs premarket each day.
 
 Re-evaluates open swing/CNC positions against fresh daily candles.
-Actions taken:
-  1. Exit if daily SuperTrend flipped against position (trend broken)
-  2. Exit if close price breached the SL (daily candle closed below SL)
-  3. Update trailing SL if price made a new best (ratchet overnight)
-  4. Exit if target hit (close >= target for BUY, close <= target for SELL)
-  5. Exit if max hold days exceeded
+Actions taken (2026-06 — daily 1R trailing exit, see domain/swing_exit.py):
+  1. Exit if max hold (TRADING days) exceeded
+  2. Ratchet the trailing stop to 1R below the running peak (armed at +1R),
+     using the stored entry sl_dist; ws_monitor enforces the resting stop
+     intraday so the trail can only be hit on a later bar (backtest-faithful)
+  3. Conservative backstop: exit if a daily close breached the (trailed) SL
 
-Called from the /jobs/swing-reconcile endpoint (premarket, ~09:00 IST).
+The retired "V2" exit (0.5R partial + 2R fixed target + SuperTrend-flip) is gone
+— the multi-year backtest showed that geometry nets -56,820/yr at 1L; the daily
+1R trailing policy is the validated fix. Called from the /jobs/swing-reconcile
+endpoint (premarket, ~09:00 IST).
 """
 from __future__ import annotations
 
@@ -20,16 +23,15 @@ from typing import Any
 from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.gcs_store import GoogleCloudStorageStore
 from autotrader.adapters.upstox_client import UpstoxClient
-from autotrader.domain.indicators import calc_atr, calc_supertrend, normalize_candles
+from autotrader.domain.indicators import calc_atr, normalize_candles
+from autotrader.domain.swing_exit import trailed_stop
 from autotrader.services.order_service import OrderService
 from autotrader.settings import AppSettings
 from autotrader.time_utils import now_ist, now_ist_str, today_ist
 
 logger = logging.getLogger(__name__)
 
-_MAX_HOLD_DAYS_DEFAULT = 10
-_TRAIL_ATR_MULT = 2.5     # same as ws_monitor for swing
-_BREAKEVEN_ATR_MULT = 1.5
+_MAX_HOLD_DAYS_DEFAULT = 20
 
 
 @dataclass
@@ -107,6 +109,45 @@ class SwingReconciliationService:
         except Exception:
             return 0
 
+    @staticmethod
+    def _date_str(ts: object) -> str | None:
+        """Extract YYYY-MM-DD from an ISO or epoch candle/entry timestamp."""
+        s = str(ts).strip()
+        if not s:
+            return None
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            return s[:10]
+        if s.isdigit():
+            import datetime as _dt
+            v = int(s)
+            if v > 1_000_000_000_000:  # ms -> s
+                v //= 1000
+            try:
+                return _dt.datetime.utcfromtimestamp(v).strftime("%Y-%m-%d")
+            except Exception:
+                return None
+        return None
+
+    def _trading_days_held(self, candles: list, entry_ts: str) -> int | None:
+        """Trading days held = daily bars strictly after the entry date (the bar
+        offset of the latest completed bar). The daily series only contains
+        trading days, so this is holiday/weekend-proof and matches the backtest's
+        bar-offset max_hold. Returns None if dates are unparseable (caller falls
+        back to calendar days)."""
+        ed = self._date_str(entry_ts)
+        if not ed:
+            return None
+        cnt = 0
+        ok = False
+        for c in candles:
+            cd = self._date_str(c[0] if isinstance(c, (list, tuple)) else None)
+            if cd is None:
+                continue
+            ok = True
+            if cd > ed:
+                cnt += 1
+        return cnt if ok else None
+
     def run(self, key_by_symbol: dict[str, str] | None = None) -> SwingReconcileResult:
         """Re-evaluate all open swing positions. Called premarket."""
         result = SwingReconcileResult()
@@ -119,7 +160,6 @@ class SwingReconciliationService:
             return result
 
         max_hold_days = self.settings.strategy.swing_max_hold_days
-        cfg = self.settings.strategy
 
         for pos in open_positions:
             result.checked += 1
@@ -129,7 +169,6 @@ class SwingReconciliationService:
             side = str(pos.get("side") or "BUY").upper()
             entry_price = float(pos.get("entry_price") or 0)
             sl_price = float(pos.get("sl_price") or 0)
-            target = float(pos.get("target") or 0)
             atr = float(pos.get("atr") or 0)
             entry_ts = str(pos.get("entry_ts") or "")
             instrument_key = str(pos.get("instrument_key") or symbol)
@@ -150,42 +189,31 @@ class SwingReconciliationService:
                 last_high = candles[-1][2]
                 last_low = candles[-1][3]
 
-                # Update daily ATR for SL calibration
+                # Update daily ATR for GTT/SL calibration + logging
                 new_atr = calc_atr(candles, 14)
                 if new_atr > 0:
                     atr = new_atr
 
-                # Recalculate SuperTrend on daily
-                _, st_dirs = calc_supertrend(candles, 10, 3.0)
-                st_dir = st_dirs[-1]
-
                 exit_reason: str | None = None
 
-                # ── 1. Max hold days ────────────────────────────────────────
-                days_held = self._days_held(entry_ts)
+                # ── 1. Max hold — counted in TRADING days (daily bars since
+                #    entry), matching the backtest's bar-offset max_hold. ──────
+                td_held = self._trading_days_held(candles, entry_ts)
+                days_held = td_held if td_held is not None else self._days_held(entry_ts)
                 if days_held >= max_hold_days:
                     exit_reason = f"MAX_HOLD_{days_held}D"
 
-                # ── 2. Daily SL breach (close below/above SL) ───────────────
+                # ── 2. Daily SL breach — conservative backstop only. The
+                #    intraday resting stop in ws_monitor is the primary
+                #    trail/SL trigger (fires when the bar's low/high pierces
+                #    sl_price); this catches a stop the tick stream missed
+                #    (e.g. ws gap). It can only exit later/worse than the
+                #    backtest, never earlier, so it does not inflate results.
                 if not exit_reason and sl_price > 0:
                     if side == "BUY" and last_close < sl_price:
                         exit_reason = "SL_BREACH_DAILY"
                     elif side == "SELL" and last_close > sl_price:
                         exit_reason = "SL_BREACH_DAILY"
-
-                # ── 3. Target hit (daily close) ─────────────────────────────
-                if not exit_reason and target > 0:
-                    if side == "BUY" and last_close >= target:
-                        exit_reason = "TARGET_HIT_DAILY"
-                    elif side == "SELL" and last_close <= target:
-                        exit_reason = "TARGET_HIT_DAILY"
-
-                # ── 4. SuperTrend flip (trend broken) ───────────────────────
-                if not exit_reason:
-                    if side == "BUY" and st_dir == -1:
-                        exit_reason = "DAILY_SUPERTREND_FLIP"
-                    elif side == "SELL" and st_dir == 1:
-                        exit_reason = "DAILY_SUPERTREND_FLIP"
 
                 if exit_reason:
                     # Place an AMO (After Market Order) to exit at market open.
@@ -218,11 +246,7 @@ class SwingReconciliationService:
 
                     if exit_reason == "SL_BREACH_DAILY":
                         result.closed_sl_breach += 1
-                    elif exit_reason.startswith("TARGET_HIT"):
-                        result.closed_target += 1
-                    elif exit_reason == "DAILY_SUPERTREND_FLIP":
-                        result.closed_trend_break += 1
-                    else:
+                    else:  # MAX_HOLD_* — target/SuperTrend exits retired (2026-06)
                         result.closed_max_hold += 1
                     result.details.append({
                         "tag": tag, "symbol": symbol, "action": "closed",
@@ -235,41 +259,41 @@ class SwingReconciliationService:
                     time.sleep(0.05)
                     continue
 
-                # ── 5. Update trailing SL (ratchet up/down) ─────────────────
-                best_price = max(last_high, entry_price) if side == "BUY" else min(last_low, entry_price)
+                # ── 3. Ratchet the daily 1R trailing stop ───────────────────
+                # Running peak = max daily HIGH (BUY) / min daily LOW (SELL)
+                # since entry, floored at entry — matches the backtest peak.
+                # Stop = peak -/+ 1R (stored entry sl_dist), armed once the peak
+                # reaches +1R. Single source of truth: swing_exit.trailed_stop.
+                entry_date = self._date_str(entry_ts)
+                bars_since = [
+                    c for c in candles
+                    if entry_date and (self._date_str(c[0]) or "") >= entry_date
+                ]
+                if side == "BUY":
+                    peak = max([c[2] for c in bars_since] + [entry_price]) if bars_since else max(last_high, entry_price)
+                else:
+                    peak = min([c[3] for c in bars_since] + [entry_price]) if bars_since else min(last_low, entry_price)
+
+                sl_dist = float(pos.get("sl_dist") or 0.0)
                 sl_moved = bool(pos.get("sl_moved"))
-
-                # Breakeven move
-                if not sl_moved and atr > 0:
-                    if side == "BUY" and best_price >= entry_price + atr * _BREAKEVEN_ATR_MULT:
-                        new_sl = entry_price + atr * 0.15
-                        if new_sl > sl_price:
-                            sl_price = round(new_sl, 2)
-                            sl_moved = True
-                    elif side == "SELL" and best_price <= entry_price - atr * _BREAKEVEN_ATR_MULT:
-                        new_sl = entry_price - atr * 0.15
-                        if new_sl < sl_price:
-                            sl_price = round(new_sl, 2)
-                            sl_moved = True
-
-                # Trailing stop ratchet
-                if sl_moved and atr > 0:
-                    trail_dist = atr * _TRAIL_ATR_MULT
+                if sl_dist > 0:
+                    sl0 = entry_price - sl_dist if side == "BUY" else entry_price + sl_dist
+                    new_stop, armed = trailed_stop(entry_price, side == "BUY", sl_dist, peak, sl0)
                     if side == "BUY":
-                        new_sl = round(best_price - trail_dist, 2)
-                        if new_sl > sl_price:
-                            sl_price = new_sl
-                    elif side == "SELL":
-                        new_sl = round(best_price + trail_dist, 2)
-                        if new_sl < sl_price:
-                            sl_price = new_sl
+                        sl_price = round(max(sl_price, new_stop), 2)
+                    else:
+                        sl_price = round(min(sl_price, new_stop) if sl_price > 0 else new_stop, 2)
+                    sl_moved = sl_moved or armed
+                else:
+                    logger.warning("swing_recon_no_sl_dist tag=%s symbol=%s — trail skipped", tag, symbol)
 
-                # Persist updated SL if changed
+                # Persist updated SL / peak if changed
                 current_sl = float(pos.get("sl_price") or 0)
                 if abs(sl_price - current_sl) > 0.01 or sl_moved != bool(pos.get("sl_moved")):
                     self.state.update_position(tag, {
                         "sl_price": round(sl_price, 2),
                         "sl_moved": sl_moved,
+                        "best_price": round(peak, 2),
                         "atr": round(atr, 4),
                         "recon_ts": now_ist_str(),
                     })
@@ -284,7 +308,7 @@ class SwingReconciliationService:
                         logger.warning("swing_recon_gtt_refresh_failed tag=%s", tag, exc_info=True)
                     result.updated_sl += 1
                     result.details.append({"tag": tag, "symbol": symbol, "action": "sl_updated", "new_sl": round(sl_price, 2)})
-                    logger.info("swing_recon_sl_updated tag=%s symbol=%s new_sl=%.2f", tag, symbol, sl_price)
+                    logger.info("swing_recon_sl_updated tag=%s symbol=%s new_sl=%.2f peak=%.2f sl_moved=%s", tag, symbol, sl_price, peak, sl_moved)
 
             except Exception:
                 result.errors += 1

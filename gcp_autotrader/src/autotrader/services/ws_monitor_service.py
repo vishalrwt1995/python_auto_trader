@@ -527,7 +527,7 @@ class WsMonitorService:
         # ── Target-passed trailing: when ltp crosses target, don't exit — switch
         # to a tighter trail (1.2× ATR) from best so a strong winner keeps running.
         # Only the initial target is abandoned; SL still protects downside.
-        if not pos.get("target_passed") and target > 0:
+        if not is_swing and not pos.get("target_passed") and target > 0:
             if (side == "BUY" and ltp >= target) or (side == "SELL" and ltp <= target):
                 pos["target_passed"] = True
                 pos["sl_moved"] = True   # activate trailing immediately
@@ -670,66 +670,19 @@ class WsMonitorService:
                 logger.info("partial_exit_qty2 tag=%s qty=%d ltp=%.2f sl_moved_to=%.2f", tag, _exit_qty_1, ltp, sl)
                 asyncio.create_task(self._do_partial_exit(tag, instrument_key, _exit_qty_1, "PARTIAL_1R_QTY2"))
 
-        # ── Swing scale-out: 50% off at 0.5R (V2 rule) ─────────────────────
-        # Backtest evidence (Phase E, 1-year, 5,775 swing trades):
-        #   V0 baseline (no scale-out):              +₹11,478
-        #   V1 (exit ALL at 0.5R):                   -₹2,459  (cuts winners short)
-        #   V2 (THIS rule: scale 50% off, hold rest): +₹204,071  ⭐
-        #   V3 (trail SL to BE after 0.5R):          -₹113,564 (BE gets knocked off)
-        #
-        # Validated across 4 windows (1mo / 3mo / 6mo / 1yr) — improvement
-        # consistent in every window, every strategy:
-        #   PULLBACK:        +₹8,319 → +₹135,477  (+₹127k over baseline)
-        #   MOMENTUM:        +₹1,849 → +₹52,070   (+₹50k)
-        #   MEAN_REVERSION:  +₹1,309 → +₹16,524   (+₹15k)
-        #
-        # MFE-capture context: backtest showed swing trades reach +0.54R to
-        # +0.61R MFE on average, but realize only +0.04R because targets
-        # are 2R away and rarely hit. Locking in 50% qty at 0.5R captures
-        # the actual edge while letting the other half ride to target/SL/
-        # MAX_HOLD for the occasional big winner.
-        #
-        # IMPORTANT — do NOT move SL to breakeven after the partial fill.
-        # V3 backtest variant tested exactly that (-₹125k vs baseline).
-        # Normal market noise after a 0.5R move triggers BE stops on the
-        # remaining 50%, killing the runners that make the strategy work.
-        # Keep the original SL on the remaining qty.
-        if is_swing and sl_dist > 0 and original_qty >= 2:
-            _swing_t1_price = (
-                entry_price + sl_dist * 0.5
-            ) if side == "BUY" else (
-                entry_price - sl_dist * 0.5
-            )
-            _swing_t1_hit = (
-                (side == "BUY" and ltp >= _swing_t1_price)
-                or (side == "SELL" and ltp <= _swing_t1_price)
-            )
-            if _swing_t1_hit and not pos.get("partial_exit_1_done"):
-                _exit_qty_swing = max(1, original_qty // 2)
-                pos["partial_exit_1_done"] = True
-                try:
-                    self.state.update_position(
-                        tag, {"partial_exit_1_done": True},
-                    )
-                except Exception as _e:
-                    logger.warning(
-                        "swing_partial_persist_failed tag=%s err=%s", tag, _e,
-                    )
-                logger.info(
-                    "swing_partial_exit_0_5R tag=%s exit_qty=%d remaining=%d ltp=%.2f trigger=%.2f sl_unchanged=%.2f",
-                    tag, _exit_qty_swing, original_qty - _exit_qty_swing,
-                    ltp, _swing_t1_price, sl,
-                )
-                asyncio.create_task(
-                    self._do_partial_exit(
-                        tag, instrument_key, _exit_qty_swing,
-                        "SWING_PARTIAL_0_5R",
-                    )
-                )
+        # ── Swing exit: full-size ride on a daily 1R trailing stop (2026-06) ─
+        # The retired "V2" exit (50%-at-0.5R scale-out + 2R fixed target) is GONE.
+        # The multi-year backtest showed that geometry nets -56,820/yr at 1L; a
+        # 1R trailing exit (no partial, no fixed target) is the validated fix.
+        # Swing positions now ride full size: the daily reconciliation job
+        # ratchets sl_price to 1R below the running peak
+        # (domain/swing_exit.trailed_stop), and the resting SL check below is the
+        # ONLY intraday exit for swing. The target-passed switch, the intraday
+        # ATR-trail, and the 2R target exit are all gated to intraday (not is_swing).
 
         # ── Trailing stop: once past breakeven (or target), trail SL at N× ATR from best ──
         _sl_changed = False
-        if pos.get("sl_moved") and atr > 0:
+        if not is_swing and pos.get("sl_moved") and atr > 0:
             trail_dist = atr * _active_trail_mult
             if side == "BUY":
                 new_sl = round(best - trail_dist, 2)
@@ -757,13 +710,13 @@ class WsMonitorService:
         if side == "BUY":
             if sl > 0 and ltp <= sl:
                 exit_reason = "SL_HIT"
-            elif not pos.get("target_passed") and target > 0 and ltp >= target:
-                # Legacy path — should be rare now since target-passed flag fires first.
+            elif not is_swing and not pos.get("target_passed") and target > 0 and ltp >= target:
+                # Legacy path — rare; swing has no fixed target (daily 1R trail only).
                 exit_reason = "TARGET_HIT"
         else:  # SELL
             if sl > 0 and ltp >= sl:
                 exit_reason = "SL_HIT"
-            elif not pos.get("target_passed") and target > 0 and ltp <= target:
+            elif not is_swing and not pos.get("target_passed") and target > 0 and ltp <= target:
                 exit_reason = "TARGET_HIT"
 
         # ── Time-based exit: close if flat after 2 hours (intraday only) ──
