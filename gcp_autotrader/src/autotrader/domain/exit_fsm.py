@@ -209,6 +209,22 @@ def transition(pos: PositionView, tick: TickEvent, cfg: FsmConfig) -> FsmOutput:
             events=events,
         )
 
+    # ─── SWING positions: SL-only, no intraday stop management ──────────
+    # 2026-06 swing-config. The validated swing exit (multi-year backtest +
+    # domain/swing_exit.py) is: ride the FULL position to a daily 1R trailing
+    # stop — NO breakeven, NO fixed target, NO intraday ATR trail. The
+    # backtest's V3 variant (move to ~breakeven at a small profit) lost
+    # heavily on swing; the FSM's CONFIRMED→breakeven + 2R TARGET_HIT +
+    # RUNNER trail are all intraday-tuned and must NOT touch swing trades.
+    # swing_reconciliation_service ratchets the 1R trail premarket (writes
+    # sl_price); the SL_HIT check above enforces that trailed stop intraday.
+    # So for swing the FSM is a pure SL-enforcer: stay INITIAL, never mutate
+    # the stop, never fire a non-SL exit. Intraday behaviour is unchanged.
+    if pos.is_swing:
+        return FsmOutput(
+            next_state=ExitState.INITIAL, mfe_r_now=mfe_r_now, events=events,
+        )
+
     # ─── TARGET hit — fires in INITIAL or CONFIRMED, locks the planned profit ──
     # Bug fix (2026-04-29): a peak that exceeds target but pulls back ≥ 50% from
     # peak before reaching the 2.0R RUNNER gate used to fall through to the
