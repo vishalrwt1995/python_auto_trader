@@ -183,12 +183,15 @@ def test_flat_timeout_fires_in_confirmed_when_intraday_and_flat():
 
 
 def test_flat_timeout_does_not_fire_for_swing():
+    # 2026-06 swing-config: the FSM is a pure SL-enforcer for swing — no
+    # flat-timeout, no confirm/breakeven, no target. A flat swing past the
+    # intraday timeout window stays INITIAL and exits only via the
+    # reconcile-managed SL (the SL_HIT check sits above the swing guard).
     v = _fresh_view()
     v.is_swing = True
-    v.state = ExitState.CONFIRMED
-    v.current_sl = 99.40
     out = transition(v, TickEvent(ltp=100.1, ts=v.entry_epoch + 120 * 60 + 1), _cfg())
-    assert out.next_state == ExitState.CONFIRMED
+    assert out.next_state == ExitState.INITIAL
+    assert out.exit_reason == ""  # specifically NOT FLAT_TIMEOUT
 
 
 def test_flat_timeout_fires_in_initial_state():
