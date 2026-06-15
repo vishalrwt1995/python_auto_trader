@@ -50,6 +50,18 @@ This codebase has 78 days × 2,638 symbols × 5.89M bars of real 5m candle data 
 ### Rule 7 — Costs are Upstox by default (not Zerodha)
 `src/autotrader/backtest/costs.py` defaults to Upstox rates as of 2026-05-28. Round-trip cost on a ₹20K position: intraday **₹54.25 (0.27%)**, swing **₹115.25 (0.58%)**. For comparison, call `CostConfig.zerodha()`. Source: `https://upstox.com/brokerage-charges/`.
 
+### Rule 8 — Exit-logic changes must deploy the ws-monitor service AND target the FSM
+Incident: 2026-06-15, the swing exit overhaul shipped but the *intraday* half had **no effect** for two reasons. Both must be checked for any exit-logic change:
+1. **Two services, two deploys.** The intraday tick-exit loop runs in the **separate** `autotrader-ws-monitor` service, built from `Dockerfile.ws` via `cloudbuild.ws.yaml` (entrypoint `python -m autotrader.services.ws_monitor_service`). `gcloud run deploy autotrader --source` does **NOT** touch it. To ship a ws_monitor/exit change:
+   ```bash
+   cd "/Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader"
+   gcloud builds submit --config cloudbuild.ws.yaml --project grow-profit-machine --region asia-south1 .
+   gcloud run deploy autotrader-ws-monitor --image gcr.io/grow-profit-machine/autotrader-ws-monitor:latest \
+     --region asia-south1 --project grow-profit-machine   # preserves env + min-instances=1
+   ```
+   Verify both services' revisions after deploy; ws-monitor had silently run May-15 code for a month.
+2. **The live exit path is the FSM, not `_on_quote`.** With `USE_EXIT_FSM_V1=true` (set in prod), `ws_monitor._on_quote` returns early and delegates to `_on_quote_fsm` → **`domain/exit_fsm.py:transition`**. Editing the legacy `_on_quote` body is dead code. Swing exits are SL-only in the FSM (2026-06); `swing_reconciliation_service` owns the daily 1R trail. Any exit change must target `exit_fsm.py` (and stay swing/intraday-aware) — and prove which handler is live before claiming it works.
+
 ---
 
 ## Authoritative knowledge files (read in this order)

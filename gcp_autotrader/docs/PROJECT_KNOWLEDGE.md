@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-13 07:15 IST · **Last verified live state:** 2026-06-13 07:05 IST
+> **Last updated:** 2026-06-15 13:30 IST · **Last verified live state:** 2026-06-15 13:25 IST
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -109,10 +109,10 @@ gcp_autotrader/
 
 > ⚠️ Always pass `--project grow-profit-machine --account vishalrwt1995@gmail.com` to every gcloud command. Active config alone is not sufficient.
 
-| Service | Latest revision (verified 2026-06-13) | Notes |
+| Service | Latest revision (verified 2026-06-15) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00254-wqk` | PAPER; **Swing overhaul 2026-06-13** (PR #23: daily 1R trailing exit + validated 3-cell selection — see §8) on top of Phase C v2.1; ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
-| `autotrader-ws-monitor` | `autotrader-ws-monitor-00040-n5c` | min-instances=1, holds Upstox WS loop |
+| `autotrader` | `autotrader-00255-gnv` | PAPER; **Swing overhaul (PR #23) + FSM swing-fix (PR #24)** — see §8; on top of Phase C v2.1; ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
+| `autotrader-ws-monitor` | `autotrader-ws-monitor-00042-wv7` | min-instances=1, holds Upstox WS loop, runs the exit FSM (`USE_EXIT_FSM_V1=true`). **Separate image (`cloudbuild.ws.yaml`) — see CLAUDE.md Rule 8; had silently run May-15 code for a month until PR #24.** |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
 **Live trading flags (autotrader env, verified 2026-05-28):**
@@ -265,6 +265,16 @@ Currently disabled in some regimes. Discussion pending.
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-15 — First live swing day: deep audit + FSM swing-exit root-cause fix (PR #24, revs autotrader-00255-gnv / ws-monitor-00042-wv7, PAPER)
+
+**Audit of the first live day (RANGE all session, trend 19 / breadth 41).** The SELECTION layer (PR2) worked exactly as designed: premarket build wrote 450 swing rows all carrying wl_score/rs_vs_mkt/breadth_pct; multi-emit live (150 MOMENTUM + 150 PULLBACK + 150 MR, 88 multi-setup symbols); MOMENTUM 266 + PULLBACK 150 blocked by `swing_setup_regime_gate` (correct in RANGE); MR `swing_rs_below_market` fired 87×; **1 MR entry (JAYNECOIND, RSI 39.8, passed RS)**; daily reconcile ran clean (checked=5); zero errors. 2 legacy shorts (SUNDARMFIN, GHCL) exited at SL_HIT correctly.
+
+**BUG FOUND + FIXED (root cause).** The live intraday exit path is the **exit FSM** (`domain/exit_fsm.py`, `USE_EXIT_FSM_V1=true`), reached via `_on_quote → _on_quote_fsm`. **PR1 edited the legacy `_on_quote` handler, which is dead code when the FSM flag is on** (early return) — so PR1's intraday swing-exit changes never took effect, and the FSM (intraday-tuned: breakeven@0.8R + 2R TARGET_HIT + 2×ATR runner) was being applied to swing — the opposite of the validated design. Compounding: **`autotrader-ws-monitor` (separate `cloudbuild.ws.yaml` image) had run May-15 code for a month** — the `--source` deploy never touched it. No divergence had occurred yet (no open swing position reached +0.8R today; all 4 verified `exit_fsm_state=INITIAL`, SL unchanged).
+
+**Fix (PR #24):** `exit_fsm.transition` is now swing-aware — for `is_swing`, SL-only (stay INITIAL, no breakeven/target/runner/flat); `swing_reconciliation_service` owns the daily 1R trail; SL_HIT enforces it. Intraday unchanged. +8 FSM tests; fsm/exit/m1 suite 221 passed. **Deployed BOTH services** (autotrader `--source` → 00255-gnv; ws-monitor `cloudbuild.ws.yaml` build → `run deploy --image` → 00042-wv7, env + min-instances=1 preserved, came up clean: ws_connected, 5 positions subscribed). **Added CLAUDE.md Rule 8** (deploy ws-monitor for exit changes; the FSM is the live exit path, not `_on_quote`).
+
+**Lesson:** PR1 was "fidelity-proven" only for the pure exit function + reconcile — not the live tick path. Always trace which handler is live (`USE_EXIT_FSM_V1`) and that ws-monitor was redeployed before claiming an exit change is live.
 
 ### 2026-06-13 — SWING OVERHAUL: trailing exit + validated 3-cell selection (PR #23, rev autotrader-00254-wqk, PAPER)
 
