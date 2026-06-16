@@ -57,5 +57,16 @@
 - `gs://…/oos/` — deep pickle, regime timeline, candidate pool, sector map.
 - Scratch analysis scripts in `~/.autotrader_backtest_cache/`: `oos_setup_breakdown.py`, `oos_mr_improve.py`, `oos_hi52.py`, `oos_with7.py`, `oos_factor_scan.py`/`_scan2.py`, `oos_pead_proxy.py`, `oos_data_audit.py`.
 
+## Execution sequence (LOCKED — user directive 2026-06-17)
+Do **NOT** proceed to implementation until verified. Strict order:
+1. **VERIFY (backtest only, no prod code yet):**
+   - **P0 #7** (52-wk-high gate) — sub-period hold-out (tune 2010–17 / confirm 2018–26).
+   - **P1 #2** (entry-quality floor) — account-walk test + fresh-split.
+   - **P1 #3** (MR >200-SMA gate) — incremental account-walk test + fresh-split.
+2. **REVIEW** the verification results with the user → sign-off.
+3. **IMPLEMENT** only the approved items (PR + fidelity-replay: prod code ≡ backtest).
+4. **SHIP to PROD** (PAPER; live only on explicit go).
+5. **THEN move to the next TODOs** (#4 capital, #6 bear-tail, #7-intraday audit) — only after the above is reviewed + live.
+
 ## Hard rules (don't skip)
 Nothing ships without: economic rationale + OOS-robust (both periods) + plateau (not peak) + **fidelity-replay** (prod code ≡ backtest) + PAPER. This session re-confirmed the discipline kills most "improvements" — only #7 survived.
