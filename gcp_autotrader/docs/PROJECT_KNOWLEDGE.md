@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-15 13:30 IST · **Last verified live state:** 2026-06-15 13:25 IST
+> **Last updated:** 2026-06-17 (swing deep-audit + edge-discovery; intraday Phase A/B preserved) · **Last verified live state:** 2026-06-15 13:25 IST
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -260,11 +260,44 @@ Per AUDIT.md §7.2 — discussion pending.
 ### G. BREAKOUT swing needs VCP / cup-handle pattern detection before re-enable
 Currently disabled in some regimes. Discussion pending.
 
+### H. Intraday edge → cross-sectional low-vol SWING test (next major thread)
+Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 Phase A/B). The real edge found is **cross-sectional low-volatility** (gross +32%/yr, robust incl 2026) + regime-conditional range-momentum & reversal — but NET-negative as intraday (flat-EOD forces 100% daily turnover on a slow signal). **Next, on resume:** user is building **2010–2026 swing history**; test low-vol (+ conditional momentum/reversal) as a cross-sectional **market-neutral SWING** strategy on it. Harnesses: `backtest_v2/intraday_alpha_search.py`, `intraday_regime_diag.py`, `intraday_phase_b_gate.py`. Caveats: GROSS-only so far; low-vol **flips in PANIC** (regime-gate required); swing version needs overnight-risk + shortability + its own cost gate. **Executability (India):** retail can't hold overnight equity shorts, so the idealized long-short basket isn't directly tradeable — executable forms are **long-only min-vol** or **long-basket + short-Nifty-futures hedge**; Phase 0 MUST backtest the *executable* form (the +32% gross may not fully transfer), not the stock-vs-stock long-short. **Agreed plan (2026-06-15):** if validated, ship as a NEW `MARKET_NEUTRAL` channel (own dashboard panel + circuit breakers, NOT under swing/intraday), funded by **₹1L repurposed from the parked intraday channel** (total stays ₹2L). Phases: 0 validate (GATE: net-positive + robust 2010-26) → 1 design → 2 build → 3 PAPER → 4 live (explicit go only). **2010-26 deep history now BUILT** (swing audit 2026-06-17 — `gs://…/oos/candles_daily_deep.pkl`, prod's `score_1d` source, 2,506 syms × 2010-26) → **Phase 0 unblocked.** NB: swing-audit's long-only `realizedVol` scan showed ~no edge at 10d-forward — does NOT contradict this (different measurement); Phase 0 must test the *market-neutral, regime-gated, executable* form. Discuss before building.
+
 ---
 
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-17 — Swing deep-audit: 2010-21 held-out OOS + setup-by-setup review + edge-discovery (NO prod change; PAPER untouched)
+
+**Goal:** validate the deployed swing config out-of-sample (2010-2021), review each cell, audit for missing/proven setups. **Full handoff + prioritized TODOs: `docs/SWING_EDGE_AUDIT_HANDOFF.md`.** Reusable infra: `backtest_v2/oos_cloud.py` (Cloud Run job `autotrader-oos`, 8 vCPU), `gs://…/oos/candles_daily_deep.pkl` (deep 2010-26, = prod's live `score_1d` source; `candles_daily` BQ is backtest-only).
+
+1. **Held-out OOS built + validated.** Deep pipeline reproduces the prod brain at **97% fidelity** (VIX=15 stub confirmed harmless). Caught + fixed a **sector-map packaging bug** (was 5× sparsifying the pool; now fail-closed). Honest result: **thin trend-dependent edge ~+3%/yr @₹1L, ~+5%/yr @₹5L** — the +8.9% headline was inflated by backtest-RS + non-prod `candles_daily`. Caveats inherent (not fixable with our data): survivorship (mild on the liquidity-filtered traded universe; daily archives since 2026-02-25 make *future* backtests survivorship-free) + 91% regime vintage.
+
+2. **All 3 cells KEEP.** MOMENTUM×TREND_UP (engine, +54.7k@1L, trend-dependent, 2015-17 = −22.5k drawdown); MEAN_REVERSION×RANGE (gross +57k real, cost-crippled @₹1L only → economic ≥₹3L; carries bear-tail risk); PULLBACK×TREND_UP (ugly cell P&L −18k but **+12.7k MARGINAL** — blocks worse marginal trades).
+
+3. **Edge-audit — one refinement found.** ✅ **#7 52-wk-high gate on momentum** (`hi52≥0.85`): OOS-robust (+₹39k OOS@₹5L), removes counter-trend-bounce duds; projected next config **~+4.8→+5.4%/yr OOS@₹5L** (modest); needs fidelity-replay + fresh-split before ship. ❌ rejected: 12-1 momentum (over-extension), short-term reversal (uneconomic), PEAD (weak proxy + needs EPS + wrong horizon); broad 9-family data scan → no new incremental edge. **System is mature; price-data edge hunt at diminishing returns.**
+
+4. **Cross-thread:** the deep history built here **unblocks the intraday thread's low-vol market-neutral SWING Phase 0** (Open Items §7-H).
+
+**Next (TODOs in handoff doc):** ship #7 (test→fidelity→PAPER); test entry-quality floor (highest untested lever); capital→₹3-5L decision; bear-tail/PANIC fix; then the **never-audited INTRADAY channel** (#23-25). PAPER stays the live arbiter.
+
+### 2026-06-15 (later) — INTRADAY EDGE AUDIT (Phase A/B): real cross-sectional edge found, but cost-walled as intraday → belongs at swing horizon
+
+**Goal:** after proving all prod intraday setups edgeless, hunt for ANY real intraday edge on candle data (gross first, then net). New harnesses: `backtest_v2/intraday_alpha_search.py` (23-signal cross-sectional library), `intraday_regime_diag.py` (decay-vs-regime), `intraday_phase_b_gate.py` (exact-Upstox-cost portfolio gate). Logs: `~/.autotrader_backtest_cache/intraday_audit/{alpha_search_allyears,regime_diag,phase_b_gate}.log`. No prod change; PAPER untouched.
+
+1. **Prod setups have NO gross edge** (37,504-entry baseline, gross R *before* cost): MEAN_REVERSION −0.28 / VWAP_TREND −0.38 / MOMENTUM −0.38 / PULLBACK −0.39, ~28% win, negative every year. Sub-1.0 win rate vs 1R stop = negative expectancy by construction. Ignoring cost does **not** rescue them.
+
+2. **Phase A — a real cross-sectional gross edge exists** (lag-honest IC: decide 11:00 / enter 11:15 / hold EOD / market-neutral / per-year 2022-26). THREE edges: **(a) low-vol** (`rvol`,`park`: long calm, short jumpy) — robust, +IC every year incl 2026, the standout; **(b) range-momentum** (`range_pos`) — strong 2022-25, regime-conditional; **(c) multi-day reversal** (`ret_3d/5d`) — conditional on unstable years. Naive momentum (`mom_open`) and VWAP-distance (`dist_vwap`) were strong 2022-25 then collapsed in 2026.
+
+3. **Decay vs regime — mostly REGIME, not permanent decay** (`intraday_regime_diag.py`). 2026 is the most unstable year (intraday mkt vol **0.73%** vs 0.53-0.64 prior; **PANIC 33%** of days vs 11-29%; TREND_UP only 9%). Conditioning IC on the brain regime: `range_pos` still fires on 2026 TREND_UP/RANGE days (+32 vs +37 hist ×1e3 IC) → REGIME; only naive `mom_open` is dead even in trend → genuine decay. Low-vol works (stronger) in RANGE/TREND_UP but **FLIPS in PANIC** (−10.5 hist → +16.2 2026 ×1e3) — not all-weather, needs a panic gate.
+
+4. **Phase B cost gate — NO-GO for intraday** (`intraday_phase_b_gate.py`, exact Upstox cost via `backtest/costs.py`, regime-gated RANGE/TREND_UP, K∈{5,10,20,50}/side × cap ₹1-5L). Regime-gated low-vol **GROSS +31.6%/yr at K=5, positive every year incl 2026 (+47%)** — a real edge. But **NET best is −1.1%/yr (K=5, ₹5L)**, negative 2/5 years, *before* slippage and assuming full shortability; all other configs −17 to −45%/yr. Cost ≈ 0.13%/day ≈ gross ≈ 0.13%/day → cancels. **Structural cause:** intraday flat-by-EOD forces a full round-trip *every day* (100% turnover) on a slow/sticky signal — the worst cost setup for low-vol.
+
+**Conclusion:** candle-based intraday is cost-walled even with the best real edge findable (now proven 4 ways + best-edge gate). The low-vol edge is real but in the **wrong channel** — held as **swing** (multi-day) it's sticky (~10-20%/wk turnover vs 100%/day) → ~6-12× less cost → the +32% gross should clearly survive. Low-vol anomaly is natively multi-day.
+
+**Next (user-driven):** user is building **2010-2026 swing history** (16 yrs, multi-cycle) for a more robust backtest; on resume, test low-vol (+ conditional range-momentum/reversal) as a cross-sectional **market-neutral SWING** strategy. See Open Items §7-H. *(Doc updated this session; not yet committed — awaiting user go-ahead.)*
 
 ### 2026-06-15 — First live swing day: deep audit + FSM swing-exit root-cause fix (PR #24, revs autotrader-00255-gnv / ws-monitor-00042-wv7, PAPER)
 

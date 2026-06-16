@@ -1,0 +1,15 @@
+# Build-context excludes (gcloud builds submit / gcloud run deploy --source).
+# Only src/, requirements.txt, Dockerfile*, cloudbuild*.yaml are needed to build.
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backtests/
+logs/
+*.log
+.claude/
