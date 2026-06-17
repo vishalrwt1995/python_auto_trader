@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-17 (swing deep-audit + edge-discovery; intraday Phase A/B preserved) · **Last verified live state:** 2026-06-15 13:25 IST
+> **Last updated:** 2026-06-17 (shipped swing-edges #3 MR>200-SMA gate + #7-soft momentum tilt — PR #25, rev `autotrader-00256-g2r`) · **Last verified live state:** 2026-06-17 15:03 IST (rev 00256-g2r serving 100%, PAPER, env preserved, ws-monitor unchanged)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -109,9 +109,9 @@ gcp_autotrader/
 
 > ⚠️ Always pass `--project grow-profit-machine --account vishalrwt1995@gmail.com` to every gcloud command. Active config alone is not sufficient.
 
-| Service | Latest revision (verified 2026-06-15) | Notes |
+| Service | Latest revision (verified 2026-06-17) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00255-gnv` | PAPER; **Swing overhaul (PR #23) + FSM swing-fix (PR #24)** — see §8; on top of Phase C v2.1; ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
+| `autotrader` | `autotrader-00256-g2r` | PAPER; **Swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt) — PR #25** (universe_service only; shared `domain/swing_signals.py`); on top of Swing overhaul (PR #23) + FSM swing-fix (PR #24) + Phase C v2.1; ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00042-wv7` | min-instances=1, holds Upstox WS loop, runs the exit FSM (`USE_EXIT_FSM_V1=true`). **Separate image (`cloudbuild.ws.yaml`) — see CLAUDE.md Rule 8; had silently run May-15 code for a month until PR #24.** |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
@@ -268,6 +268,20 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-17 (later) — SHIPPED swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt) — PR #25, PAPER
+
+**Goal:** implement the edges that survived strict walk-forward verification (the locked "verify P0/P1 before implement" gate). Branch `swing-mr-gate-mom-tilt` → PR #25 → merged `c86c030` (change `123513b`) → deployed **`autotrader-00256-g2r`** (was `00255-gnv`), serving 100%, PAPER + env preserved, ws-monitor unchanged.
+
+1. **Verification first (per locked process).** Re-ran the deep 2010-26 OOS under STRICT walk-forward (select-on-train 2010-17 / test-on-unseen 2018-26, robust across 5 split boundaries). **#3 MR>200-SMA gate PASS** (both halves +, +113k test-half Δ@₹5L); **#7-SOFT momentum near-high ranking tilt PASS** (plateau W=1-2, +66k test Δ@₹5L). **#7-HARD (binary 52wk-high gate) FAILED** — train-best threshold 0.92 lost money on the unseen test half (overfit) — and **#2 FAILED**; both dropped. **This corrects the prior entry's framing of #7 as a shippable hard gate** — only the soft ranking tilt generalised. Combined #3+#7-soft: TEST5L 227,980→389,350 (+161k), both halves +.
+
+2. **Shipped (universe_service only).** New pure module `domain/swing_signals.py` — shared by prod AND backtest (the `swing_exit.py` fidelity discipline, so prod can't drift). #3: `MEAN_REVERSION` emitted only when close>200-SMA (`closes[-201:-1]`), at candidate generation + the winner-takes-all fallback. #7-soft: near-52wk-high tilt (W=1) baked into the `MOMENTUM` row's `wl_score` (trading_service already fills the 5-slot book by `wl_score` desc). No `models.py`/`trading_service.py` change. Slice windows mirror the backtest's `bars[ei-1]` as-of convention exactly.
+
+3. **Fidelity-replay (the gate).** Shared module == certified backtest **bit-for-bit over all 239,359 real 2010-26 pool entries** (0 gate + 0 tilt mismatches); walk re-run reproduces the certified NET exactly (baseline TEST5L 227,980, #3+#7-soft 389,350). 20 new unit tests (`tests/test_swing_signals.py`, incl. off-by-one guards); **382 passed** blast-radius+swing/regime suite (before AND after commit). Scratch validator: `~/.autotrader_backtest_cache/oos_fidelity_shared.py`.
+
+4. **Honest calibration unchanged:** thin, trend-dependent, lumpy; improves *selection* (which setups take slots), not exits; absolute ₹ small at ₹1L (economic mainly ≥₹3L). New code first executes at **next swing scan 09:22 IST 2026-06-18** (today's scans ran on old rev). **PAPER stays PAPER.**
+
+**Deploy hygiene:** `autotrader` only (selection change — ws-monitor/exits untouched, Rule 8 N/A). Rule 1 sync verified (`git log origin/main..HEAD` empty), Rule 3 ADC token. **Next:** PAPER-monitor swing fills vs backtest expectation; then capital→₹3-5L decision, bear-tail/PANIC fix, INTRADAY audit (#23-25).
 
 ### 2026-06-17 — Swing deep-audit: 2010-21 held-out OOS + setup-by-setup review + edge-discovery (NO prod change; PAPER untouched)
 
