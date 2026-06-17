@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-17 (shipped swing-edges #3 MR>200-SMA gate + #7-soft momentum tilt — PR #25, rev `autotrader-00256-g2r`) · **Last verified live state:** 2026-06-17 15:03 IST (rev 00256-g2r serving 100%, PAPER, env preserved, ws-monitor unchanged)
+> **Last updated:** 2026-06-17 (shipped swing-edges #3 + #7-soft — PR #25; then swing PAPER capital ₹1L→₹5L for the live test, env-only, rev `autotrader-00257-mn6`) · **Last verified live state:** 2026-06-17 15:12 IST (rev 00257-mn6 serving 100%, PAPER, CAPITAL_SWING=₹5L / SWING_RISK=₹7,500, intraday unchanged)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -111,16 +111,16 @@ gcp_autotrader/
 
 | Service | Latest revision (verified 2026-06-17) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00256-g2r` | PAPER; **Swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt) — PR #25** (universe_service only; shared `domain/swing_signals.py`); on top of Swing overhaul (PR #23) + FSM swing-fix (PR #24) + Phase C v2.1; ₹1L swing + ₹1L intraday, risk ₹1,500, dedup, holiday-aware |
+| `autotrader` | `autotrader-00257-mn6` | PAPER; **swing PAPER capital ₹1L→₹5L (`CAPITAL_SWING=500000`, `SWING_RISK_PER_TRADE=7500`; env-only on the PR #25 image, 2026-06-17) for the live PAPER test of the new edges**. Code = **Swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt), PR #25** (universe_service only; shared `domain/swing_signals.py`); on top of Swing overhaul (PR #23) + FSM swing-fix (PR #24) + Phase C v2.1; **₹5L swing** + ₹1L intraday, swing risk ₹7,500, dedup, holiday-aware |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00042-wv7` | min-instances=1, holds Upstox WS loop, runs the exit FSM (`USE_EXIT_FSM_V1=true`). **Separate image (`cloudbuild.ws.yaml`) — see CLAUDE.md Rule 8; had silently run May-15 code for a month until PR #24.** |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
-**Live trading flags (autotrader env, verified 2026-05-28):**
+**Live trading flags (autotrader env, verified 2026-06-17 15:12 IST):**
 - `PAPER_TRADE=true` — **PAPER mode** (was `false` on 2026-05-08; flipped to paper since)
-- **`CAPITAL=200000` (₹2L total)** · `CAPITAL_SWING=100000` · `CAPITAL_INTRADAY=100000` ← Phase C v1 (2026-05-28, late): per-channel capital separation. Each channel has independent daily loss/profit circuit breakers — bad swing day no longer halts intraday and vice versa.
-- `SWING_RISK_PER_TRADE=1500` (raised 600→1500 on 2026-05-28, validated)
-- `RISK_PER_TRADE=250` (intraday)
-- `MAX_DAILY_LOSS=3000` · `DAILY_PROFIT_TARGET=6000` (LEGACY shared, fallback only — Phase C uses `daily_loss_pct=0.03` / `daily_profit_pct=0.06` per channel: 3%×₹1L=₹3k loss halt, 6%×₹1L=₹6k profit target per channel)
+- **`CAPITAL=600000` (₹6L total)** · **`CAPITAL_SWING=500000` (₹5L — bumped ₹1L→₹5L 2026-06-17 for the live PAPER test of the new edges; deep-OOS showed the edge cost-crippled at ₹1L, economic ≥₹2L, ~saturated by ₹3L)** · `CAPITAL_INTRADAY=100000` ← Phase C v1 (2026-05-28): per-channel capital separation. Each channel has independent daily loss/profit circuit breakers — bad swing day no longer halts intraday and vice versa.
+- **`SWING_RISK_PER_TRADE=7500`** (= 1.5% of ₹5L; scaled WITH capital 2026-06-17 — MUST move with `CAPITAL_SWING` or the 20% per-position cap leaves capital idle. Was 1500 at ₹1L.)
+- `RISK_PER_TRADE=250` (intraday, unchanged)
+- `MAX_DAILY_LOSS=3000` · `DAILY_PROFIT_TARGET=6000` (LEGACY shared, fallback only — Phase C uses `daily_loss_pct=0.03` / `daily_profit_pct=0.06` per channel: **SWING now 3%/6%×₹5L = ₹15k loss-halt / ₹30k profit-target**; INTRADAY 3%/6%×₹1L = ₹3k/₹6k)
 - `SWING_MIN_SIGNAL_SCORE=45`
 - `GCP_PROJECT_ID=grow-profit-machine` · `BQ_DATASET=autotrader`
 
@@ -281,7 +281,11 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 
 4. **Honest calibration unchanged:** thin, trend-dependent, lumpy; improves *selection* (which setups take slots), not exits; absolute ₹ small at ₹1L (economic mainly ≥₹3L). New code first executes at **next swing scan 09:22 IST 2026-06-18** (today's scans ran on old rev). **PAPER stays PAPER.**
 
-**Deploy hygiene:** `autotrader` only (selection change — ws-monitor/exits untouched, Rule 8 N/A). Rule 1 sync verified (`git log origin/main..HEAD` empty), Rule 3 ADC token. **Next:** PAPER-monitor swing fills vs backtest expectation; then capital→₹3-5L decision, bear-tail/PANIC fix, INTRADAY audit (#23-25).
+**Deploy hygiene:** `autotrader` only (selection change — ws-monitor/exits untouched, Rule 8 N/A). Rule 1 sync verified (`git log origin/main..HEAD` empty), Rule 3 ADC token.
+
+**Capital set for the live PAPER test (2026-06-17, env-only, rev `autotrader-00257-mn6`):** swing ₹1L→**₹5L** (`CAPITAL_SWING=500000`, `SWING_RISK_PER_TRADE=7500`=1.5% — must move together or the 20% per-position cap idles capital; `CAPITAL=600000`); intraday unchanged. Per-capital deep-OOS net (prod-faithful RS, net of Upstox cost; TEST 2018-26 %/yr): **₹1L 5.5% (cost-crippled) → ₹2L 8.0% → ₹3L 8.4% → ₹5L 8.7%** — edge ~saturates by ₹3L; chose ₹5L for max absolute ₹ at ≈equal efficiency (PAPER ⇒ no real cost). Honest: raw is an optimistic ceiling (survivorship/vintage/parity haircuts remain); **lumpy** — 2011 −24% single-year, 2/9 test years negative, and the change itself gave 2022 back vs baseline (+24.7k→−37.4k @₹5L). The 4 open swing positions at change-time (EMAMILTD/CROMPTON/JAYNECOIND/SAIL) are **unaffected** — qty/stop/sl_dist stored at entry; new sizing applies to entries from **09:22 IST 2026-06-18**.
+
+**Next:** PAPER-monitor swing fills vs backtest expectation at ₹5L; bear-tail/PANIC fix; INTRADAY audit (#23-25).
 
 ### 2026-06-17 — Swing deep-audit: 2010-21 held-out OOS + setup-by-setup review + edge-discovery (NO prod change; PAPER untouched)
 
