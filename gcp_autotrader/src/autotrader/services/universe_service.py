@@ -19,6 +19,7 @@ from autotrader.adapters.upstox_client import UpstoxApiError, UpstoxClient
 from autotrader.domain.indicators import calc_adx, calc_atr, calc_rsi, compute_indicators
 from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
 from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot, UniverseRow
+from autotrader.domain import swing_signals
 from autotrader.services.universe_v2 import (
     UNIVERSE_V2_HEADERS,
     CanonicalListing,
@@ -4625,6 +4626,7 @@ class UniverseService:
             if len(daily) < 60:
                 continue
             closes = [float(c[4] or 0.0) for c in daily]
+            highs = [float(c[2] or 0.0) for c in daily]
             vols = [float(c[5] or 0.0) for c in daily]
             high_20 = max(float(c[2] or 0.0) for c in daily[-20:])
             low_20 = min(float(c[3] or 0.0) for c in daily[-20:])
@@ -4646,6 +4648,14 @@ class UniverseService:
             atr14 = float(calc_atr(daily[-260:], period=14) or 0.0) if len(daily) >= 20 else 0.0
             adx14 = float(calc_adx(daily[-60:], period=14)) if len(daily) >= 29 else 25.0
             low_252 = min(float(c[3] or 0.0) for c in daily[-252:]) if len(daily) >= 60 else low_20
+            # 2026-06 swing edges (deep 2010-26 held-out OOS, walk-forward validated;
+            # see domain/swing_signals.py + docs/SWING_EDGE_AUDIT_HANDOFF.md):
+            #  #3       MEAN_REVERSION emits ONLY above its 200-day SMA (a dip inside
+            #           an uptrend, never a falling knife below trend).
+            #  #7-soft  MOMENTUM gets a near-52wk-high ranking tilt (added to wl_score).
+            # Computed via the shared pure module so prod == the validated backtest.
+            mr_above_200sma = swing_signals.mean_reversion_above_200sma(closes)
+            mom_near_high_tilt = swing_signals.near_high_tilt(closes, highs)
             vol_last3 = statistics.mean(vols[-3:]) if len(vols) >= 3 else (vols[-1] if vols else 0.0)
             vol_prev3 = statistics.mean(vols[-6:-3]) if len(vols) >= 6 else vol_last3
             # RSI for mean-reversion scoring in bear markets
@@ -4676,6 +4686,8 @@ class UniverseService:
                     "high20": high_20,
                     "low20": low_20,
                     "low252": low_252,
+                    "mrAbove200Sma": mr_above_200sma,
+                    "momNearHighTilt": mom_near_high_tilt,
                     "volLast3": vol_last3,
                     "volPrev3": vol_prev3,
                     "recentEventFlag": recent_event_flag,
@@ -4864,12 +4876,17 @@ class UniverseService:
             # Also requires removing MOMENTUM from
             # trading_service.py:_intraday_only_strategies (which silently
             # retags swing MOMENTUM rows to intraday).
+            # 2026-06 swing-edge #3: MEAN_REVERSION fires ONLY when the stock is above
+            # its 200-day SMA — mean-revert a dip INSIDE an uptrend, never catch a
+            # falling knife below trend. Below the 200-SMA the setup simply is not
+            # emitted, matching the backtest skipping the trade. See swing_signals.
             _long_candidates: list[tuple[str, str, float]] = [
                 ("BREAKOUT", "BUY", breakout),
                 ("PULLBACK", "BUY", pullback),
-                ("MEAN_REVERSION", "BUY", mean_rev),
-                ("MOMENTUM", "BUY", momentum),
             ]
+            if bool(r.get("mrAbove200Sma")):
+                _long_candidates.append(("MEAN_REVERSION", "BUY", mean_rev))
+            _long_candidates.append(("MOMENTUM", "BUY", momentum))
 
             # Fix 3: short-side scoring in bearish regimes (PANIC / TREND_DOWN)
             #
@@ -4931,20 +4948,26 @@ class UniverseService:
             # out by the same threshold a few lines below.
             _emit_floor = float(min_score_eff)
             _any_emitted = False
+            _mom_tilt = float(r.get("momNearHighTilt") or 0.0)
             for _label, _direction, _component_score in _candidates:
                 _score = round(max(0.0, min(100.0, _component_score)), 2)
                 if _score < _emit_floor:
                     continue
                 _any_emitted = True
+                # wl_score is the regime-weighted final blend — the scan-time slot-
+                # ranking key (validated as 'wl_score' in the multi-year backtest),
+                # distinct from 'score' (per-setup component) which drives watchlist
+                # selection only. swing-edge #7-soft: nudge a MOMENTUM leader's
+                # wl_score up when it's near its 52-week high (within 15%), so leaders
+                # win the 5 slots over laggards; zero for every other setup.
+                # trading_service fills the book best-wl_score-first, mirroring the
+                # backtest sorting candidates on wl + tilt.
+                _wl_score = final_score + (_mom_tilt if _label == "MOMENTUM" else 0.0)
                 swing_scored.append(
                     {
                         **r,
                         "score": float(_score),
-                        # 2026-06 swing-config: regime-weighted final blend — the
-                        # scan-time slot-ranking key (validated as 'wl_score' in the
-                        # multi-year backtest). Distinct from 'score' (per-setup
-                        # component), which drives watchlist selection only.
-                        "wl_score": float(round(final_score, 2)),
+                        "wl_score": float(round(_wl_score, 2)),
                         "setupLabel": _label,
                         "tradeDirection": _direction,
                         "breakout": breakout,
@@ -4965,10 +4988,15 @@ class UniverseService:
             # could trade" stable for diagnostics, even if no setup is
             # tradeable for this stock right now.
             if not _any_emitted:
+                # Honour the #3 gate here too: MEAN_REVERSION is only a candidate
+                # above the 200-SMA, so it must not slip back in as the fallback
+                # winner-takes-all label (it would otherwise survive the score floor
+                # below and become a tradeable falling-knife row, defeating the gate).
                 _setup_scores = {
-                    "BREAKOUT": breakout, "PULLBACK": pullback,
-                    "MEAN_REVERSION": mean_rev, "MOMENTUM": momentum,
+                    "BREAKOUT": breakout, "PULLBACK": pullback, "MOMENTUM": momentum,
                 }
+                if bool(r.get("mrAbove200Sma")):
+                    _setup_scores["MEAN_REVERSION"] = mean_rev
                 _top_label, _top_score = max(_setup_scores.items(), key=lambda kv: kv[1])
                 _fallback_score = round(max(0.0, min(100.0, _top_score)), 2)
                 if bool(r.get("recentEventFlag")):
