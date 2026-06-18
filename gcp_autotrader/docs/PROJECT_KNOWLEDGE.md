@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-18 (SHIPPED swing trail arm-threshold 1.0R→1.75R, PR #26 → rev 00258-t7d, PAPER — deep-OOS validated +28% net @₹5L / lower DD; earlier: fresh INTRADAY re-audit → no retail edge, parked; swing ₹5L profile + improvement-scope; next = fundamental-data edge project, PARKED awaiting user signal) · **Last verified live state:** 2026-06-18 15:50 IST (rev 00258-t7d serving 100%, PAPER, ₹5L swing, risk ₹7,500, 3%/6% breakers; 4 open swing positions intact + unarmed — arm change is ratchet-only, zero impact on the book; new arm effective next premarket recon 06-19 09:00)
+> **Last updated:** 2026-06-18 (BREAKOUT screened → REJECTED: Donchian net-negative after cost, 102-354% DD — 5th OOS confirmation of the candle-data ceiling, candle chapter closed, §7-G resolved; earlier: SHIPPED swing arm-threshold 1.0R→1.75R PR #26 rev 00258-t7d; INTRADAY re-audit no edge; next = fundamental-data edge project, PARKED awaiting user signal) · **Last verified live state:** 2026-06-18 15:50 IST (rev 00258-t7d serving 100%, PAPER, ₹5L swing, risk ₹7,500, 3%/6% breakers; 4 open swing positions intact + unarmed — arm change is ratchet-only, zero impact on the book; new arm effective next premarket recon 06-19 09:00)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -245,8 +245,8 @@ Hypothesis: tight 1:1 R:R targets not being reached, stops tighter than typical 
 ### B. Stale Apr 29 swing positions (auto-resolves)
 3 paper swing positions opened 2026-04-29 still open. Auto-close 2026-05-09 at `swing_max_hold_days=10` boundary. No action needed unless user wants manual close.
 
-### C. BREAKOUT 250 scans / 0 qualified today
-BREAKOUT averaged 71.2 score (above threshold) but 0 qualified — likely all hit `regime_strategy_hard_block` (TREND_UP blocks BREAKOUT) or `direction_hold`. Needs per-block-reason breakdown by setup.
+### C. ~~BREAKOUT 250 scans / 0 qualified~~ — MOOT 2026-06-18
+Moot: breakout was screened → **no net edge** (see §7-G + §8 2026-06-18 BREAKOUT entry). The 0-qualified was benign; breakout stays disabled by design — there's no edge to enable.
 
 ### D. MORNING_FADE 235 scans / avg score 21.4 / 0 qualified
 Score formula returns 75 hardcoded but observed avg 21.4 — suggests something is overriding. Investigation pending.
@@ -257,8 +257,8 @@ After CPU 1→2 bump, re-measure on next build cycle.
 ### F. PULLBACK swing gates may need bullish-divergence/reversal-candle confirmation
 Per AUDIT.md §7.2 — discussion pending.
 
-### G. BREAKOUT swing needs VCP / cup-handle pattern detection before re-enable
-Currently disabled in some regimes. Discussion pending.
+### G. ~~BREAKOUT swing needs VCP / cup-handle detection before re-enable~~ — RESOLVED 2026-06-18
+**Screened → REJECTED.** Canonical Donchian N-day-high breakout (the low-overfit form) is net-negative after cost (gross +0.05R/trade < ~0.09R swing cost wall) and catastrophic as a portfolio (102–354% DD; negative at every capital/gate/era). VCP not worth building — the simple form is decisively cost-negative + VCP adds overfit risk. **Do NOT re-enable breakout: no net edge.** See §8 2026-06-18 BREAKOUT entry.
 
 ### H. Intraday edge → cross-sectional low-vol SWING test (next major thread)
 Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 Phase A/B). The real edge found is **cross-sectional low-volatility** (gross +32%/yr, robust incl 2026) + regime-conditional range-momentum & reversal — but NET-negative as intraday (flat-EOD forces 100% daily turnover on a slow signal). **Next, on resume:** user is building **2010–2026 swing history**; test low-vol (+ conditional momentum/reversal) as a cross-sectional **market-neutral SWING** strategy on it. Harnesses: `backtest_v2/intraday_alpha_search.py`, `intraday_regime_diag.py`, `intraday_phase_b_gate.py`. Caveats: GROSS-only so far; low-vol **flips in PANIC** (regime-gate required); swing version needs overnight-risk + shortability + its own cost gate. **Executability (India):** retail can't hold overnight equity shorts, so the idealized long-short basket isn't directly tradeable — executable forms are **long-only min-vol** or **long-basket + short-Nifty-futures hedge**; Phase 0 MUST backtest the *executable* form (the +32% gross may not fully transfer), not the stock-vs-stock long-short. **Agreed plan (2026-06-15):** if validated, ship as a NEW `MARKET_NEUTRAL` channel (own dashboard panel + circuit breakers, NOT under swing/intraday), funded by **₹1L repurposed from the parked intraday channel** (total stays ₹2L). Phases: 0 validate (GATE: net-positive + robust 2010-26) → 1 design → 2 build → 3 PAPER → 4 live (explicit go only). **2010-26 deep history now BUILT** (swing audit 2026-06-17 — `gs://…/oos/candles_daily_deep.pkl`, prod's `score_1d` source, 2,506 syms × 2010-26) → **Phase 0 unblocked.** NB: swing-audit's long-only `realizedVol` scan showed ~no edge at 10d-forward — does NOT contradict this (different measurement); Phase 0 must test the *market-neutral, regime-gated, executable* form. Discuss before building.
@@ -268,6 +268,21 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-18 (latest) — BREAKOUT screened → REJECTED (candle-data chapter closed; NO prod change)
+
+**Goal:** test the one genuinely-untested long-only candle setup (volatility breakout, open item §7-G) before any fundamental-data lift — the disciplined "exhaust the cheap existing-data options first" move. User: "lets move to breakout, make sure we do not make mistakes."
+
+**Method (anti-mistake, look-ahead-free):** generated Donchian N-day-high breakouts (N=20/50) over the deep daily data (2506 syms, 2010-26); fill at NEXT open; SAME liquid universe (top-1000 60d-turnover + price≥30 — no penny/illiquid slippage inflation), SAME sizing (sl_dist=max(2.5×ATR14, 1%)), SAME exit (1R trail arm 1.75), SAME Upstox cost+booking (`exit_lab.book_cap`) as the validated momentum/pullback/MR pool. Started with the canonical 1-param Donchian (NOT multi-param VCP) as the overfit-guard. Memory-light (candle pickle only, NO 427MB stats dict → 8GB-safe). Scratch: `~/.autotrader_backtest_cache/oos_breakout_screen.py`.
+
+**Result — decisive reject:**
+1. **Signal-level cost wall:** 114K breakouts, gross avg **+0.048R** (45% win) — a faint *real* tendency — but swing cost ≈0.09R/trade (0.58% delivery ÷ entry/sl_dist) → **net −0.04R/trade**. Structurally cost-negative; R-scale-invariant (no N/stop/gate fixes it — a tighter stop raises cost-in-R as fast as gross-in-R).
+2. **Portfolio (breakout-only book) negative everywhere:** −5 to −17%/yr @₹5L with **102–354% drawdowns**; negative at every N (20/50), gate (ungated/TREND-gated), capital (₹1L–5L), and in ~10–12 of 17 years → every held-out post-2015 window negative (no positive edge for a walk-forward to even stress). TREND-gating slows the bleed, stays negative. (A 300-symbol smoke showed a lone "positive" ungated line — an artifact, gone on the full universe.)
+3. **VCP not pursued:** the canonical form is decisively cost-negative; a multi-param VCP would need ~2× the gross edge just to break even, plus heavy overfit risk + far fewer signals → dead end ("simple form has no edge → complex form won't robustly survive").
+
+**Takeaway:** breakout joins intraday as a **retail-cost casualty** (real gross tendency, killed by the cost wall). **5th independent OOS confirmation of the candle-data ceiling** (reserve-cap, param-sweep, overlay, vol-filter, breakout). Swing is at the frontier of what price/volume data supports. **The only remaining step-change is new (fundamental) data.**
+
+**Next:** the fork is the **fundamental-data edge project** (PEAD / analyst-revisions / quality-value — the real step-change, gated on data procurement) vs **bank-and-observe** the shipped ₹5L + arm-1.75 system in PAPER. Awaiting user signal.
 
 ### 2026-06-18 (later) — SHIPPED swing trail arm-threshold 1.0R→1.75R — PR #26, PAPER
 
