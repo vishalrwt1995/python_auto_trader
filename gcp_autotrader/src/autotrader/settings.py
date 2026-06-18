@@ -42,6 +42,7 @@ class StrategySettings:
     # Typical config: CAPITAL_SWING=100000, CAPITAL_INTRADAY=100000, CAPITAL=200000.
     capital_swing: float = 0.0
     capital_intraday: float = 0.0
+    capital_pead: float = 0.0          # EVENT/PEAD channel (Phase C, added 2026-06-19)
     # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
     # of channel capital. Used by the per-channel daily-limit gate in
     # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
@@ -175,6 +176,8 @@ class StrategySettings:
             return self.capital_swing
         if ch == "intraday" and self.capital_intraday > 0:
             return self.capital_intraday
+        if ch == "pead" and self.capital_pead > 0:
+            return self.capital_pead
         return self.capital
 
 
@@ -341,6 +344,7 @@ class AppSettings:
             capital=_env_float("CAPITAL", 50000),
             capital_swing=_env_float("CAPITAL_SWING", 0.0),
             capital_intraday=_env_float("CAPITAL_INTRADAY", 0.0),
+            capital_pead=_env_float("CAPITAL_PEAD", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
