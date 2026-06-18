@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-18 (fresh INTRADAY re-audit → no retail edge, channel parked; swing ₹5L profit profile + improvement-scope; next = fundamental-data edge project, PARKED awaiting user signal) · **Last verified live state:** 2026-06-18 09:42 IST (rev 00257-mn6 serving, PAPER, ₹5L swing; no new swing trades 06-17/18 = regime RANGE_ROTATING gates momentum + MR at 3/3 reserve cap — by design, not a bug)
+> **Last updated:** 2026-06-18 (SHIPPED swing trail arm-threshold 1.0R→1.75R, PR #26 → rev 00258-t7d, PAPER — deep-OOS validated +28% net @₹5L / lower DD; earlier: fresh INTRADAY re-audit → no retail edge, parked; swing ₹5L profile + improvement-scope; next = fundamental-data edge project, PARKED awaiting user signal) · **Last verified live state:** 2026-06-18 15:50 IST (rev 00258-t7d serving 100%, PAPER, ₹5L swing, risk ₹7,500, 3%/6% breakers; 4 open swing positions intact + unarmed — arm change is ratchet-only, zero impact on the book; new arm effective next premarket recon 06-19 09:00)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -109,9 +109,9 @@ gcp_autotrader/
 
 > ⚠️ Always pass `--project grow-profit-machine --account vishalrwt1995@gmail.com` to every gcloud command. Active config alone is not sufficient.
 
-| Service | Latest revision (verified 2026-06-17) | Notes |
+| Service | Latest revision (verified 2026-06-18) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00257-mn6` | PAPER; **swing PAPER capital ₹1L→₹5L (`CAPITAL_SWING=500000`, `SWING_RISK_PER_TRADE=7500`; env-only on the PR #25 image, 2026-06-17) for the live PAPER test of the new edges**. Code = **Swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt), PR #25** (universe_service only; shared `domain/swing_signals.py`); on top of Swing overhaul (PR #23) + FSM swing-fix (PR #24) + Phase C v2.1; **₹5L swing** + ₹1L intraday, swing risk ₹7,500, dedup, holiday-aware |
+| `autotrader` | `autotrader-00258-t7d` | PAPER; **swing PAPER capital ₹5L (`CAPITAL_SWING=500000`, `SWING_RISK_PER_TRADE=7500`)**. Code = **Swing trail arm-threshold 1.0R→1.75R (PR #26, `swing_exit.py:DEFAULT_ACTIVATE_R`; deep-OOS validated +28% net @₹5L + lower DD; reconciliation-only — ws-monitor untouched, Rule 8)** + Swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt, PR #25; shared `domain/swing_signals.py`); on top of Swing overhaul (PR #23) + FSM swing-fix (PR #24) + Phase C v2.1; **₹5L swing** + ₹1L intraday, swing risk ₹7,500, dedup, holiday-aware |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00042-wv7` | min-instances=1, holds Upstox WS loop, runs the exit FSM (`USE_EXIT_FSM_V1=true`). **Separate image (`cloudbuild.ws.yaml`) — see CLAUDE.md Rule 8; had silently run May-15 code for a month until PR #24.** |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
@@ -268,6 +268,22 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-18 (later) — SHIPPED swing trail arm-threshold 1.0R→1.75R — PR #26, PAPER
+
+**Goal:** ship the first validated swing improvement since #3/#7-soft. The daily 1R trailing stop now ARMS at +1.75R instead of +1.0R (`domain/swing_exit.py:DEFAULT_ACTIVATE_R` 1.0→1.75) — winners ride longer before the stop ratchets up (trail width unchanged at 1R). Branch `swing-arm-1.75` → PR #26 → merged `d9d37e4` (commit `8112e6b`) → deployed **`autotrader-00258-t7d`** (was `00257-mn6`), serving 100%, PAPER + ₹5L env preserved, ws-monitor unchanged.
+
+1. **Validation (deep OOS 2010-26, 239,359 entries, net of Upstox cost, 5-slot book).** **Plateau, not peak:** arm 1.4-1.75R ALL beat 1.0R on the held-out TEST half at every walk-forward split boundary (2015/17/19/21/23); 2.0R FAILS (trail arms too late to ever activate — the plateau's upper wall). 1.75 is the plateau's high end with the strongest recent-boundary margin (≥2023: **+31,119 vs 1.5's thin +6,251** → most robust forward). **@₹5L: +28% full net (723,517→924,853), 8.5%→10.9%/yr, AND a lower drawdown (35%→33%)** — dominates the 1.5 alternative on both return and DD at every capital ≥₹2L. **All three setups improve** (signal-level net-R: MOMENTUM +583→+1006, PULLBACK +364→+514, MEAN_REVERSION +178→+236) → uniform value, no setup-specific carve-out. Finalized 1.75 over 1.5 (data dominates; PAPER lets us monitor the plateau edge).
+
+2. **Fidelity + tests.** `simulate_exit`/`trailed_stop` were already parameterized on `activate_R`; the prod trail (`swing_reconciliation_service:281`) consumes `DEFAULT_ACTIVATE_R`, so the one-line default change flows straight to the live trail. `tests/test_swing_exit.py` **15 passed** incl the **exit_lab fidelity-replay over ~58K entries** (implementations agree at the policy arm; the 1.75 geometry is the same formula + the OOS walk drove `simulate_exit` at 1.75 directly → prod≡backtest by construction). 5 default-reliant unit tests pinned to explicit `activate_R=1.0`; +3 new tests cover the 1.75 default. **401 passed** blast-radius (trading/watchlist/policy/swing/recon/exit/fsm).
+
+3. **Open positions SAFE (ratchet-only).** Reconciliation does `sl_price = max(sl_price, new_stop)` (BUY) — the higher arm can NEVER lower an already-raised stop. The 4 open swing positions at deploy time (EMAMILTD short, CROMPTON/JAYNECOIND/SAIL MR) were all **unarmed** (`sl_moved` empty, stops at entry-SL) → zero impact. New arm effective at the next premarket `swing-recon-0900` (06-19).
+
+**Honest calibration:** the +28% is raw backtest; after the survivorship/vintage/slippage haircut expect a modest live uplift (~5%→~6-6.5%/yr) PLUS the shallower DD. **The first validated profit improvement since #3/#7-soft** (after the swing audit closed: params/allocation/sector/sizing/overlays all rejected OOS). PAPER stays PAPER.
+
+**Deploy hygiene:** `autotrader` ONLY (Rule 8 verified — arm computed in the daily reconciliation; ws-monitor/FSM swing path is SL-only, no `trailed_stop(` call). Rule 1 sync clean (`git log origin/main..HEAD` empty), Rule 3 ADC token. **Git-auth fixed mid-session** (`gh auth setup-git` → active `vishalrwt1995`; the prior push 403 was a stale `vishal01012` osxkeychain token, not a permission loss). Scratch: `~/.autotrader_backtest_cache/oos_arm_*.py`.
+
+**Next:** PAPER-monitor swing trail behavior at arm 1.75R vs backtest expectation; fundamental-data edge project (PARKED, awaiting user signal).
 
 ### 2026-06-18 — Fresh INTRADAY re-audit (no retail edge → parked) + swing ₹5L profit profile + improvement-scope (NO prod change)
 
