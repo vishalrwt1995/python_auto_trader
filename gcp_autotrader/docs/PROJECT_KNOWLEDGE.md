@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-17 (shipped swing-edges #3 + #7-soft — PR #25; then swing PAPER capital ₹1L→₹5L for the live test, env-only, rev `autotrader-00257-mn6`) · **Last verified live state:** 2026-06-17 15:12 IST (rev 00257-mn6 serving 100%, PAPER, CAPITAL_SWING=₹5L / SWING_RISK=₹7,500, intraday unchanged)
+> **Last updated:** 2026-06-18 (fresh INTRADAY re-audit → no retail edge, channel parked; swing ₹5L profit profile + improvement-scope; next = fundamental-data edge project, PARKED awaiting user signal) · **Last verified live state:** 2026-06-18 09:42 IST (rev 00257-mn6 serving, PAPER, ₹5L swing; no new swing trades 06-17/18 = regime RANGE_ROTATING gates momentum + MR at 3/3 reserve cap — by design, not a bug)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -268,6 +268,22 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-18 — Fresh INTRADAY re-audit (no retail edge → parked) + swing ₹5L profit profile + improvement-scope (NO prod change)
+
+**Context:** user distrusted the prior-thread intraday audit ("done in another thread, doubt it was correct") → redid it **fresh + independent** (own BigQuery tests on the full 165M-row `candles_5m_full`, not the prior `intraday_baseline.py`). Verdict reproduced AND extended.
+
+1. **INTRADAY = no retail-viable systematic edge (fresh, exhaustive).** Every category negative on NSE liquid equities net of cost:
+   - Single-name **directional** (trend-long above-VWAP): forward 60-min return ≈ **0, sub-coin-flip (41-45% pos)** on a ~14M-entry sample — entry carries no directional info.
+   - **Cross-sectional** momentum + range-position: weak/unstable, **negative 2024-26**.
+   - **Market intraday momentum** (Gao et al., the documented index edge): marginal in India, **below ~3 bps futures cost**; vol-conditioning made it worse.
+   - **ORB on stocks-in-play** (Zarattini-Aziz, best-documented retail intraday, US Sharpe 2.4): **NEGATIVE GROSS every year** on NSE (−0.05 to −0.11R).
+   - **Root cause: NSE intraday MEAN-REVERTS** (US continuation edges invert & die) + the retail cost wall. Corroborated by prod's real paper trades (**93 trades, 9% WR, −₹687, every month negative**) + SEBI (70% cash / 93% F&O traders lose).
+2. **Big-player research:** intraday edge = **data (catalyst/options-OI/L2) + speed + cost**, not a setup. Speed is NOT our blocker (Upstox WS handles non-HFT). Cost can't reach prop at retail (statutory STT). **Only untested lever = options-OI / F&O** (Upstox provides it; India intraday is options-driven) — but that's the **93%-lose arena**, access ≠ edge. **Decision: intraday systematic-on-candles is dead for us; F&O-OI track parked** (data-acquisition R&D, low base rate).
+3. **Swing ₹5L profit profile** (shipped #3+#7-soft, deep OOS 2010-26, net of cost): raw **~8.5%/yr** (median 9.2%, **13/17 +years**), **MAX DRAWDOWN 35% (₹175k)**, worst yr −25% (2011), best +38% (2023), return/risk 0.60. **Honest LIVE ≈ +5%/yr (₹25k)** after survivorship/vintage/slippage haircut — *underperforms the ~10-12%/yr cap-weight market on raw return* (its value is lower-beta + diversification, a satellite not a wealth engine). **Improvement scope:** cost = small (already diluted at ₹5L; residual mostly statutory STT); tuning = exhausted/overfit-risky; candle-edges = near-exhausted → **the only step-change is NEW fundamental data** (real PEAD / analyst-revisions / quality-value); a **drawdown/vol-target overlay** is the best *risk-adjusted* lever (cuts the 35% DD, doesn't raise return).
+4. **No-trades 06-17/18 = BENIGN, by design.** Regime `RANGE_ROTATING` → momentum/pullback hard-gated (`swing_setup_regime_gate`; 15+ score-qualifying signals blocked); MEAN_REVERSION at the **3/3 reserve-trend cap** (CROMPTON/JAYNECOIND/SAIL open) → `qualified=0`. Scans running, zero errors, deploy healthy. Idle stretches in non-trending regimes are normal — selectivity *is* the edge.
+
+**Next (PARKED — user will signal when to start):** scope the **fundamental-data edge project** — the only step-change shot for swing (needs earnings/fundamentals ingestion + factor modeling). Intraday left as-is (PAPER, deprioritized; zombie-emission cleanup optional). Intraday audit closed (no edge). Scratch harnesses: `~/.autotrader_backtest_cache/oos_*.py` (fresh BQ intraday tests, swing ₹5L profile).
 
 ### 2026-06-17 (later) — SHIPPED swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt) — PR #25, PAPER
 
