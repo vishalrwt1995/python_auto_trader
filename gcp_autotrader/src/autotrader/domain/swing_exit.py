@@ -8,11 +8,11 @@ Replaces the retired "V2" swing exit (50% scale-out at 0.5R + 2R fixed target +
   - NO partial scale-out, NO fixed target — ride the full position.
   - Track the running peak (highest high for a long, lowest low for a short)
     across the daily bars since entry.
-  - ARM the trail once the peak reaches ``activate_R`` (default 1R = one
-    ``sl_dist``) of favourable excursion.  At the arm point the stop jumps to
-    breakeven (entry), then ratchets to ``peak - trail_R*sl_dist`` (1R below the
-    peak) as the peak advances.  The stop only ever moves in the favourable
-    direction.
+  - ARM the trail once the peak reaches ``activate_R`` (default 1.75R, raised
+    from 1R on 2026-06-18 — validated: arming later lets winners run).  At the arm
+    point the stop is ``peak - trail_R*sl_dist`` (at a 1.75R arm with a 1R trail
+    that locks in +0.75R), then ratchets up as the peak advances.  The stop only
+    ever moves in the favourable direction.
   - The stop is a RESTING level: it triggers intraday when a bar's low (long) /
     high (short) pierces it.  Production splits this across two services — the
     daily reconciliation job RATCHETS the level premarket using the peak through
@@ -38,7 +38,12 @@ from typing import Sequence
 # Backtest-validated defaults (MOM_trail1.0_np_20d). Trail and activation are
 # expressed in R (multiples of sl_dist) so they are price- and ATR-independent.
 DEFAULT_TRAIL_R: float = 1.0
-DEFAULT_ACTIVATE_R: float = 1.0
+# 2026-06-18: arm the trail at 1.75R (raised from 1.0R). Deep-OOS walk-forward +
+# plateau-validated — arm 1.4–1.75R all beat 1.0R on the TEST half at every split
+# boundary (incl. ≥2023); arming later lets winners run before the stop ratchets up
+# → higher net (+~28% @₹5L, ~8.5→10.9%/yr raw) and a shallower drawdown (35→33%).
+# Plateau not peak (2.0R fails: trail arms too late to activate). See PROJECT_KNOWLEDGE §8.
+DEFAULT_ACTIVATE_R: float = 1.75
 DEFAULT_MAX_HOLD_DAYS: int = 20
 
 
