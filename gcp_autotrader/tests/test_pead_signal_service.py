@@ -267,3 +267,10 @@ def test_live_nifty_gate_selection_matches_backtest():
         f"only-svc={len(service_selected - backtest_selected)}")
     assert len(service_selected) == NIFTY_COUNT, (
         f"expected {NIFTY_COUNT} NIFTY-50 −5% candidates, got {len(service_selected)}")
+
+
+def test_parse_nse_date_formats():
+    assert svc._parse_nse_date("18-Apr-2026") == "2026-04-18"
+    assert svc._parse_nse_date("2026-04-18") == "2026-04-18"
+    assert svc._parse_nse_date("garbage") is None
+    assert svc._parse_nse_date("") is None

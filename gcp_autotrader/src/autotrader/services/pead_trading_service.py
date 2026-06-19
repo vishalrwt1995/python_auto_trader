@@ -129,6 +129,28 @@ def _fetch_symbol_daily(upstox, instrument_key: str, asof: str) -> list[list]:
         return []
 
 
+def _select_reaction_symbols(events: Sequence[tuple[str, str]],
+                             candles: dict[str, list[list]], reaction_target: str) -> list[str]:
+    """PURE: keep symbols whose reaction day (first daily session strictly AFTER their
+    filing date) == ``reaction_target``. Mirrors the backtest's per-event reaction
+    (``bisect_right(bars, announce)``) so we price only the true reaction-day move and
+    skip names that reacted on a different session. De-duplicated."""
+    import bisect
+    out: list[str] = []
+    seen: set[str] = set()
+    for sym, filing in events:
+        if sym in seen:
+            continue
+        bars = candles.get(sym)
+        if not bars:
+            continue
+        dates = [b[0] for b in bars]
+        ri = bisect.bisect_right(dates, filing)   # first bar strictly after filing
+        if ri < len(dates) and dates[ri] == reaction_target:
+            out.append(sym); seen.add(sym)
+    return out
+
+
 def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
                        reaction_date: str | None = None) -> dict[str, Any]:
     """Live PEAD daily scan + entry (PAPER). Fail-closed at every step.
@@ -146,26 +168,37 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     nifty_daily = _fetch_nifty_daily(upstox, asof)
     if len(nifty_daily) < 2:
         return {"skipped": "no_nifty_market_state", "asof": asof}
+    # Reaction day = the LAST COMPLETED market session (NIFTY's last bar). This works
+    # at premarket (today's bar not yet formed -> last = the prior session) AND
+    # post-close (last = today). We enter names that reacted on this session at the
+    # NEXT open — exactly the backtest's reaction+1 entry. Using `asof` directly was
+    # wrong: at premarket the asof-day bar doesn't exist, so nothing qualified.
+    reaction_target = nifty_daily[-1][0]
 
-    result_symbols = pead_signal_service.fetch_result_symbols(asof)
-    if not result_symbols:
-        return {"asof": asof, "result_symbols": 0, "candidates": 0, "entered": 0}
+    events = pead_signal_service.fetch_result_events(reaction_target)
+    if not events:
+        return {"asof": asof, "reaction_date": reaction_target, "result_events": 0,
+                "candidates": 0, "entered": 0}
 
-    # resolve instrument keys + fetch fresh dailies for just the reported names
-    key_map = _resolve_instrument_keys(result_symbols, bq) if bq else {}
+    # resolve instrument keys + fetch fresh dailies for the reported names
+    ev_syms = sorted({s for s, _ in events})
+    key_map = _resolve_instrument_keys(ev_syms, bq) if bq else {}
     candles: dict[str, list[list]] = {}
-    for sym in result_symbols:
+    ik_for: dict[str, str] = {}
+    for sym in ev_syms:
         ik = key_map.get(sym)
         if not ik:
             continue
-        bars = _fetch_symbol_daily(upstox, ik, asof)
+        bars = _fetch_symbol_daily(upstox, ik, reaction_target)
         if len(bars) >= pead_signal_service.ATR_WINDOW + 2:
             candles[sym] = bars
-            candles[sym + "__ik"] = ik          # carry the key for the order (popped below)
+            ik_for[sym] = ik
 
-    ik_for = {s: candles.pop(s + "__ik", "") for s in list(result_symbols)}
-    candidates = pead_signal_service.scan(asof, candles, nifty_daily,
-                                          result_symbols=list(candles.keys()),
+    # keep only names whose reaction day (first session after their filing) == target —
+    # the faithful per-event reaction filter (vs naively pricing every recent reporter)
+    eligible = _select_reaction_symbols(events, candles, reaction_target)
+    candidates = pead_signal_service.scan(reaction_target, candles, nifty_daily,
+                                          result_symbols=eligible,
                                           market_dd_gate=cfg.pead_market_dd_gate)
     for c in candidates:
         c["instrument_key"] = ik_for.get(c["symbol"], "")
@@ -195,12 +228,13 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     # ── #1: persist the day's candidate watchlist (annotated) so the dashboard can
     # show PEAD the same way as swing/intraday. Separate `pead_watchlist` collection —
     # never touches the swing/intraday watchlist. Best-effort (won't fail the scan).
-    nifty_dd = pead_signal_service.nifty_drawdown(nifty_daily, asof)
-    _persist_pead_watchlist(state, asof, nifty_dd, market_dd_gate, channel_capital,
+    nifty_dd = pead_signal_service.nifty_drawdown(nifty_daily, reaction_target)
+    _persist_pead_watchlist(state, reaction_target, nifty_dd, cfg.pead_market_dd_gate, channel_capital,
                             realized_today, candidates, planned_syms, entered_syms,
                             set(open_syms), cfg)
 
-    summary = {"asof": asof, "result_symbols": len(result_symbols), "candidates": len(candidates),
+    summary = {"asof": asof, "reaction_date": reaction_target, "result_events": len(events),
+               "eligible": len(eligible), "candidates": len(candidates),
                "planned": len(specs), "entered": len(entered_syms), "open_before": len(open_syms),
                "nifty_dd": round(nifty_dd or 0.0, 4)}
     logger.info("pead_scan_summary %s", summary)
