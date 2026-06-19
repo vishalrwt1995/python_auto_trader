@@ -176,7 +176,8 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     realized_today = _pead_realized_today(state, asof)
 
     specs = plan_pead_entries(candidates, open_syms, realized_today, channel_capital, cfg)
-    entered = 0
+    planned_syms = {s["symbol"] for s in specs}
+    entered_syms: set[str] = set()
     for s in specs:
         try:
             res = order_service.place_entry_order(
@@ -187,14 +188,69 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
                 wl_type="pead", channel="pead",
             )
             if res and not res.get("error") and not res.get("skipped"):
-                entered += 1
+                entered_syms.add(s["symbol"])
         except Exception:
             logger.exception("pead_place_entry_failed sym=%s", s["symbol"])
+
+    # ── #1: persist the day's candidate watchlist (annotated) so the dashboard can
+    # show PEAD the same way as swing/intraday. Separate `pead_watchlist` collection —
+    # never touches the swing/intraday watchlist. Best-effort (won't fail the scan).
+    nifty_dd = pead_signal_service.nifty_drawdown(nifty_daily, asof)
+    _persist_pead_watchlist(state, asof, nifty_dd, market_dd_gate, channel_capital,
+                            realized_today, candidates, planned_syms, entered_syms,
+                            set(open_syms), cfg)
+
     summary = {"asof": asof, "result_symbols": len(result_symbols), "candidates": len(candidates),
-               "planned": len(specs), "entered": entered, "open_before": len(open_syms),
-               "nifty_dd": round(pead_signal_service.nifty_drawdown(nifty_daily, asof) or 0.0, 4)}
+               "planned": len(specs), "entered": len(entered_syms), "open_before": len(open_syms),
+               "nifty_dd": round(nifty_dd or 0.0, 4)}
     logger.info("pead_scan_summary %s", summary)
     return summary
+
+
+def _candidate_status(sym, planned_syms, entered_syms, held, breaker):
+    """Annotate why each candidate was/wasn't taken (for the dashboard watchlist)."""
+    if sym in entered_syms:
+        return "ENTERED"
+    if sym in held:
+        return "ALREADY_HELD"
+    if breaker:
+        return "BREAKER_HALT"
+    if sym in planned_syms:
+        return "PLANNED_NOT_FILLED"     # order rejected/skipped (e.g. dup idempotency)
+    return "NOT_SELECTED"               # below the 5-slot surprise rank
+
+
+def _persist_pead_watchlist(state, asof, nifty_dd, market_dd_gate, channel_capital,
+                            realized_today, candidates, planned_syms, entered_syms, held, cfg):
+    try:
+        loss_limit = -abs(cfg.daily_loss_pct) * channel_capital
+        profit_limit = abs(cfg.daily_profit_pct) * channel_capital
+        breaker = pead_book.daily_breaker_tripped(realized_today, loss_limit, profit_limit)
+        rows = [{
+            "symbol": c["symbol"],
+            "surprise": round(float(c["surprise"]), 4),
+            "runup": round(float(c.get("runup") or 0.0), 4),
+            "atr": round(float(c["atr"]), 4),
+            "reaction_close": round(float(c["reaction_close"]), 2),
+            "reaction_date": c.get("reaction_date", asof),
+            "status": _candidate_status(c["symbol"], planned_syms, entered_syms, held, breaker),
+        } for c in candidates]
+        payload = {
+            "asof": asof,
+            "channel": "pead",
+            "market_dd": round(nifty_dd, 4) if nifty_dd is not None else None,
+            "market_dd_gate": market_dd_gate,
+            "market_ok": (nifty_dd is not None and nifty_dd > market_dd_gate),
+            "breaker_tripped": breaker,
+            "candidates": len(rows),
+            "entered": len(entered_syms),
+            "held_before": len(held),
+            "rows": rows,
+        }
+        state.set_json("pead_watchlist", asof, payload, merge=False)
+        state.set_json("pead_watchlist", "latest", payload, merge=False)
+    except Exception:
+        logger.warning("pead_watchlist_persist_failed asof=%s — non-critical", asof, exc_info=True)
 
 
 def _resolve_instrument_keys(symbols: Sequence[str], bq) -> dict[str, str]:
