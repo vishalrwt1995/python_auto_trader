@@ -17,6 +17,7 @@ from autotrader.services.log_sink import LogSink, set_default_bq as _log_sink_se
 from autotrader.services.market_brain_service import MarketBrainService
 from autotrader.services.order_service import OrderService
 from autotrader.services.regime_service import MarketRegimeService
+from autotrader.services.pead_reconciliation_service import PeadReconciliationService
 from autotrader.services.swing_reconciliation_service import SwingReconciliationService
 from autotrader.services.trading_service import TradingService
 from autotrader.services.universe_service import UniverseService
@@ -97,6 +98,7 @@ class AppContainer:
         self._order_service: OrderService | None = None
         self._trading_service: TradingService | None = None
         self._swing_reconciliation_service: SwingReconciliationService | None = None
+        self._pead_reconciliation_service: PeadReconciliationService | None = None
 
     def log_sink(self) -> LogSink:
         # Pass `bq` explicitly here; `LogSink()` constructed elsewhere
@@ -160,6 +162,29 @@ class AppContainer:
                 order_service=self.order_service(),
             )
         return self._swing_reconciliation_service
+
+    def pead_reconciliation_service(self) -> PeadReconciliationService:
+        if self._pead_reconciliation_service is None:
+            self._pead_reconciliation_service = PeadReconciliationService(
+                settings=self.settings,
+                state=self.state,
+                upstox=self.upstox,
+                order_service=self.order_service(),
+            )
+        return self._pead_reconciliation_service
+
+    def run_pead_scan(self, reaction_date: str | None = None) -> dict:
+        """Run the daily PEAD entry scan (entry pipeline). Thin wrapper around the
+        pure-core service function wired with the container's adapters (PAPER)."""
+        from autotrader.services import pead_trading_service
+        return pead_trading_service.run_pead_scan_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            reaction_date=reaction_date,
+        )
 
 
 @lru_cache(maxsize=1)
