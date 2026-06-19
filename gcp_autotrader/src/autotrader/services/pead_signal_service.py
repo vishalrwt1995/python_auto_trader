@@ -86,8 +86,31 @@ def compute_market_dd(candles: dict[str, list[list]], asof: str,
     return lvl[-1] / peak - 1.0 if peak > 0 else None
 
 
+def nifty_drawdown(nifty_daily: Sequence[tuple[str, float]], asof: str,
+                   window: int = MARKET_DD_WINDOW) -> float | None:
+    """Broad-market drawdown from NIFTY-50 = level / trailing-``window`` peak − 1 (<= 0),
+    using daily closes up to and including ``asof``.
+
+    This is the LIVE market-state gate source (audit 2026-06-19): a NIFTY-50 −5%
+    drawdown gate backtests as well or better than the equal-weight universe index
+    (Rs2L: Rs231k / 22.8% mark-to-market DD / 11-of-16 +yrs vs eq-weight Rs228k /
+    27.9% DD / 10-of-14) AND is feedable live with a single index fetch/day, whereas
+    the equal-weight index needs ~2,000 daily bars. Crucially it stayed profitable
+    through the recent corrections (2022 +Rs7k, 2025 +Rs27k) where no-gate bled
+    (2025-26 −Rs43k). See PROJECT_KNOWLEDGE §8 + the documented no-gate alternative.
+
+    ``nifty_daily`` = ascending ``[(date, close)]``. Returns None without enough data.
+    """
+    closes = [c for d, c in nifty_daily if d <= asof and c and c > 0]
+    if len(closes) < 2:
+        return None
+    peak = max(closes[-window:])
+    return closes[-1] / peak - 1.0 if peak > 0 else None
+
+
 def build_candidates(reaction_date: str, result_symbols: Sequence[str],
-                     candles: dict[str, list[list]], market_dd: float | None) -> list[dict[str, Any]]:
+                     candles: dict[str, list[list]], market_dd: float | None,
+                     market_dd_gate: float = pead_signals.MARKET_DD_GATE) -> list[dict[str, Any]]:
     """Pure Config B candidate selection for one reaction day.
 
     For each just-reported symbol whose reaction is ``reaction_date``: apply the
@@ -116,7 +139,7 @@ def build_candidates(reaction_date: str, result_symbols: Sequence[str],
             continue
         surprise = pead_signals.earnings_surprise(closes, ri)
         runup = pead_signals.pre_event_runup(closes, ri)
-        if not pead_signals.passes_pead_gates(surprise, runup, market_dd):
+        if not pead_signals.passes_pead_gates(surprise, runup, market_dd, market_dd_gate=market_dd_gate):
             continue
         atr = _simple_atr(highs, lows, closes, ri)
         if atr is None or atr <= 0:
@@ -161,15 +184,28 @@ def fetch_result_symbols(asof: str, lookback_days: int = 3) -> list[str]:
 
 
 def scan(reaction_date: str, candles: dict[str, list[list]],
-         result_symbols: Sequence[str] | None = None) -> list[dict[str, Any]]:
-    """Top-level: compute market_dd from ``candles`` and return PEAD candidates for
-    ``reaction_date``. If ``result_symbols`` is None, fetch them live from NSE."""
-    market_dd = compute_market_dd(candles, reaction_date)
+         nifty_daily: Sequence[tuple[str, float]],
+         result_symbols: Sequence[str] | None = None,
+         market_dd_gate: float = pead_signals.MARKET_DD_GATE) -> list[dict[str, Any]]:
+    """Top-level: compute the NIFTY-50 market-state drawdown and return PEAD candidates
+    for ``reaction_date``.
+
+    ``candles`` = per-symbol daily bars for the reported names; ``nifty_daily`` =
+    ascending ``[(date, close)]`` NIFTY-50 series (the market-state source). If
+    ``result_symbols`` is None, fetch them live from NSE.
+
+    ``market_dd_gate`` defaults to the validated −0.05. To run the documented NO-GATE
+    variant (higher lifetime total but trades through corrections — see
+    PROJECT_KNOWLEDGE §8), pass a very negative value (e.g. −1.0) so the gate always
+    passes; this is wired to the ``PEAD_MARKET_DD_GATE`` env var in the trading service.
+    """
+    market_dd = nifty_drawdown(nifty_daily, reaction_date)
     if market_dd is None:
         logger.warning("pead_scan_no_market_dd reaction_date=%s — skipped", reaction_date)
         return []
     if result_symbols is None:
         result_symbols = fetch_result_symbols(reaction_date)
-    cands = build_candidates(reaction_date, result_symbols, candles, market_dd)
-    logger.info("pead_scan reaction_date=%s market_dd=%.3f candidates=%d", reaction_date, market_dd, len(cands))
+    cands = build_candidates(reaction_date, result_symbols, candles, market_dd, market_dd_gate=market_dd_gate)
+    logger.info("pead_scan reaction_date=%s nifty_dd=%.3f gate=%.2f candidates=%d",
+                reaction_date, market_dd, market_dd_gate, len(cands))
     return cands
