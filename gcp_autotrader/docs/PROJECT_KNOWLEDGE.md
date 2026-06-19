@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-19 (SHIPPED EVENT/PEAD channel — PR #27, rev 00260-b58, PAPER, ₹2L NEW capital; additive 3rd channel, swing/intraday byte-identical; NIFTY-50 −5% market gate [no-gate documented/env-flippable]; ~4% live/yr / ~23% MTM DD; fidelity-proven [2,042 candidates, 0 unexplained]; dormant until first scheduler fire Mon 06-23 ~08:40 IST; + dashboard backend PR #28 [pead_watchlist persist + /dashboard/pead endpoints; frontend tab deferred to Monday's data]; earlier: BREAKOUT rejected, swing arm 1.75R PR #26) · **Last verified live state:** 2026-06-19 16:10 IST (rev 00262-j2t serving 100%, PAPER, ₹5L swing + ₹1L intraday + ₹2L PEAD; PEAD live-I/O smoke test HTTP 200 — NIFTY+event-cal+keys+dailies+persist clean, nifty_dd −8.2% → correctly DORMANT, pead_watchlist persisted; swing/intraday env unchanged — nothing affected)
+> **Last updated:** 2026-06-19 (SHIPPED EVENT/PEAD channel — PR #27, rev 00260-b58, PAPER, ₹2L NEW capital; additive 3rd channel, swing/intraday byte-identical; NIFTY-50 −5% market gate [no-gate documented/env-flippable]; ~4% live/yr / ~23% MTM DD; fidelity-proven [2,042 candidates, 0 unexplained]; dormant until first scheduler fire Mon 06-23 ~08:40 IST; + dashboard backend PR #28 [pead_watchlist persist + /dashboard/pead endpoints; frontend tab deferred to Monday's data]; earlier: BREAKOUT rejected, swing arm 1.75R PR #26) · **Last verified live state:** 2026-06-19 ~16:40 IST (rev 00263-d74 serving 100%, PAPER, ₹5L swing + ₹1L intraday + ₹2L PEAD; PEAD GRIND-V2 live [anti-pump 0.75 / max-hold 60, OOS +42%]; scan HTTP 200 still correctly DORMANT [NIFTY −8.2%]; swing/intraday env unchanged, swing routes 401 — nothing affected)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -111,7 +111,7 @@ gcp_autotrader/
 
 | Service | Latest revision (verified 2026-06-19) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00262-j2t` | PAPER; **NEW EVENT/PEAD channel live + dormant + live-I/O-validated (PR #27/#28/#29, 2026-06-19; rev 00262 = reaction-date fix found by the first smoke test)** — `CAPITAL_PEAD=200000`, `PEAD_RISK_PER_TRADE=3000`; daily scan `/jobs/pead-scan` + exit `/jobs/pead-reconcile` (scheduler `pead-scan-0845`/`pead-recon-0840`, Mon-Fri IST; first fire Mon 06-23). **Dashboard backend (PR #28):** scan persists candidates to `pead_watchlist` Firestore + `/dashboard/pead/watchlist` + `/dashboard/pead/summary` endpoints (frontend PEAD tab deferred → build vs Monday's real data). Additive — swing/intraday byte-identical (verified: brain updating post-deploy, swing routes 401, env unchanged). Prior code = swing arm 1.75R (PR #26) + edges #3/#7-soft (PR #25) + overhaul (PR #23) + FSM fix (PR #24) + Phase C v2.1; **₹5L swing** + ₹1L intraday + **₹2L PEAD**, swing risk ₹7,500, dedup, holiday-aware |
+| `autotrader` | `autotrader-00263-d74` | PAPER; **NEW EVENT/PEAD channel live + dormant + GRIND-V2 (PR #27/#28/#29/#30, 2026-06-19; rev 00263 = anti-pump 0.50→0.75 + max-hold 40→60, OOS-validated +42%)** — `CAPITAL_PEAD=200000`, `PEAD_RISK_PER_TRADE=3000`; daily scan `/jobs/pead-scan` + exit `/jobs/pead-reconcile` (scheduler `pead-scan-0845`/`pead-recon-0840`, Mon-Fri IST; first fire Mon 06-23). **Dashboard backend (PR #28):** scan persists candidates to `pead_watchlist` Firestore + `/dashboard/pead/watchlist` + `/dashboard/pead/summary` endpoints (frontend PEAD tab deferred → build vs Monday's real data). Additive — swing/intraday byte-identical (verified: brain updating post-deploy, swing routes 401, env unchanged). Prior code = swing arm 1.75R (PR #26) + edges #3/#7-soft (PR #25) + overhaul (PR #23) + FSM fix (PR #24) + Phase C v2.1; **₹5L swing** + ₹1L intraday + **₹2L PEAD**, swing risk ₹7,500, dedup, holiday-aware |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00042-wv7` | min-instances=1, holds Upstox WS loop, runs the exit FSM (`USE_EXIT_FSM_V1=true`). **Separate image (`cloudbuild.ws.yaml`) — see CLAUDE.md Rule 8; had silently run May-15 code for a month until PR #24.** |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
@@ -268,6 +268,16 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### 2026-06-19 (latest) — PEAD GRIND-V2 shipped (PR #30, rev 00263-d74, PAPER) — +42% OOS-validated
+
+**Goal:** user asked to grind PEAD for max profit. Did an OOS-disciplined one-at-a-time sweep (IS 2010-17 / OOS 2018-26) over all knobs — guarded against overfit (we only trust changes that help BOTH halves + form a smooth plateau, given the prior forensic "over-filtering hurts"). Scratch: `~/.autotrader_backtest_cache/pead_param_grind.py` + `pead_grind_combo.py`.
+
+**Two robust, stacking, economically-motivated wins** (rejected arm/trail/slots — those only added return via higher DD; gate/atr/surprise already optimal):
+- **anti_pump 0.50 → 0.75** — 0.50 was over-filtering legit momentum names; 0.75 still blocks pump-and-dumps.
+- **max_hold 40 → 60** — 40 cut the PEAD drift short; 60 = textbook drift horizon.
+
+**At ₹2L (NIFTY-50 −5% gate): TOT ₹234k → ₹332k (+42%), MTM DD ~unchanged (22.8%→23.6%), 14/17 +yrs (was 11/16).** Robust, not overfit: gains **concentrated out-of-sample** (OOS +71% vs IS only +24% — the opposite of curve-fitting), **smooth plateau** across 0.60-0.90 × 50-70. Fidelity intact (live==backtest set-equality exact); look-ahead-free counts 1494→1626 (eq-weight) / 2042→2171 (NIFTY) = the +legit movers. 67 PEAD tests pass. **Deploy verified:** rev 00263-d74 serving, PAPER, swing/intraday env unchanged, swing routes 401, grind-v2 scan HTTP 200 (still correctly dormant, NIFTY −8.2%). **Honest caveat: still backtest — real test is live-forward.**
 
 ### 2026-06-19 (latest) — SHIPPED EVENT/PEAD channel (PR #27, rev 00260-b58, PAPER, ₹2L) — additive 3rd channel
 
