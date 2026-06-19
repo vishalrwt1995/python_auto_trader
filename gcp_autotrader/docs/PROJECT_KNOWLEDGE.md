@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-06-18 (BREAKOUT screened → REJECTED: Donchian net-negative after cost, 102-354% DD — 5th OOS confirmation of the candle-data ceiling, candle chapter closed, §7-G resolved; earlier: SHIPPED swing arm-threshold 1.0R→1.75R PR #26 rev 00258-t7d; INTRADAY re-audit no edge; next = fundamental-data edge project, PARKED awaiting user signal) · **Last verified live state:** 2026-06-18 15:50 IST (rev 00258-t7d serving 100%, PAPER, ₹5L swing, risk ₹7,500, 3%/6% breakers; 4 open swing positions intact + unarmed — arm change is ratchet-only, zero impact on the book; new arm effective next premarket recon 06-19 09:00)
+> **Last updated:** 2026-06-19 (SHIPPED EVENT/PEAD channel — PR #27, rev 00260-b58, PAPER, ₹2L NEW capital; additive 3rd channel, swing/intraday byte-identical; NIFTY-50 −5% market gate [no-gate documented/env-flippable]; ~4% live/yr / ~23% MTM DD; fidelity-proven [2,042 candidates, 0 unexplained]; dormant until first scheduler fire Mon 06-23 ~08:40 IST; earlier: BREAKOUT rejected, swing arm 1.75R PR #26) · **Last verified live state:** 2026-06-19 13:30 IST (rev 00260-b58 serving 100%, PAPER, ₹5L swing + ₹1L intraday + ₹2L PEAD, swing risk ₹7,500 / PEAD risk ₹3,000, 3%/6% breakers; brain updating 13:27 IST post-deploy, swing+PEAD routes 401, swing/intraday env unchanged — nothing affected)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -109,9 +109,9 @@ gcp_autotrader/
 
 > ⚠️ Always pass `--project grow-profit-machine --account vishalrwt1995@gmail.com` to every gcloud command. Active config alone is not sufficient.
 
-| Service | Latest revision (verified 2026-06-18) | Notes |
+| Service | Latest revision (verified 2026-06-19) | Notes |
 |---|---|---|
-| `autotrader` | `autotrader-00258-t7d` | PAPER; **swing PAPER capital ₹5L (`CAPITAL_SWING=500000`, `SWING_RISK_PER_TRADE=7500`)**. Code = **Swing trail arm-threshold 1.0R→1.75R (PR #26, `swing_exit.py:DEFAULT_ACTIVATE_R`; deep-OOS validated +28% net @₹5L + lower DD; reconciliation-only — ws-monitor untouched, Rule 8)** + Swing-edges #3 (MR>200-SMA gate) + #7-soft (momentum near-high tilt, PR #25; shared `domain/swing_signals.py`); on top of Swing overhaul (PR #23) + FSM swing-fix (PR #24) + Phase C v2.1; **₹5L swing** + ₹1L intraday, swing risk ₹7,500, dedup, holiday-aware |
+| `autotrader` | `autotrader-00260-b58` | PAPER; **NEW EVENT/PEAD channel live + dormant (PR #27, 2026-06-19)** — `CAPITAL_PEAD=200000`, `PEAD_RISK_PER_TRADE=3000`; daily scan `/jobs/pead-scan` + exit `/jobs/pead-reconcile` (scheduler `pead-scan-0845`/`pead-recon-0840`, Mon-Fri IST; first fire Mon 06-23). Additive — swing/intraday byte-identical (verified: brain updating post-deploy, swing routes 401, env unchanged). Prior code = swing arm 1.75R (PR #26) + edges #3/#7-soft (PR #25) + overhaul (PR #23) + FSM fix (PR #24) + Phase C v2.1; **₹5L swing** + ₹1L intraday + **₹2L PEAD**, swing risk ₹7,500, dedup, holiday-aware |
 | `autotrader-ws-monitor` | `autotrader-ws-monitor-00042-wv7` | min-instances=1, holds Upstox WS loop, runs the exit FSM (`USE_EXIT_FSM_V1=true`). **Separate image (`cloudbuild.ws.yaml`) — see CLAUDE.md Rule 8; had silently run May-15 code for a month until PR #24.** |
 | `autotrader-dashboard` | `autotrader-dashboard-00063-rhc` | Next.js, Firebase Auth |
 
@@ -269,7 +269,23 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
 
-### 2026-06-18 (latest) — BREAKOUT screened → REJECTED (candle-data chapter closed; NO prod change)
+### 2026-06-19 (latest) — SHIPPED EVENT/PEAD channel (PR #27, rev 00260-b58, PAPER, ₹2L) — additive 3rd channel
+
+**Goal:** build + deploy the validated PEAD (post-earnings-announcement-drift) edge as a NEW channel with its own ₹2L PAPER capital, without touching swing/intraday. User: "Capital 2L, Paper mode. Make sure nothing breaks in swing... build e2e in a single go. Test everything. Separate branch."
+
+**Honest economics (look-ahead-free, through the shipped code, ₹2L):** ~6.7% raw / ~4% live per yr (~₹8k), ~23% mark-to-market max DD, 11/16 +yrs. NOT the ~8.2%/20% headline cited earlier — that had look-ahead (next-open price floor + announce-date drawdown), both removed. Thin, lumpy, orthogonal long-term diversifier; dormant in corrections.
+
+**Market-state gate (audited decision):** chose **NIFTY-50 −5% drawdown** (1 index fetch/day) over the validated equal-weight index (needs ~2,000 daily bars, can't be fed live — prod has no fresh full-universe daily feed). NIFTY-50 backtests as well/better (₹231k vs ₹228k, 22.8% vs 27.9% MTM DD, 11/16 vs 10/14) and stayed profitable through 2022 (+₹7k) + 2025 (+₹27k) where no-gate bled (2025-26 −₹43k). **No-gate documented + env-flippable** via `PEAD_MARKET_DD_GATE=-1.0` (highest lifetime total ₹303k but trades through corrections — future exploration).
+
+**Fidelity:** live signal provably reproduces the backtest selection event-for-event (NIFTY-50 −5% → 2,042 candidates, 0 unexplained divergences; eq-weight reference 1,494). Shared `domain/pead_signals` + `domain/pead_book` + `swing_exit.trailed_stop` = single source of truth (prod == backtest).
+
+**Architecture (hybrid):** NEW thin services (`pead_signal_service`, `pead_trading_service`, `pead_reconciliation_service`) for signal+book+entry+exit; REUSE `order_service`/positions/`swing_exit` trail math via `channel="pead"` (additive explicit-channel param) + distinct `wl_type="pead"` (keeps PEAD invisible to swing_reconciliation, which matches `"swing"` exactly). Daily scan `/jobs/pead-scan` (08:45 IST) after exit `/jobs/pead-reconcile` (08:40 IST), Mon-Fri scheduler. NO ws_monitor change (PEAD resting SL uses the existing channel-agnostic paper_gtt poll — verify Monday).
+
+**Tests:** PEAD suite 40 (both fidelity replays) + book/trading/recon 28 unit + full blast-radius **463 passed, 0 failed**. **Deploy verified:** rev 00260-b58 serving, PAPER=true, CAPITAL_SWING/INTRADAY unchanged, CAPITAL_PEAD=200000 + PEAD_RISK_PER_TRADE=3000 set, swing routes 401 (intact), PEAD routes 401 (live), **brain updating 13:27 IST post-deploy** (swing/intraday healthy). Deployed mid-session (Fri 13:30 IST) — low risk (additive + rolling, clear of 14:30 swing scan); PEAD makes **no trades until Mon 06-23 ~08:40 IST** (weekend buffer).
+
+**Open:** monitor first live PEAD scan Mon 06-23 (data-feed I/O validated in PAPER, not locally — watch the fresh-daily fetch + NIFTY market-state + first entries); confirm ws_monitor enforces PEAD paper_gtt SLs; dashboard PEAD panel deferred (trades viewable via `strategy=PEAD` filter). Scratch harnesses: `~/.autotrader_backtest_cache/pead_*.py` (gap_diag, lookahead_free_pnl, nifty_gate_pnl, gate_audit).
+
+### 2026-06-18 — BREAKOUT screened → REJECTED (candle-data chapter closed; NO prod change)
 
 **Goal:** test the one genuinely-untested long-only candle setup (volatility breakout, open item §7-G) before any fundamental-data lift — the disciplined "exhaust the cheap existing-data options first" move. User: "lets move to breakout, make sure we do not make mistakes."
 
