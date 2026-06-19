@@ -183,6 +183,53 @@ def fetch_result_symbols(asof: str, lookback_days: int = 3) -> list[str]:
         return []
 
 
+def _parse_nse_date(ds: str) -> str | None:
+    """Parse an NSE event date ('18-Apr-2026' or '2026-04-18') to ISO; None on failure."""
+    from datetime import datetime
+    ds = str(ds or "").strip()
+    try:
+        if len(ds) == 11 and "-" in ds:
+            return datetime.strptime(ds, "%d-%b-%Y").date().isoformat()
+        if len(ds) == 10:
+            return datetime.strptime(ds, "%Y-%m-%d").date().isoformat()
+    except Exception:
+        return None
+    return None
+
+
+def fetch_result_events(asof: str, lookback_days: int = 5) -> list[tuple[str, str]]:
+    """Live NSE event-calendar: ``[(symbol, filing_date_iso)]`` for 'Financial Results'
+    board meetings in ``[asof - lookback_days, asof]``.
+
+    Unlike ``fetch_result_symbols``, this returns the filing date so the caller can
+    compute each name's TRUE reaction day (first session after filing) and trade only
+    names reacting on the target session — faithful to the backtest's per-event
+    reaction (the lookback is intentionally wide; the reaction-date filter narrows it).
+    Fail-closed: ``[]`` on error.
+    """
+    from datetime import date, timedelta
+    try:
+        from autotrader.services.earnings_calendar_service import _nse_get
+        a = date.fromisoformat(asof)
+        frm = (a - timedelta(days=lookback_days)).strftime("%d-%m-%Y")
+        to = a.strftime("%d-%m-%Y")
+        data = _nse_get(f"/api/event-calendar?index=equities&from_date={frm}&to_date={to}")
+        events = data if isinstance(data, list) else data.get("data", [])
+        out: list[tuple[str, str]] = []
+        for e in events:
+            if "result" not in str(e.get("purpose", "")).lower():
+                continue
+            s = str(e.get("symbol", "")).strip().upper()
+            iso = _parse_nse_date(e.get("bm_date") or e.get("date") or "")
+            if s and iso:
+                out.append((s, iso))
+        logger.info("pead_result_events asof=%s count=%d", asof, len(out))
+        return out
+    except Exception as exc:
+        logger.error("pead_fetch_result_events_failed asof=%s err=%s", asof, exc)
+        return []
+
+
 def scan(reaction_date: str, candles: dict[str, list[list]],
          nifty_daily: Sequence[tuple[str, float]],
          result_symbols: Sequence[str] | None = None,

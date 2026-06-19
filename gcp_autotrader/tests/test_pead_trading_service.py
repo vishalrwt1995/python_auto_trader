@@ -6,7 +6,8 @@ surprise ranking, and sizing.
 """
 from types import SimpleNamespace
 
-from autotrader.services.pead_trading_service import plan_pead_entries, _candidate_status
+from autotrader.services.pead_trading_service import (
+    plan_pead_entries, _candidate_status, _select_reaction_symbols)
 
 # cfg mirroring StrategySettings PEAD fields at Rs2L (risk 0 -> 1.5% fallback = 3000)
 CFG = SimpleNamespace(
@@ -104,3 +105,35 @@ def test_candidate_status_not_selected():
 def test_candidate_status_entered_precedence_over_held():
     # an entered name that's also (newly) in held still reads ENTERED
     assert _candidate_status("F", {"F"}, {"F"}, {"F"}, True) == "ENTERED"
+
+
+# ── _select_reaction_symbols (per-event reaction-day filter) ──────────────────
+def _rbars(dates):
+    return [[d, 100.0, 101.0, 99.0, 100.0, 1e6] for d in dates]
+
+
+def test_select_reaction_keeps_target_reactor():
+    # filing Thu 06-18; first session after = Fri 06-19 == target -> kept
+    candles = {"A": _rbars(["2026-06-17", "2026-06-18", "2026-06-19"])}
+    assert _select_reaction_symbols([("A", "2026-06-18")], candles, "2026-06-19") == ["A"]
+
+
+def test_select_reaction_excludes_stale_reactor():
+    # filing 06-16; reaction = 06-17 (first after), target 06-19 -> excluded
+    candles = {"A": _rbars(["2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19"])}
+    assert _select_reaction_symbols([("A", "2026-06-16")], candles, "2026-06-19") == []
+
+
+def test_select_reaction_no_bars_excluded():
+    assert _select_reaction_symbols([("A", "2026-06-18")], {}, "2026-06-19") == []
+
+
+def test_select_reaction_target_after_last_bar_excluded():
+    # filing 06-19 but no session after it in the data -> can't confirm reaction
+    candles = {"A": _rbars(["2026-06-18", "2026-06-19"])}
+    assert _select_reaction_symbols([("A", "2026-06-19")], candles, "2026-06-19") == []
+
+
+def test_select_reaction_dedup():
+    candles = {"A": _rbars(["2026-06-18", "2026-06-19"])}
+    assert _select_reaction_symbols([("A", "2026-06-18"), ("A", "2026-06-18")], candles, "2026-06-19") == ["A"]
