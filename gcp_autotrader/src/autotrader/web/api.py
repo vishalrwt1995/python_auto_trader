@@ -1822,6 +1822,65 @@ def run_swing_reconcile(
         raise
 
 
+@app.post("/jobs/pead-scan")
+def run_pead_scan(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """EVENT/PEAD channel daily entry scan (PAPER): NIFTY-50 market-state →
+    NSE event-calendar → fresh dailies → Config-B candidates → 5-slot book → entries.
+    Called premarket (~09:10 IST) by Cloud Scheduler job: autotrader-pead-scan-0910.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("PeadTradingService", "pead_scan", "START", "", sched_ctx)
+        out = c.run_pead_scan()
+        sink.action("PeadTradingService", "pead_scan", "DONE", "pead scan complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("PeadTradingService", "pead_scan", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
+@app.post("/jobs/pead-reconcile")
+def run_pead_reconcile(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """EVENT/PEAD channel daily exit reconciliation (PAPER): ratchet the 1R-trail
+    (arm 1.75R), force the 40-day max-hold exit, daily SL-breach backstop. Runs
+    premarket BEFORE the scan. Cloud Scheduler job: autotrader-pead-recon-0900.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("PeadReconciliationService", "pead_reconcile", "START", "", sched_ctx)
+        result = c.pead_reconciliation_service().run()
+        out = result.to_dict()
+        sink.action("PeadReconciliationService", "pead_reconcile", "DONE", "pead reconcile complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("PeadReconciliationService", "pead_reconcile", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.get("/jobs/position-status")
 def get_position_status(
     x_job_token: str | None = Header(default=None),

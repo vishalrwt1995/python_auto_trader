@@ -42,6 +42,7 @@ class StrategySettings:
     # Typical config: CAPITAL_SWING=100000, CAPITAL_INTRADAY=100000, CAPITAL=200000.
     capital_swing: float = 0.0
     capital_intraday: float = 0.0
+    capital_pead: float = 0.0          # EVENT/PEAD channel (Phase C, added 2026-06-19)
     # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
     # of channel capital. Used by the per-channel daily-limit gate in
     # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
@@ -158,6 +159,24 @@ class StrategySettings:
     paper_entry_slippage_pct: float = 0.0010   # 0.10%
     paper_sl_slippage_pct: float = 0.0020      # 0.20%
 
+    # ── EVENT/PEAD channel (added 2026-06-19) ─────────────────────────────────
+    # Post-earnings-announcement-drift channel — own capital (capital_pead),
+    # separate daily breakers, NSE event-calendar signal, NIFTY-50 −5% market gate.
+    # All default to the validated config; absolute risk is set per-deploy (1.5% of
+    # capital_pead = Rs3,000 at Rs2L). The daily loss/profit breaker reuses
+    # daily_loss_pct / daily_profit_pct (3%/6%) applied to capital_pead.
+    pead_risk_per_trade: float = 0.0           # Rs/trade (PEAD_RISK_PER_TRADE; 1.5% of cap)
+    pead_max_positions: int = 5                # surprise-ranked 5-slot book
+    pead_max_hold_days: int = 40               # PEAD drift horizon (vs swing 20)
+    pead_atr_sl_mult: float = 2.5              # stop = ATR14 × this
+    pead_notional_cap_pct: float = 0.20        # per-position notional cap (× capital_pead)
+    pead_activate_r: float = 1.75              # arm the 1R trail at +1.75R (matches swing)
+    pead_trail_r: float = 1.0                  # trail distance in R once armed
+    # Market-state gate on NIFTY-50 252-day drawdown (validated −0.05). Set very
+    # negative (e.g. −1.0 via PEAD_MARKET_DD_GATE) to run the documented NO-GATE
+    # variant (higher lifetime total, trades through corrections — PROJECT_KNOWLEDGE §8).
+    pead_market_dd_gate: float = -0.05
+
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
 
@@ -175,6 +194,8 @@ class StrategySettings:
             return self.capital_swing
         if ch == "intraday" and self.capital_intraday > 0:
             return self.capital_intraday
+        if ch == "pead" and self.capital_pead > 0:
+            return self.capital_pead
         return self.capital
 
 
@@ -341,6 +362,7 @@ class AppSettings:
             capital=_env_float("CAPITAL", 50000),
             capital_swing=_env_float("CAPITAL_SWING", 0.0),
             capital_intraday=_env_float("CAPITAL_INTRADAY", 0.0),
+            capital_pead=_env_float("CAPITAL_PEAD", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
@@ -383,6 +405,15 @@ class AppSettings:
             reentry_cooldown_minutes=_env_int("REENTRY_COOLDOWN_MINUTES", 30),
             paper_entry_slippage_pct=_env_float("PAPER_ENTRY_SLIPPAGE_PCT", 0.0010),
             paper_sl_slippage_pct=_env_float("PAPER_SL_SLIPPAGE_PCT", 0.0020),
+            # EVENT/PEAD channel (2026-06-19)
+            pead_risk_per_trade=_env_float("PEAD_RISK_PER_TRADE", 0.0),
+            pead_max_positions=_env_int("PEAD_MAX_POSITIONS", 5),
+            pead_max_hold_days=_env_int("PEAD_MAX_HOLD_DAYS", 40),
+            pead_atr_sl_mult=_env_float("PEAD_ATR_SL_MULT", 2.5),
+            pead_notional_cap_pct=_env_float("PEAD_NOTIONAL_CAP_PCT", 0.20),
+            pead_activate_r=_env_float("PEAD_ACTIVATE_R", 1.75),
+            pead_trail_r=_env_float("PEAD_TRAIL_R", 1.0),
+            pead_market_dd_gate=_env_float("PEAD_MARKET_DD_GATE", -0.05),
         )
         return AppSettings(
             gcp=GcpSettings(

@@ -164,6 +164,7 @@ class OrderService:
         product: str = "MIS",
         wl_type: str = "intraday",
         instrument_key: str = "",
+        channel: str = "",
     ) -> None:
         _sl_dist = round(abs(entry_price - sl_price), 4)
         # Phase C v2 (2026-05-28): persist max_loss so downstream consumers
@@ -209,8 +210,11 @@ class OrderService:
             # channel (intraday/swing/positional/hedge). Derived from
             # product+wl_type at entry time so the book never needs to
             # re-derive it. "positional" + "hedge" are reserved for future
-            # expansion — current scanner emits only intraday + swing.
-            "channel": "swing" if str(wl_type or "").strip().lower() == "swing" else "intraday",
+            # expansion. An explicit `channel` (e.g. "pead", 2026-06-19) overrides
+            # the swing/intraday derivation so a new channel can tag its positions
+            # without touching the swing/intraday path; default keeps prior behaviour.
+            "channel": (str(channel).strip().lower()
+                        or ("swing" if str(wl_type or "").strip().lower() == "swing" else "intraday")),
             # Mode stickiness — record whether this position was opened in
             # paper or live. Once written, exit/GTT paths must honour the
             # position's recorded mode rather than the current runtime flag.
@@ -524,6 +528,7 @@ class OrderService:
         risk_mode: str = "",
         allow_live_orders: bool = False,
         wl_type: str = "intraday",
+        channel: str = "",
     ) -> dict[str, Any] | None:
         # Audit 2026-05-15 (Layer 21.1): atomic check-and-set replaces the
         # prior check-then-set pattern. Two concurrent Cloud Run instances
@@ -657,7 +662,7 @@ class OrderService:
                 strategy=strategy, order_id=ref_id,
                 regime=regime, risk_mode=risk_mode, signal_score=score,
                 product=product, wl_type=wl_type,
-                instrument_key=instrument_key,
+                instrument_key=instrument_key, channel=channel,
             )
             # Keep Sheets copy for human visibility
             self._append_position_sheets([
@@ -741,7 +746,7 @@ class OrderService:
                 strategy=strategy, order_id=order_id,
                 regime=regime, risk_mode=risk_mode, signal_score=score,
                 product=product, wl_type=wl_type,
-                instrument_key=token,
+                instrument_key=token, channel=channel,
             )
             self._append_position_sheets([
                 now_ist_str(), symbol, exchange, segment, side,
