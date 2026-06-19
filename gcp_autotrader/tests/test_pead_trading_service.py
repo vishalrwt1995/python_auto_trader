@@ -6,7 +6,7 @@ surprise ranking, and sizing.
 """
 from types import SimpleNamespace
 
-from autotrader.services.pead_trading_service import plan_pead_entries
+from autotrader.services.pead_trading_service import plan_pead_entries, _candidate_status
 
 # cfg mirroring StrategySettings PEAD fields at Rs2L (risk 0 -> 1.5% fallback = 3000)
 CFG = SimpleNamespace(
@@ -78,3 +78,29 @@ def test_plan_explicit_risk_overrides_fallback():
     specs = plan_pead_entries([_cand("A", 0.10)], [], realized_today=0.0, channel_capital=CAP, cfg=cfg)
     # sl_dist 12.5; risk 1500/12.5 = 120 (vs 240 at full risk)
     assert specs[0]["qty"] == 120
+
+
+# ── _candidate_status (watchlist annotation for the dashboard) ─────────────────
+def test_candidate_status_entered():
+    assert _candidate_status("A", {"A"}, {"A"}, set(), False) == "ENTERED"
+
+
+def test_candidate_status_planned_not_filled():
+    assert _candidate_status("B", {"B"}, set(), set(), False) == "PLANNED_NOT_FILLED"
+
+
+def test_candidate_status_already_held():
+    assert _candidate_status("C", set(), set(), {"C"}, False) == "ALREADY_HELD"
+
+
+def test_candidate_status_breaker_halt():
+    assert _candidate_status("D", set(), set(), set(), True) == "BREAKER_HALT"
+
+
+def test_candidate_status_not_selected():
+    assert _candidate_status("E", set(), set(), set(), False) == "NOT_SELECTED"
+
+
+def test_candidate_status_entered_precedence_over_held():
+    # an entered name that's also (newly) in held still reads ENTERED
+    assert _candidate_status("F", {"F"}, {"F"}, {"F"}, True) == "ENTERED"

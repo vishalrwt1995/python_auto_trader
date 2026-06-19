@@ -328,6 +328,76 @@ def get_scan_latest(
 
 
 # ---------------------------------------------------------------------------
+# EVENT / PEAD channel (2026-06-19) — shown the same way as swing/intraday
+# ---------------------------------------------------------------------------
+@router.get("/pead/watchlist")
+def get_pead_watchlist(
+    date: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """PEAD daily candidate watchlist (surprise-ranked, annotated ENTERED/HELD/
+    NOT_SELECTED/BREAKER) — written by the pead-scan job. `date` defaults to latest."""
+    c = get_container()
+    try:
+        key = _safe_date(date, "latest") if date else "latest"
+        doc = c.state.get_json("pead_watchlist", key)
+        if not doc:
+            return {"asof": "", "rows": [], "candidates": 0, "entered": 0, "market_ok": None}
+        v = doc.get("updated_at")
+        if v is not None and hasattr(v, "isoformat"):
+            doc["updated_at"] = v.isoformat()
+        return doc
+    except Exception as exc:
+        logger.error("pead/watchlist query failed: %s", exc)
+        return {"asof": "", "rows": [], "candidates": 0, "entered": 0, "error": str(exc)}
+
+
+@router.get("/pead/summary")
+def get_pead_summary(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """PEAD channel summary — open positions + slots, realized P&L (strategy=PEAD),
+    market-state, breaker — the per-channel view (parity with swing/intraday)."""
+    c = get_container()
+    out: dict[str, Any] = {"channel": "pead", "capital": c.settings.strategy.channel_capital("pead"),
+                           "max_slots": c.settings.strategy.pead_max_positions}
+    try:
+        open_pos = [p for p in c.state.list_open_positions()
+                    if str(p.get("channel", "")).strip().lower() == "pead"]
+        out["open_positions"] = len(open_pos)
+        out["slots_used"] = len(open_pos)
+        out["open"] = [{"symbol": p.get("symbol"), "qty": p.get("qty"), "entry_price": p.get("entry_price"),
+                        "sl_price": p.get("sl_price"), "strategy": p.get("strategy"),
+                        "entry_ts": str(p.get("entry_ts", ""))[:19]} for p in open_pos]
+    except Exception as exc:
+        logger.error("pead/summary positions failed: %s", exc)
+        out["open_positions"] = None; out["error_positions"] = str(exc)
+    try:
+        wl = c.state.get_json("pead_watchlist", "latest") or {}
+        out["market_dd"] = wl.get("market_dd")
+        out["market_ok"] = wl.get("market_ok")
+        out["breaker_tripped"] = wl.get("breaker_tripped")
+        out["last_scan"] = wl.get("asof")
+    except Exception as exc:
+        logger.error("pead/summary market-state failed: %s", exc)
+    try:
+        q = (f"SELECT COUNT(*) n, COALESCE(SUM(pnl),0) total_pnl, "
+             f"COUNTIF(pnl>0) wins, COUNTIF(pnl<0) losses "
+             f"FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades` "
+             f"WHERE strategy='PEAD'")
+        r = next(iter(c.bq.query(q)), None)
+        if r:
+            out["closed_trades"] = int(r.get("n") or 0)
+            out["realized_pnl"] = round(float(r.get("total_pnl") or 0.0), 2)
+            out["wins"] = int(r.get("wins") or 0)
+            out["losses"] = int(r.get("losses") or 0)
+    except Exception as exc:
+        logger.error("pead/summary trades failed: %s", exc)
+        out["realized_pnl"] = None; out["error_trades"] = str(exc)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Market Brain — Tier-1 (PR-2)
 # ---------------------------------------------------------------------------
 #
