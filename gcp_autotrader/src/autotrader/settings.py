@@ -167,7 +167,7 @@ class StrategySettings:
     # daily_loss_pct / daily_profit_pct (3%/6%) applied to capital_pead.
     pead_risk_per_trade: float = 0.0           # Rs/trade (PEAD_RISK_PER_TRADE; 1.5% of cap)
     pead_max_positions: int = 5                # surprise-ranked 5-slot book
-    pead_max_hold_days: int = 40               # PEAD drift horizon (vs swing 20)
+    pead_max_hold_days: int = 60               # PEAD drift horizon (grind v2 40->60; vs swing 20)
     pead_atr_sl_mult: float = 2.5              # stop = ATR14 × this
     pead_notional_cap_pct: float = 0.20        # per-position notional cap (× capital_pead)
     pead_activate_r: float = 1.75              # arm the 1R trail at +1.75R (matches swing)
@@ -408,7 +408,7 @@ class AppSettings:
             # EVENT/PEAD channel (2026-06-19)
             pead_risk_per_trade=_env_float("PEAD_RISK_PER_TRADE", 0.0),
             pead_max_positions=_env_int("PEAD_MAX_POSITIONS", 5),
-            pead_max_hold_days=_env_int("PEAD_MAX_HOLD_DAYS", 40),
+            pead_max_hold_days=_env_int("PEAD_MAX_HOLD_DAYS", 60),
             pead_atr_sl_mult=_env_float("PEAD_ATR_SL_MULT", 2.5),
             pead_notional_cap_pct=_env_float("PEAD_NOTIONAL_CAP_PCT", 0.20),
             pead_activate_r=_env_float("PEAD_ACTIVATE_R", 1.75),

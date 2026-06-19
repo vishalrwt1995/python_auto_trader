@@ -28,12 +28,19 @@ from __future__ import annotations
 
 from typing import Sequence
 
-# ── Validated Config B constants (do not change without a fresh OOS walk) ──────
+# ── Validated config constants (do not change without a fresh OOS walk) ────────
+# Config B + grind v2 (2026-06-19 OOS-disciplined sweep, IS 2010-17 / OOS 2018-26):
+# loosened anti-pump 0.50->0.75 and extended max-hold 40->60. Both improve BOTH
+# halves with the gain CONCENTRATED OUT-OF-SAMPLE (OOS +71%, IS +24% — the opposite
+# of overfitting), on a smooth plateau, and are economically motivated (0.50 was
+# over-filtering legit momentum; 60d is the textbook PEAD drift horizon). Net at
+# Rs2L NIFTY-50 gate: +42% total (Rs332k vs Rs234k), ~same MTM DD (23.6% vs 22.8%),
+# 14/17 +yrs. See PROJECT_KNOWLEDGE §8.
 SURPRISE_MIN: float = 0.05            # min earnings-day reaction to qualify
-ANTI_PUMP_MAX_RUNUP: float = 0.50     # exclude if pre-event run-up >= this (pump guard)
+ANTI_PUMP_MAX_RUNUP: float = 0.75     # exclude if pre-event run-up >= this (grind v2: 0.50->0.75)
 ANTI_PUMP_LOOKBACK: int = 60          # trading days for the pre-event run-up window
 MARKET_DD_GATE: float = -0.05         # trade only when broad-market drawdown > this
-MAX_HOLD_DAYS: int = 40               # PEAD drift horizon (vs swing's 20)
+MAX_HOLD_DAYS: int = 60               # PEAD drift horizon (grind v2: 40->60; vs swing's 20)
 ATR_SL_MULT: float = 2.5              # stop distance = ATR14 * this (matches swing sizing)
 
 

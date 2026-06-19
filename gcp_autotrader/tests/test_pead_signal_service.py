@@ -27,7 +27,7 @@ HAS_NIFTY = HAS_CACHE and os.path.exists(NIFTY_CSV)
 # audited gate comparison (pead_nifty_gate_pnl / pead_gate_audit): the NIFTY-50 −5%
 # drawdown gate admits 2,042 candidates over 2010-2026 — backtests >= the equal-weight
 # index, lowest mark-to-market DD (22.8%), profitable through the recent corrections.
-NIFTY_COUNT = 2042
+NIFTY_COUNT = 2171   # grind v2: anti-pump 0.50->0.75 (was 2042; +129 legit movers)
 # Look-ahead-free Config B candidate count under the validated index universe
 # (len>=300 established names, reaction-date drawdown). The original scratch
 # matrix (oos_pead_matrix) reported 1410 because it used (a) the next-open price
@@ -37,7 +37,7 @@ NIFTY_COUNT = 2042
 # announce-date drawdown at the -5% gate boundary (the service is more correct)
 # plus 2 names the next-open floor wrongly admitted. So the live service and the
 # backtest agree event-for-event once both use look-ahead-free choices.
-LOOKAHEAD_FREE_COUNT = 1494
+LOOKAHEAD_FREE_COUNT = 1626   # grind v2: anti-pump 0.50->0.75 (was 1494; +132 legit movers)
 
 
 # ── pure unit tests (no cache) ────────────────────────────────────────────────
