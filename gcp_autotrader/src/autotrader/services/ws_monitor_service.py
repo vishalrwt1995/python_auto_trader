@@ -53,6 +53,20 @@ def _now_ist_str() -> str:
     return datetime.now(timezone(timedelta(hours=5, minutes=30))).isoformat()
 
 
+# Channels held OVERNIGHT as SL-only CNC positions — NOT intraday-managed. For these the
+# exit FSM is a pure SL-enforcer (no breakeven / 2R target / intraday ATR-trail / FLAT
+# timeout) and the EOD watchdog must NOT square them off; their daily reconciliation
+# service owns the trail/exit. swing + the EVENT channel (pead earnings-drift + corp_action
+# bonus/split). 2026-06-20: added pead + corp_action — previously only "swing" was exempt,
+# so EVENT-channel positions would have been EOD-squared + intraday-managed (wrong for a
+# multi-day hold). No live pead/corp position existed yet, so swing/intraday are unaffected.
+_OVERNIGHT_SL_ONLY_WL = frozenset({"swing", "pead", "corp_action"})
+
+
+def _is_overnight_sl_only(pos: dict) -> bool:
+    return str(pos.get("wl_type") or "intraday").strip().lower() in _OVERNIGHT_SL_ONLY_WL
+
+
 class WsMonitorService:
     """Real-time position monitor via Upstox WebSocket."""
 
@@ -450,7 +464,9 @@ class WsMonitorService:
                 logger.warning("best_price_persist_failed tag=%s err=%s", tag, _e)
 
         # ── Swing vs intraday parameters ────────────────────────────
-        is_swing = pos.get("wl_type") == "swing"
+        # Overnight SL-only holds (swing + EVENT: pead/corp_action) take the SL-only path;
+        # only true intraday positions get breakeven/target/intraday-trail (the else branch).
+        is_swing = _is_overnight_sl_only(pos)
         _breakeven_atr_mult = 1.5 if is_swing else 1.0   # swing needs more room
         _trail_atr_mult = 2.5 if is_swing else 1.5       # wider trail for swing
         _breakeven_buffer = 0.15 if is_swing else 0.1    # buffer above entry
@@ -559,7 +575,7 @@ class WsMonitorService:
         # intraday regime flipped mid-day (~daily occurrence in RANGE tape).
         cur_regime = getattr(self, "_current_regime", "")
         entry_regime = pos.get("entry_regime", "")
-        _pos_is_swing = str(pos.get("wl_type") or "intraday").strip().lower() == "swing"
+        _pos_is_swing = _is_overnight_sl_only(pos)
         if (
             not pos.get("regime_tightened")
             and atr > 0
@@ -761,7 +777,8 @@ class WsMonitorService:
         entry_price = pos.get("entry_price", 0.0)
         atr = pos.get("atr", 0.0)
         sl_dist = pos.get("sl_dist", 0.0)
-        is_swing = pos.get("wl_type") == "swing"
+        # Overnight SL-only holds (swing + EVENT: pead/corp_action) -> FSM is a pure SL-enforcer.
+        is_swing = _is_overnight_sl_only(pos)
 
         # Map legacy dict fields into the FSM view. Carry FSM-specific state
         # in in-memory keys prefixed "_fsm_" so the legacy path is unaffected
@@ -957,9 +974,11 @@ class WsMonitorService:
                 logger.info("eod_close_triggered remaining_positions=%d", len(self._positions))
                 for ikey, pos in list(self._positions.items()):
                     tag = pos["position_tag"]
-                    # Skip swing positions — they persist overnight
-                    if pos.get("wl_type") == "swing":
-                        logger.info("eod_skip_swing tag=%s", tag)
+                    # Skip overnight SL-only holds (swing + EVENT: pead/corp_action) — they
+                    # persist overnight; their daily reconciliation owns the exit. Squaring
+                    # them off here would break the multi-day hold.
+                    if _is_overnight_sl_only(pos):
+                        logger.info("eod_skip_overnight tag=%s wl_type=%s", tag, pos.get("wl_type"))
                         continue
                     if tag not in self._exiting:
                         self._exiting.add(tag)

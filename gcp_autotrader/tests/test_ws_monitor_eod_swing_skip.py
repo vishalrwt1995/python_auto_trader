@@ -1,41 +1,26 @@
-"""Smoke test for the WS-monitor EOD swing-skip branch.
+"""Smoke test for the WS-monitor EOD overnight-skip branch.
 
-Background: the WS monitor's `_eod_watchdog` force-exits all open
-positions at 15:25 IST. Swing positions must be exempted — they're CNC
-delivery products that hold overnight. The branch at line ~934 reads:
+Background: the WS monitor's `_eod_watchdog` force-exits all open positions at 15:25 IST.
+OVERNIGHT SL-only holds must be exempted — CNC delivery products that hold overnight:
+swing AND the EVENT channel (pead earnings-drift + corp_action bonus/split). The branch
+at ~line 960 reads:
 
-    if pos.get("wl_type") == "swing":
-        logger.info("eod_skip_swing tag=%s", tag)
+    if _is_overnight_sl_only(pos):          # wl_type in {swing, pead, corp_action}
+        logger.info("eod_skip_overnight tag=%s wl_type=%s", tag, pos.get("wl_type"))
         continue
 
-This test is a smoke test, not a deep integration test. The branch is
-4 lines of code; the risk is just "this code path has never run on a
-real swing position because none qualified at threshold=70 over the
-prior 14 days, and we're about to ship swing into production tomorrow".
+2026-06-20: broadened from swing-only to the overnight set. Previously pead/corp_action
+would have been EOD-squared (and intraday-managed) — wrong for a multi-day hold. No live
+pead/corp position existed yet, so swing/intraday behaviour is unchanged.
 
-We synthesise the EOD trigger condition by:
-  1. Constructing a bare WsMonitorService instance (bypassing __init__
-     since the real init wires up Firestore/Upstox clients we don't need
-     for this test).
-  2. Populating its `_positions` with one intraday + one swing position.
-  3. Patching the clock helper to return 15:26 (past _EOD_CLOSE_MINUTE).
-  4. Replicating the EOD inner loop body manually — a one-shot version
-     of `_eod_watchdog` without the surrounding `while True / sleep 15`.
-
-The replication is intentional: `_eod_watchdog` is an infinite async
-loop, hard to drive cleanly under test. The inner branch is small
-enough that copying it for the smoke test is more honest than mocking
-asyncio.sleep to raise CancelledError after one iteration.
-
-If the real `_eod_watchdog` body drifts away from this test's
-replication, the structural assertion at the bottom will catch it.
+This is a smoke test, not a deep integration test. We synthesise the EOD trigger and
+replicate the inner loop body; the drift assertion at the bottom catches production drift.
 """
 from __future__ import annotations
 
 import asyncio
 import inspect
 import logging
-from unittest.mock import MagicMock
 
 from autotrader.services import ws_monitor_service as ws_mod
 from autotrader.services.ws_monitor_service import (
@@ -46,43 +31,33 @@ from autotrader.services.ws_monitor_service import (
 
 
 def _make_monitor_with_positions(positions: dict) -> WsMonitorService:
-    """Build a partially-initialised WsMonitorService for testing.
-
-    We bypass __init__ to avoid requiring real Firestore/Upstox clients;
-    only the fields touched by the EOD watchdog need to exist.
-    """
+    """Build a partially-initialised WsMonitorService (bypass __init__; only the fields
+    the EOD watchdog touches need to exist)."""
     monitor = WsMonitorService.__new__(WsMonitorService)
     monitor._positions = dict(positions)
     monitor._exiting = set()
     monitor._stop_event = asyncio.Event()
-    # _do_exit is normally an async coroutine that places the exit order
-    # and updates state. For the smoke test we replace it with a no-op
-    # coroutine that records the call.
     exit_calls: list[tuple[str, str, str]] = []
 
     async def _fake_do_exit(tag: str, ikey: str, reason: str) -> None:
         exit_calls.append((tag, ikey, reason))
 
     monitor._do_exit = _fake_do_exit  # type: ignore[assignment]
-    monitor._exit_calls = exit_calls  # type: ignore[attr-defined] — test handle
+    monitor._exit_calls = exit_calls  # type: ignore[attr-defined]
     return monitor
 
 
 def _run_one_eod_iteration(monitor: WsMonitorService) -> None:
-    """One-shot replica of `_eod_watchdog`'s inner body when EOD has tripped.
-
-    Drift detection: `test_eod_inner_branch_matches_replica` asserts that
-    the source still contains the exact branch shape this replica mirrors.
-    """
+    """One-shot replica of `_eod_watchdog`'s inner body when EOD has tripped. Uses the
+    production `_is_overnight_sl_only` classifier so the smoke tests exercise the real
+    decision. `test_eod_inner_branch_matches_replica` guards against production drift."""
     async def _runner() -> None:
-        # Triggered branch: force-close non-swing positions
         tasks: list[asyncio.Task] = []
         for ikey, pos in list(monitor._positions.items()):
             tag = pos["position_tag"]
-            if pos.get("wl_type") == "swing":
-                # Match production log line so we can grep audit_log
-                # for this in production.
-                logging.getLogger(ws_mod.__name__).info("eod_skip_swing tag=%s", tag)
+            if ws_mod._is_overnight_sl_only(pos):
+                logging.getLogger(ws_mod.__name__).info(
+                    "eod_skip_overnight tag=%s wl_type=%s", tag, pos.get("wl_type"))
                 continue
             if tag not in monitor._exiting:
                 monitor._exiting.add(tag)
@@ -93,105 +68,76 @@ def _run_one_eod_iteration(monitor: WsMonitorService) -> None:
     asyncio.run(_runner())
 
 
+def _pos(tag, wl_type=None, side="BUY"):
+    d = {"position_tag": tag, "symbol": tag, "side": side}
+    if wl_type is not None:
+        d["wl_type"] = wl_type
+    return d
+
+
 def test_eod_watchdog_skips_swing_position():
-    """Swing position must persist past 15:25 — no EOD force-exit."""
-    monitor = _make_monitor_with_positions({
-        "NSE_EQ|TEST_SWING": {
-            "position_tag": "TAG_SWING_001",
-            "wl_type": "swing",
-            "symbol": "TEST_SWING",
-            "side": "BUY",
-        },
-    })
+    monitor = _make_monitor_with_positions({"NSE_EQ|S": _pos("TAG_SWING", "swing")})
     _run_one_eod_iteration(monitor)
-    assert "TAG_SWING_001" not in monitor._exiting, (
-        "Swing position must NOT be force-exited at EOD — it's a CNC "
-        "delivery product that holds overnight. If this assertion fails, "
-        "every swing position in production gets force-closed at 15:25 "
-        "and the entire swing channel becomes effectively intraday."
-    )
-    assert monitor._exit_calls == [], "no _do_exit call should fire for swing positions"  # type: ignore[attr-defined]
+    assert "TAG_SWING" not in monitor._exiting
+    assert monitor._exit_calls == []  # type: ignore[attr-defined]
+
+
+def test_eod_watchdog_skips_pead_position():
+    """EVENT/PEAD positions hold for weeks — must NOT be EOD-squared (2026-06-20 fix)."""
+    monitor = _make_monitor_with_positions({"NSE_EQ|P": _pos("TAG_PEAD", "pead")})
+    _run_one_eod_iteration(monitor)
+    assert "TAG_PEAD" not in monitor._exiting
+    assert monitor._exit_calls == []  # type: ignore[attr-defined]
+
+
+def test_eod_watchdog_skips_corp_action_position():
+    """Corp-action positions hold to the meeting (~3 days) — must NOT be EOD-squared."""
+    monitor = _make_monitor_with_positions({"NSE_EQ|C": _pos("TAG_CORP", "corp_action")})
+    _run_one_eod_iteration(monitor)
+    assert "TAG_CORP" not in monitor._exiting
+    assert monitor._exit_calls == []  # type: ignore[attr-defined]
 
 
 def test_eod_watchdog_force_exits_intraday_position():
-    """Intraday positions must be force-exited at 15:25 — MIS doesn't carry."""
+    monitor = _make_monitor_with_positions({"NSE_EQ|I": _pos("TAG_INTRADAY", "intraday")})
+    _run_one_eod_iteration(monitor)
+    assert "TAG_INTRADAY" in monitor._exiting
+    assert monitor._exit_calls == [("TAG_INTRADAY", "NSE_EQ|I", "EOD_CLOSE")]  # type: ignore[attr-defined]
+
+
+def test_eod_watchdog_mixed_book():
+    """Realistic 15:25 book: intraday squares; swing + pead + corp persist."""
     monitor = _make_monitor_with_positions({
-        "NSE_EQ|TEST_INTRADAY": {
-            "position_tag": "TAG_INTRADAY_001",
-            "wl_type": "intraday",
-            "symbol": "TEST_INTRADAY",
-            "side": "BUY",
-        },
+        "NSE_EQ|I1": _pos("TAG_I1", "intraday"),
+        "NSE_EQ|S1": _pos("TAG_S1", "swing"),
+        "NSE_EQ|P1": _pos("TAG_P1", "pead"),
+        "NSE_EQ|C1": _pos("TAG_C1", "corp_action"),
     })
     _run_one_eod_iteration(monitor)
-    assert "TAG_INTRADAY_001" in monitor._exiting, (
-        "Intraday position must be force-exited at EOD — MIS product is "
-        "auto-squared by the broker at 15:30 anyway, so we square it "
-        "ourselves at 15:25 to control the exit price."
-    )
+    assert "TAG_I1" in monitor._exiting
+    assert not ({"TAG_S1", "TAG_P1", "TAG_C1"} & monitor._exiting)  # all overnight persist
     assert len(monitor._exit_calls) == 1  # type: ignore[attr-defined]
-    assert monitor._exit_calls[0] == ("TAG_INTRADAY_001", "NSE_EQ|TEST_INTRADAY", "EOD_CLOSE")  # type: ignore[attr-defined]
-
-
-def test_eod_watchdog_mixed_book_intraday_exits_swing_persists():
-    """The realistic case: a book with both channels open at 15:25.
-    Swing should persist; every intraday should square."""
-    monitor = _make_monitor_with_positions({
-        "NSE_EQ|I1": {"position_tag": "TAG_I1", "wl_type": "intraday", "symbol": "I1", "side": "BUY"},
-        "NSE_EQ|I2": {"position_tag": "TAG_I2", "wl_type": "intraday", "symbol": "I2", "side": "SELL"},
-        "NSE_EQ|S1": {"position_tag": "TAG_S1", "wl_type": "swing", "symbol": "S1", "side": "BUY"},
-        "NSE_EQ|S2": {"position_tag": "TAG_S2", "wl_type": "swing", "symbol": "S2", "side": "SELL"},
-    })
-    _run_one_eod_iteration(monitor)
-    intraday_exited = {"TAG_I1", "TAG_I2"} <= monitor._exiting
-    swing_persisted = not ({"TAG_S1", "TAG_S2"} & monitor._exiting)
-    assert intraday_exited, f"both intraday positions must square — got _exiting={monitor._exiting}"
-    assert swing_persisted, f"both swing positions must persist — got _exiting={monitor._exiting}"
-    assert len(monitor._exit_calls) == 2  # type: ignore[attr-defined]
 
 
 def test_eod_watchdog_default_wl_type_treated_as_intraday():
-    """A position record missing the wl_type field (legacy / corrupted)
-    must be treated as intraday and force-exited. Defaulting to swing
-    for missing field would be unsafe — old positions with no channel
-    metadata would survive past 15:30 and then get auto-squared by the
-    broker at unfavourable prices.
-    """
-    monitor = _make_monitor_with_positions({
-        "NSE_EQ|LEGACY": {
-            "position_tag": "TAG_LEGACY",
-            # wl_type intentionally absent
-            "symbol": "LEGACY",
-            "side": "BUY",
-        },
-    })
+    """Missing wl_type must default to intraday (force-exit) — never to an overnight hold."""
+    monitor = _make_monitor_with_positions({"NSE_EQ|L": _pos("TAG_LEGACY", wl_type=None)})
     _run_one_eod_iteration(monitor)
-    assert "TAG_LEGACY" in monitor._exiting, (
-        "Position with missing wl_type must default to intraday handling "
-        "(force-exit). Defaulting to swing would risk leaving stale "
-        "intraday positions open past EOD."
-    )
+    assert "TAG_LEGACY" in monitor._exiting
 
 
 # ─── Drift detection ────────────────────────────────────────────────────
 
 
 def test_eod_inner_branch_matches_replica():
-    """Guard against the production `_eod_watchdog` body drifting away
-    from the one-shot replica `_run_one_eod_iteration` exercises.
-
-    If `_eod_watchdog` ever changes its swing-skip pattern, this test
-    fails first and forces an update of the replica + smoke tests.
-    """
+    """Guard against the production `_eod_watchdog` body drifting from the replica."""
     src = inspect.getsource(ws_mod)
-    # The exact swing-skip branch we replicate.
-    assert 'if pos.get("wl_type") == "swing":' in src, (
-        "production _eod_watchdog no longer matches the test replica — "
-        "the swing-skip pattern has changed shape. Update both the "
-        "replica `_run_one_eod_iteration` AND the smoke tests."
+    assert "if _is_overnight_sl_only(pos):" in src, (
+        "production _eod_watchdog no longer matches the test replica — the overnight-skip "
+        "pattern changed. Update both `_run_one_eod_iteration` AND the smoke tests."
     )
-    assert 'logger.info("eod_skip_swing tag=%s", tag)' in src
+    assert 'logger.info("eod_skip_overnight tag=%s wl_type=%s", tag, pos.get("wl_type"))' in src
+    assert "_OVERNIGHT_SL_ONLY_WL = frozenset({\"swing\", \"pead\", \"corp_action\"})" in src
     assert "_EOD_CLOSE_MINUTE" in src
-    # And the production constant is what we expect (15:25 IST).
     assert _EOD_CLOSE_MINUTE == 15 * 60 + 25
     assert _HARD_STOP_MINUTE == 15 * 60 + 30
