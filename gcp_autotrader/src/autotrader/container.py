@@ -18,6 +18,7 @@ from autotrader.services.market_brain_service import MarketBrainService
 from autotrader.services.order_service import OrderService
 from autotrader.services.regime_service import MarketRegimeService
 from autotrader.services.pead_reconciliation_service import PeadReconciliationService
+from autotrader.services.corp_action_reconciliation_service import CorpActionReconciliationService
 from autotrader.services.swing_reconciliation_service import SwingReconciliationService
 from autotrader.services.trading_service import TradingService
 from autotrader.services.universe_service import UniverseService
@@ -99,6 +100,7 @@ class AppContainer:
         self._trading_service: TradingService | None = None
         self._swing_reconciliation_service: SwingReconciliationService | None = None
         self._pead_reconciliation_service: PeadReconciliationService | None = None
+        self._corp_action_reconciliation_service: CorpActionReconciliationService | None = None
 
     def log_sink(self) -> LogSink:
         # Pass `bq` explicitly here; `LogSink()` constructed elsewhere
@@ -184,6 +186,29 @@ class AppContainer:
             order_service=self.order_service(),
             bq=self.bq,
             reaction_date=reaction_date,
+        )
+
+    def corp_action_reconciliation_service(self) -> CorpActionReconciliationService:
+        if self._corp_action_reconciliation_service is None:
+            self._corp_action_reconciliation_service = CorpActionReconciliationService(
+                settings=self.settings,
+                state=self.state,
+                upstox=self.upstox,
+                order_service=self.order_service(),
+            )
+        return self._corp_action_reconciliation_service
+
+    def run_corp_action_scan(self, entry_date: str | None = None) -> dict:
+        """Run the daily corp-action (bonus/split) entry scan — second sub-strategy of the
+        EVENT/PEAD channel, sharing its pool (PAPER). No-op unless CORP_MAX_POSITIONS>0."""
+        from autotrader.services import corp_action_trading_service
+        return corp_action_trading_service.run_corp_action_scan_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            entry_date=entry_date,
         )
 
 

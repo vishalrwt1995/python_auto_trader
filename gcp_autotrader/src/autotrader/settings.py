@@ -176,6 +176,14 @@ class StrategySettings:
     # negative (e.g. −1.0 via PEAD_MARKET_DD_GATE) to run the documented NO-GATE
     # variant (higher lifetime total, trades through corrections — PROJECT_KNOWLEDGE §8).
     pead_market_dd_gate: float = -0.05
+    # Corp-action (bonus/split) sub-strategy of the EVENT/PEAD channel (added 2026-06-20).
+    # SHARES the PEAD capital pool + 5-slot cap + daily breaker (both tag channel="pead");
+    # corp is sub-capped at corp_max_positions concurrent. Own meeting-day exit
+    # (wl_type="corp_action"). Validated look-ahead-free +1.54% net/event, robust IS+OOS.
+    # Set CORP_MAX_POSITIONS=0 to disable the sub-strategy entirely. PAPER.
+    corp_max_positions: int = 0                # 0 = disabled; 2 = enable (cap of the shared 5)
+    corp_notional_cap_pct: float = 0.20        # per-position notional (× channel capital), matches backtest
+    corp_protective_stop_pct: float = 0.15     # wide disaster backstop only (backtest holds to meeting, no stop)
 
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
@@ -414,6 +422,10 @@ class AppSettings:
             pead_activate_r=_env_float("PEAD_ACTIVATE_R", 1.75),
             pead_trail_r=_env_float("PEAD_TRAIL_R", 1.0),
             pead_market_dd_gate=_env_float("PEAD_MARKET_DD_GATE", -0.05),
+            # Corp-action (bonus/split) sub-strategy of the EVENT/PEAD channel (2026-06-20)
+            corp_max_positions=_env_int("CORP_MAX_POSITIONS", 0),       # 0 = disabled until enabled
+            corp_notional_cap_pct=_env_float("CORP_NOTIONAL_CAP_PCT", 0.20),
+            corp_protective_stop_pct=_env_float("CORP_PROTECTIVE_STOP_PCT", 0.15),
         )
         return AppSettings(
             gcp=GcpSettings(
