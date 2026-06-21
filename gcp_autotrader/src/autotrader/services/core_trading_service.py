@@ -24,34 +24,84 @@ def plan_core_rebalance(
     current_holdings: Sequence[dict[str, Any]],
     channel_capital: float,
     cfg: Any,
+    max_weight_mult: float = cs.MAX_WEIGHT_MULT,
 ) -> dict[str, list[dict[str, Any]]]:
     """PURE: rebalance current CORE holdings to the target basket. Returns
     ``{"sells": [...], "buys": [...]}``:
       - SELL (full exit) every held name NOT in the target,
-      - BUY every target name NOT currently held, sized to equal-weight (capital / topn).
-    Stayers are left as-is (low-turnover add/drop; matches the backtest cost model). Empty
-    plan if capital<=0 or the basket is empty. Side-effect-free + unit-testable."""
+      - BUY every target name NOT currently held, equal-weight (capital / topn) PLUS a
+        residual-cash sweep that deploys the leftover budget so the channel isn't left
+        ~18% in idle cash at small capital (integer-share rounding + names priced above the
+        slice). Stayers are left as-is (low-turnover; topping them up would hit the same-day
+        BUY idempotency guard and duplicate the position — so the sweep is new-buys-only).
+
+    Sizing (new names only):
+      slice = capital/TOPN (equal-weight notional); cap = max_weight_mult*slice (per-name ceiling).
+      Pass 1 — base equal-weight integer shares (``floor(slice/price)``), capped by budget.
+      Pass 2 — greedily buy 1 more share of the most-underweight name (lowest notional/slice)
+               that fits the remaining budget AND stays under ``cap``; repeat until cash is
+               ~exhausted. This admits names priced between slice and cap (1 share) and sweeps
+               rounding residual into the cheapest names. Names priced > cap are excluded
+               (can't be equal-weighted at this capital) and logged.
+    Empty plan if capital<=0 or the basket is empty. Side-effect-free + unit-testable."""
     if channel_capital <= 0 or not target_basket:
         return {"sells": [], "buys": []}
     target = {str(c["symbol"]).strip().upper(): c for c in target_basket}
     held = {str(p.get("symbol")).strip().upper(): p for p in current_holdings}
-    weight = 1.0 / cs.TOPN
+    slice_amt = channel_capital / cs.TOPN
+    cap_amt = slice_amt * float(max_weight_mult or 1.0)
     sells = [{"symbol": s, "qty": int(p.get("qty") or 0), "instrument_key": str(p.get("instrument_key", "")),
               "position_tag": str(p.get("position_tag", "")), "reason": "CORE_DROP"}
              for s, p in held.items() if s not in target and int(p.get("qty") or 0) > 0]
-    buys = []
+
+    # candidates = target names NOT already held (stayers keep their position)
+    cand = []
     for s, c in target.items():
         if s in held:
-            continue                                          # stayer — keep existing position
-        entry = float(c.get("ref_price") or 0.0)
-        qty = cs.position_qty(entry, channel_capital, weight)
-        if qty < 1:
-            logger.info("core_skip_qty_zero sym=%s entry=%.2f", s, entry)
             continue
-        buys.append({"symbol": s, "qty": qty, "entry_price": round(entry, 2),
+        price = float(c.get("ref_price") or 0.0)
+        if price > 0:
+            cand.append((s, c, price))
+
+    # budget for new buys = full capital minus cost-basis already deployed in stayers
+    held_cost = sum(int(p.get("qty") or 0) * float(p.get("entry_price") or 0.0)
+                    for s, p in held.items() if s in target)
+    budget = max(0.0, channel_capital - held_cost)
+
+    qty = {s: 0 for s, _, _ in cand}
+    # Pass 1 — equal-weight base
+    for s, c, price in cand:
+        base = int(slice_amt // price)
+        if base >= 1 and base * price <= budget:
+            qty[s] = base
+            budget -= base * price
+    # Pass 2 — residual-cash sweep toward equal-weight, capped per name
+    while True:
+        best_s = best_price = None
+        best_ratio = None
+        for s, c, price in cand:
+            if price > budget:                       # can't afford one more share
+                continue
+            if qty[s] * price + price > cap_amt:     # would breach per-name cap
+                continue
+            ratio = (qty[s] * price) / slice_amt
+            if best_ratio is None or ratio < best_ratio:
+                best_s, best_price, best_ratio = s, price, ratio
+        if best_s is None:
+            break
+        qty[best_s] += 1
+        budget -= best_price
+
+    buys = []
+    for s, c, price in cand:
+        if qty[s] < 1:
+            logger.info("core_skip_qty_zero sym=%s entry=%.2f cap=%.0f (price>cap or no budget)",
+                        s, price, cap_amt)
+            continue
+        buys.append({"symbol": s, "qty": qty[s], "entry_price": round(price, 2),
                      "instrument_key": str(c.get("instrument_key", "")), "reason": "CORE_ADD"})
-    logger.info("core_rebalance target=%d held=%d sells=%d buys=%d",
-                len(target), len(held), len(sells), len(buys))
+    logger.info("core_rebalance target=%d held=%d sells=%d buys=%d budget_left=%.0f",
+                len(target), len(held), len(sells), len(buys), budget)
     return {"sells": sells, "buys": buys}
 
 

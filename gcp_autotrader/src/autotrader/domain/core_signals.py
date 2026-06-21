@@ -44,6 +44,13 @@ PRICE_MIN: float = 30.0            # price floor
 CATASTROPHE_STOP_PCT: float = 0.60  # SL at entry*(1-0.60); fraud/halt backstop only
 UNREACHABLE_TARGET_MULT: float = 10.0  # target at entry*(1+10) = +1000%, never hit
 
+# Residual-cash sweep (fixes the ~18% idle-cash drag at small capital). At capital/TOPN
+# per name, integer-share sizing both skips names priced > the slice AND leaves big
+# rounding residuals. The sweep deploys the leftover cash greedily into the most-underweight
+# names, and admits names priced up to MAX_WEIGHT_MULT * slice (1 share). The cap stops any
+# single name (e.g. a ₹25k+ large-cap that can't be equal-weighted at ₹3L) from ballooning.
+MAX_WEIGHT_MULT: float = 1.5       # a name may hold up to 1.5x its equal-weight slice
+
 
 def catastrophe_stop(entry: float) -> float:
     """SL price for a CORE BUY: a deep catastrophe backstop (entry*(1-CATASTROPHE_STOP_PCT)).
