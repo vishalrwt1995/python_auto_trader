@@ -43,6 +43,7 @@ class StrategySettings:
     capital_swing: float = 0.0
     capital_intraday: float = 0.0
     capital_pead: float = 0.0          # EVENT/PEAD channel (Phase C, added 2026-06-19)
+    capital_gapfade: float = 0.0       # GAP_FADE channel (Phase C, added 2026-06-21)
     # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
     # of channel capital. Used by the per-channel daily-limit gate in
     # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
@@ -184,6 +185,15 @@ class StrategySettings:
     corp_max_positions: int = 0                # 0 = disabled; 2 = enable (cap of the shared 5)
     corp_notional_cap_pct: float = 0.20        # per-position notional (× channel capital), matches backtest
     corp_protective_stop_pct: float = 0.15     # wide disaster backstop only (backtest holds to meeting, no stop)
+    # GAP_FADE channel (added 2026-06-21) — intraday SHORT of F&O >5% gap-ups, cover at the
+    # 15:15 squareoff, 3% protective buy-stop ABOVE entry. OWN channel (capital_gapfade), own
+    # slot cap + 3%/6% breaker; tagged channel="gap_fade"/wl_type="gap_fade" (isolated from
+    # swing/pead/corp). The system's first validated systematic short. Validated OOS
+    # +0.58%/trade, ~+6.7%/yr @0.20 notional, 6/9 years. Set GAPFADE_MAX_POSITIONS=0 to
+    # disable. Intraday (MIS) — exit via the side-aware FSM (short SL + EOD cover). PAPER.
+    gapfade_max_positions: int = 0             # 0 = disabled; 3 = enable (concurrent same-day shorts)
+    gapfade_notional_cap_pct: float = 0.20     # per-position notional (× channel capital), pilot
+    gapfade_stop_pct: float = 0.03             # protective buy-stop this far ABOVE entry (short)
 
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
@@ -204,6 +214,8 @@ class StrategySettings:
             return self.capital_intraday
         if ch == "pead" and self.capital_pead > 0:
             return self.capital_pead
+        if ch == "gap_fade" and self.capital_gapfade > 0:
+            return self.capital_gapfade
         return self.capital
 
 
@@ -371,6 +383,7 @@ class AppSettings:
             capital_swing=_env_float("CAPITAL_SWING", 0.0),
             capital_intraday=_env_float("CAPITAL_INTRADAY", 0.0),
             capital_pead=_env_float("CAPITAL_PEAD", 0.0),
+            capital_gapfade=_env_float("CAPITAL_GAPFADE", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
@@ -426,6 +439,9 @@ class AppSettings:
             corp_max_positions=_env_int("CORP_MAX_POSITIONS", 0),       # 0 = disabled until enabled
             corp_notional_cap_pct=_env_float("CORP_NOTIONAL_CAP_PCT", 0.20),
             corp_protective_stop_pct=_env_float("CORP_PROTECTIVE_STOP_PCT", 0.15),
+            gapfade_max_positions=_env_int("GAPFADE_MAX_POSITIONS", 0),   # 0 = disabled until enabled
+            gapfade_notional_cap_pct=_env_float("GAPFADE_NOTIONAL_CAP_PCT", 0.20),
+            gapfade_stop_pct=_env_float("GAPFADE_STOP_PCT", 0.03),
         )
         return AppSettings(
             gcp=GcpSettings(

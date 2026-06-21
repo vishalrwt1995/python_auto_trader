@@ -1910,6 +1910,36 @@ def run_corp_action_scan(
         raise
 
 
+@app.post("/jobs/gapfade-scan")
+def run_gap_fade_scan(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Gap-fade at-the-open SHORT scan (PAPER) — own GAP_FADE channel, intraday MIS. No-op
+    unless GAPFADE_MAX_POSITIONS>0. Runs just after the open (~09:16 IST) so today's open is
+    set. Exit is the side-aware FSM (short SL + EOD cover) in ws_monitor — no reconcile job.
+    Cloud Scheduler job: autotrader-gapfade-scan-0916.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("GapFadeTradingService", "gapfade_scan", "START", "", sched_ctx)
+        out = c.run_gap_fade_scan()
+        sink.action("GapFadeTradingService", "gapfade_scan", "DONE", "gap-fade scan complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("GapFadeTradingService", "gapfade_scan", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.post("/jobs/corp-reconcile")
 def run_corp_action_reconcile(
     x_job_token: str | None = Header(default=None),

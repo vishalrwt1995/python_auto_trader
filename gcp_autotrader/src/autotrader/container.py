@@ -211,6 +211,20 @@ class AppContainer:
             entry_date=entry_date,
         )
 
+    def run_gap_fade_scan(self, entry_date: str | None = None) -> dict:
+        """Run the at-the-open gap-fade SHORT scan — own GAP_FADE channel, intraday MIS
+        (PAPER). No-op unless GAPFADE_MAX_POSITIONS>0. Exit is the side-aware FSM (short SL +
+        EOD cover) in ws_monitor — no separate reconciliation service needed."""
+        from autotrader.services import gap_fade_trading_service
+        return gap_fade_trading_service.run_gap_fade_scan_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            entry_date=entry_date,
+        )
+
 
 @lru_cache(maxsize=1)
 def get_container() -> AppContainer:
