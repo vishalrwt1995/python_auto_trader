@@ -56,8 +56,11 @@ def test_plan_rebalance_buys_new_sells_dropped_keeps_stayers():
     assert sells == {"OLD1", "OLD2"}                      # dropped names exit
     assert "T0" not in buys                               # stayer not re-bought
     assert len(buys) == 29                                # the 29 new target names
-    # equal-weight sizing: 1/30 of 3L / 100 = 100 sh
-    assert plan["buys"][0]["qty"] == int((1 / 30) * 300000 // 100)
+    # equal-weight base = 1/30 of 3L / 100 = 100 sh, PLUS residual-cash sweep -> each >= 100
+    assert all(b["qty"] >= 100 for b in plan["buys"])
+    # sweep deploys the leftover budget (T0 has no entry_price -> 0 cost-basis -> full 3L budget)
+    deployed = sum(b["qty"] * b["entry_price"] for b in plan["buys"])
+    assert deployed <= 300000 and 300000 - deployed < 100   # idle < cheapest share price
 
 
 def test_plan_rebalance_full_fresh():
@@ -75,3 +78,29 @@ def test_plan_rebalance_sell_only_when_qty_positive():
     plan = svc.plan_core_rebalance(_basket([f"T{i}" for i in range(30)]),
                                    [{"symbol": "OLD", "qty": 0, "instrument_key": "ik"}], 300000.0, _cfg())
     assert plan["sells"] == []                            # zero-qty holding -> nothing to sell
+
+
+def test_plan_rebalance_sweep_deploys_idle_cash_and_admits_pricey():
+    """The residual-cash sweep: ~full deployment (fixes the ~18% idle drag) + admits names
+    priced between the slice (10k) and the 1.5x cap (15k) -- the live MARUTI/POLYCAB case."""
+    # slice = 300000/30 = 10000; cap = 15000. 27 cheap + 3 priced 10k-13.4k (like POLYCAB/BAJAJ/MARUTI).
+    prices = [100.0 + i * 12 for i in range(27)] + [10083.0, 10066.0, 13395.0]
+    target = [{"symbol": f"T{i}", "ref_price": p, "instrument_key": f"ik_T{i}"} for i, p in enumerate(prices)]
+    plan = svc.plan_core_rebalance(target, [], 300000.0, _cfg())
+    deployed = sum(b["qty"] * b["entry_price"] for b in plan["buys"])
+    assert deployed >= 0.98 * 300000                       # <2% idle (was ~18% before the sweep)
+    # names priced above the slice (10k) but under cap (15k) are now admitted at 1 share each
+    # (before the sweep they were skipped entirely). At ₹3L the budget fits some, not all three.
+    pricey = [b for b in plan["buys"] if b["entry_price"] > 10000]
+    assert len(pricey) >= 1                                # >=1 above-slice name admitted
+    assert all(b["qty"] == 1 for b in pricey)              # exactly 1 share (2 would breach the cap)
+    # invariant: no name exceeds the per-name cap (1.5x slice = 15000)
+    assert all(b["qty"] * b["entry_price"] <= 15000 + 1e-6 for b in plan["buys"])
+
+
+def test_plan_rebalance_excludes_above_cap_names():
+    """A name priced above the cap (1.5x slice) can't be equal-weighted -> excluded (logged)."""
+    target = [{"symbol": f"T{i}", "ref_price": 100.0, "instrument_key": f"ik_T{i}"} for i in range(29)]
+    target.append({"symbol": "PRICEY", "ref_price": 16000.0, "instrument_key": "ik_P"})  # > 15000 cap
+    plan = svc.plan_core_rebalance(target, [], 300000.0, _cfg())
+    assert "PRICEY" not in {b["symbol"] for b in plan["buys"]}
