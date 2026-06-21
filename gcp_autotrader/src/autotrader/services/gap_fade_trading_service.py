@@ -103,7 +103,7 @@ def _channel_realized_today(state, asof: str) -> float:
 
 def run_gap_fade_scan_once(*, settings, upstox, state, order_service, bq=None,
                            entry_date: str | None = None,
-                           fno_symbols: Sequence[str] | None = None,
+                           keymap: dict[str, str] | None = None,
                            turnover_map: dict[str, float] | None = None) -> dict[str, Any]:
     """Live at-the-open gap-fade scan + SHORT entry (PAPER). Own GAP_FADE channel; fail-closed.
 
@@ -120,13 +120,15 @@ def run_gap_fade_scan_once(*, settings, upstox, state, order_service, bq=None,
     if getattr(cfg, "gapfade_max_positions", 0) <= 0:
         return {"skipped": "gap_fade_disabled", "asof": asof}
 
-    universe = list(fno_symbols) if fno_symbols else _fetch_fno_universe(bq)
-    if not universe:
+    km = keymap if keymap is not None else fetch_fno_universe()
+    if not km:
         return {"skipped": "no_fno_universe", "asof": asof}
-    tov = turnover_map if turnover_map is not None else _fetch_turnover_map(bq, asof, universe)
+    tm = turnover_map if turnover_map is not None else _fetch_turnover_map(bq, asof, list(km))
 
-    candidates = gap_fade_signal_service.scan(universe, upstox=upstox, turnover_map=tov,
+    candidates = gap_fade_signal_service.scan(km, upstox=upstox, turnover_map=tm,
                                               max_positions=cfg.gapfade_max_positions)
+    for c in candidates:
+        c["instrument_key"] = km.get(c["symbol"], "")
 
     open_positions = state.list_open_positions()
     open_channel = [p for p in open_positions if str(p.get("channel", "")).strip().lower() == "gap_fade"]
@@ -150,36 +152,57 @@ def run_gap_fade_scan_once(*, settings, upstox, state, order_service, bq=None,
         except Exception:
             logger.exception("gap_fade_place_entry_failed sym=%s", s["symbol"])
 
-    summary = {"asof": asof, "universe": len(universe), "candidates": len(candidates),
+    summary = {"asof": asof, "universe": len(km), "candidates": len(candidates),
                "planned": len(specs), "entered": len(entered), "open_before": len(open_channel)}
     logger.info("gap_fade_scan_summary %s", summary)
     return summary
 
 
-def _fetch_fno_universe(bq) -> list[str]:
-    """NSE F&O underlying symbols (the shortable set) from the cached instrument list / BQ.
-    Fail-closed -> []. (Wiring resolves the concrete source; the backtest used the Upstox
-    NSE_FO FUT underlyings.)"""
-    if bq is None:
-        return []
+# Upstox NSE instrument master (F&O underlyings + their NSE_EQ instrument keys, in one fetch)
+_FNO_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+_INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "NIFTYIT"})
+
+
+def fetch_fno_universe() -> dict[str, str]:
+    """NSE F&O underlyings + their NSE_EQ instrument keys, from the Upstox instrument master
+    (the FUT rows carry ``underlying_symbol`` + ``underlying_key``). Returns
+    ``{symbol: nse_eq_instrument_key}`` — universe AND quote-keys in one fetch, always-current
+    (no stale table to maintain). Index futures excluded. Fail-closed -> ``{}``."""
+    import urllib.request
+    import gzip
+    import json as _json
     try:
-        rows = bq.query("SELECT DISTINCT underlying FROM `grow-profit-machine.autotrader.fno_underlyings`")
-        return sorted({str(r["underlying"]).strip().upper() for r in rows})
+        raw = urllib.request.urlopen(_FNO_MASTER_URL, timeout=45).read()
+        data = _json.loads(gzip.decompress(raw))
+        out: dict[str, str] = {}
+        for d in data:
+            if d.get("segment") != "NSE_FO" or d.get("instrument_type") != "FUT":
+                continue
+            sym = str(d.get("underlying_symbol") or d.get("asset_symbol") or "").strip().upper()
+            uk = str(d.get("underlying_key") or "").strip()
+            if sym and uk and sym not in _INDEX_UNDERLYINGS and (d.get("underlying_type") or "").upper() != "INDEX":
+                out[sym] = uk
+        logger.info("gap_fade_fno_universe symbols=%d", len(out))
+        return out
     except Exception as exc:
         logger.error("gap_fade_fno_universe_failed err=%s", exc)
-        return []
+        return {}
 
 
-def _fetch_turnover_map(bq, asof: str, universe: Sequence[str]) -> dict[str, float]:
-    """20d avg turnover per symbol (liquidity gate input) from candles_daily. Fail-closed ->
-    {} (then the turnover gate fails closed = no candidate, the safe direction)."""
+def _fetch_turnover_map(bq, asof: str, symbols: Sequence[str]) -> dict[str, float]:
+    """``{symbol: turnover_20d}`` (20d avg close*volume) from candles_daily — the liquidity
+    gate input. Liquidity is stable, so a slightly-stale value is fine (unlike prev_close, which
+    must be fresh and comes from the live ``cp``). Fail-closed -> ``{}`` (turnover gate then
+    fails closed = no candidate, the safe direction)."""
     if bq is None:
         return {}
     try:
-        q = ("SELECT symbol, AVG(close*volume) tov FROM `grow-profit-machine.autotrader.candles_daily` "
-             f"WHERE trade_date >= DATE_SUB(DATE('{asof}'), INTERVAL 30 DAY) "
-             "GROUP BY symbol")
-        return {str(r["symbol"]).strip().upper(): float(r["tov"] or 0.0) for r in bq.query(q)}
+        q = ("WITH r AS (SELECT symbol, close*volume AS cv, "
+             "ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) rn "
+             "FROM `grow-profit-machine.autotrader.candles_daily` "
+             f"WHERE trade_date >= DATE_SUB(DATE('{asof}'), INTERVAL 45 DAY)) "
+             "SELECT symbol, AVG(IF(rn<=20, cv, NULL)) AS tov FROM r GROUP BY symbol")
+        return {str(row["symbol"]).strip().upper(): float(row["tov"] or 0.0) for row in bq.query(q)}
     except Exception as exc:
         logger.error("gap_fade_turnover_map_failed err=%s", exc)
         return {}

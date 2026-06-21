@@ -615,6 +615,41 @@ class UpstoxClient:
                 out[str(key)] = q
         return out
 
+    def get_ohlc_v3(self, instrument_keys: list[str], interval: str = "1d") -> dict[str, Quote]:
+        """Batch OHLC quotes via v3 ``market-quote/ohlc`` (interval ``1d`` = today's
+        open/high/low/last). Returns ``{instrument_key: Quote}`` with open/high/low/prev_close
+        populated by ``_extract_quote_from_row``. Mirrors ``get_ltp_v3``'s batch/parse path.
+        Used by the GAP_FADE channel to read the day's open at ~09:16. Empty on bad input."""
+        keys = [k.strip() for k in instrument_keys if str(k).strip()]
+        if not keys:
+            return {}
+        data = self._request(
+            "GET",
+            "market-quote/ohlc",
+            params={"instrument_key": ",".join(keys), "interval": interval},
+            auth=True,
+            version="v3",
+            content_type=None,
+        )
+        out: dict[str, Quote] = {}
+        if not isinstance(data, dict):
+            return out
+        payload = data
+        if "data" in payload and isinstance(payload.get("data"), dict):
+            payload = payload.get("data") or {}
+        elif "quotes" in payload and isinstance(payload.get("quotes"), dict):
+            payload = payload.get("quotes") or {}
+        for key, row in payload.items():
+            if not isinstance(row, dict):
+                continue
+            q = self._extract_quote_from_row(row)
+            row_key = str(row.get("instrument_key") or row.get("instrument_token")
+                          or row.get("instrumentKey") or key).strip()
+            out[row_key] = q
+            if row_key != str(key):
+                out[str(key)] = q
+        return out
+
     def get_quote(self, instrument_key: str) -> Quote:
         q = self.get_ltp_v3([instrument_key])
         if instrument_key in q:
