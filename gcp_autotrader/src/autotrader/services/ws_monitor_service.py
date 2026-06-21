@@ -60,7 +60,9 @@ def _now_ist_str() -> str:
 # bonus/split). 2026-06-20: added pead + corp_action — previously only "swing" was exempt,
 # so EVENT-channel positions would have been EOD-squared + intraday-managed (wrong for a
 # multi-day hold). No live pead/corp position existed yet, so swing/intraday are unaffected.
-_OVERNIGHT_SL_ONLY_WL = frozenset({"swing", "pead", "corp_action"})
+# 2026-06-21: added "core" — the CORE momentum-hold channel is a pure quarterly buy-and-HOLD
+# (no stops, no intraday/EOD square-off); it must never be touched by ws_monitor.
+_OVERNIGHT_SL_ONLY_WL = frozenset({"swing", "pead", "corp_action", "core"})
 
 
 def _is_overnight_sl_only(pos: dict) -> bool:

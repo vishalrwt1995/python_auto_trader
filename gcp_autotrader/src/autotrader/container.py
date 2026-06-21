@@ -225,6 +225,21 @@ class AppContainer:
             entry_date=entry_date,
         )
 
+    def run_core_rebalance(self, asof: str | None = None) -> dict:
+        """Run the quarterly CORE rebalance — own CORE channel, long-only buy-and-HOLD CNC
+        (PAPER). The system's BETA engine (large-cap top-30 momentum+low-vol blend). No-op
+        unless CAPITAL_CORE>0 AND CORE_ENABLED. Buy-and-hold — no stops; ws_monitor treats
+        wl_type="core" as an overnight hold (Rule 8)."""
+        from autotrader.services import core_trading_service
+        return core_trading_service.run_core_rebalance_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            asof=asof,
+        )
+
 
 @lru_cache(maxsize=1)
 def get_container() -> AppContainer:
