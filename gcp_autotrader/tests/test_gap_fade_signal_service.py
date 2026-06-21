@@ -65,12 +65,52 @@ def test_empty_and_bad_snapshot():
 
 def test_scan_with_injected_snapshot():
     snap = {"ABC": _q(106.0, 100.0), "DEF": _q(103.0, 100.0)}           # DEF +3% filtered
-    out = svc.scan(["ABC", "DEF"], snapshot=snap)
+    out = svc.scan({"ABC": "NSE_EQ|A", "DEF": "NSE_EQ|D"}, snapshot=snap)
     assert [c["symbol"] for c in out] == ["ABC"]
 
 
 def test_fetch_open_snapshot_fail_closed_without_client():
-    # no client / no get_ohlc_quotes -> empty, no crash
+    # no get_ohlc_v3 method -> empty, no crash
     class Dummy:
         pass
-    assert svc.fetch_open_snapshot(["ABC"], Dummy(), {}) == {}
+    assert svc.fetch_open_snapshot({"ABC": "NSE_EQ|A"}, Dummy(), {}) == {}
+
+
+class _OhlcQuote:
+    def __init__(self, open_, high, low):
+        self.open, self.high, self.low = open_, high, low
+
+
+class _LtpQuote:
+    def __init__(self, close):     # Quote.close == prev_close (cp)
+        self.close = close
+
+
+class _MockUpstox:
+    def __init__(self, ohlc, ltp):
+        self._ohlc, self._ltp = ohlc, ltp
+
+    def get_ohlc_v3(self, iks):
+        return {ik: self._ohlc[ik] for ik in iks if ik in self._ohlc}
+
+    def get_ltp_v3(self, iks):
+        return {ik: self._ltp[ik] for ik in iks if ik in self._ltp}
+
+
+def test_fetch_open_snapshot_builds_from_live_quotes():
+    # open/high/low from get_ohlc_v3; prev_close from get_ltp_v3 cp; turnover from BQ map
+    keymap = {"ABC": "NSE_EQ|A", "DEF": "NSE_EQ|D"}
+    ohlc = {"NSE_EQ|A": _OhlcQuote(106.0, 108.0, 105.0), "NSE_EQ|D": _OhlcQuote(50.0, 51.0, 49.0)}
+    ltp = {"NSE_EQ|A": _LtpQuote(100.0), "NSE_EQ|D": _LtpQuote(48.0)}
+    turnover = {"ABC": 2e8, "DEF": 3e8}
+    snap = svc.fetch_open_snapshot(keymap, _MockUpstox(ohlc, ltp), turnover)
+    assert snap["ABC"] == {"open": 106.0, "prev_close": 100.0, "high": 108.0, "low": 105.0, "turnover_20d": 2e8}
+    out = svc.build_candidates(snap)
+    assert out[0]["symbol"] == "ABC" and out[0]["gap"] == pytest.approx(0.06)
+
+
+def test_fetch_open_snapshot_skips_missing_prev_close():
+    keymap = {"ABC": "NSE_EQ|A"}
+    ohlc = {"NSE_EQ|A": _OhlcQuote(106.0, 108.0, 105.0)}
+    ltp = {"NSE_EQ|A": _LtpQuote(0.0)}                    # no cp -> skip
+    assert svc.fetch_open_snapshot(keymap, _MockUpstox(ohlc, ltp), {"ABC": 2e8}) == {}

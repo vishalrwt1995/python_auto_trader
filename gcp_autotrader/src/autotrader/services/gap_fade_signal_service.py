@@ -57,50 +57,57 @@ def build_candidates(
 
 
 def fetch_open_snapshot(
-    fno_symbols: list[str],
+    keymap: dict[str, str],
     upstox: Any,
     turnover_map: dict[str, float],
 ) -> dict[str, dict[str, float]]:
-    """Live I/O: today's OHLC for each F&O underlying via Upstox quotes + the caller-supplied
-    20d turnover (from candles/universe). ``{symbol: {open, prev_close, high, low,
-    turnover_20d}}``. Thin wrapper; fail-closed (skip a symbol on any bad/missing quote)."""
-    snap: dict[str, dict[str, float]] = {}
+    """Live I/O for the at-open snapshot. ``keymap`` = ``{symbol: nse_eq_instrument_key}``.
+      - today's **open / high / low** from ``get_ohlc_v3`` (interval=1d — the true 09:15 open,
+        not an ltp proxy);
+      - **prev_close** from ``get_ltp_v3``'s ``cp`` (the prod-tested method; FRESH — candles_daily
+        lags and must NOT be used for the gap denominator);
+      - **turnover_20d** from ``turnover_map`` (candles_daily 20d avg — liquidity is stable, so a
+        slightly-stale value is fine for the gate).
+    Returns ``{symbol: {open, prev_close, high, low, turnover_20d}}``. Fail-closed per symbol."""
+    iks = [ik for ik in keymap.values() if ik]
+    if not iks:
+        return {}
     try:
-        quotes = upstox.get_ohlc_quotes(fno_symbols) if hasattr(upstox, "get_ohlc_quotes") else {}
+        ohlc = upstox.get_ohlc_v3(iks) if hasattr(upstox, "get_ohlc_v3") else {}
+        ltp = upstox.get_ltp_v3(iks) if hasattr(upstox, "get_ltp_v3") else {}
     except Exception as exc:
         logger.error("gap_fade_fetch_quotes_failed err=%s", exc)
         return {}
-    for sym in fno_symbols:
-        q = quotes.get(sym) or quotes.get(str(sym).upper())
-        if not q:
+    snap: dict[str, dict[str, float]] = {}
+    for sym, ik in keymap.items():
+        oq = ohlc.get(ik); lq = ltp.get(ik)
+        if oq is None or lq is None:
             continue
-        try:
-            op = float(q.get("open") or 0.0); pc = float(q.get("prev_close") or 0.0)
-            hi = float(q.get("high") or 0.0); lo = float(q.get("low") or 0.0)
-        except (TypeError, ValueError):
-            continue
+        op = float(getattr(oq, "open", 0.0) or 0.0)
+        hi = float(getattr(oq, "high", 0.0) or 0.0)
+        lo = float(getattr(oq, "low", 0.0) or 0.0)
+        pc = float(getattr(lq, "close", 0.0) or 0.0)        # Quote.close == prev_close (cp), live/fresh
         if op <= 0 or pc <= 0:
             continue
-        snap[str(sym).strip().upper()] = {
-            "open": op, "prev_close": pc, "high": hi, "low": lo,
-            "turnover_20d": float(turnover_map.get(sym, turnover_map.get(str(sym).upper(), 0.0))),
-        }
+        snap[sym] = {"open": op, "prev_close": pc, "high": hi, "low": lo,
+                     "turnover_20d": float(turnover_map.get(sym, 0.0))}
     return snap
 
 
 def scan(
-    fno_symbols: list[str],
+    keymap: dict[str, str],
     upstox: Any = None,
     turnover_map: dict[str, float] | None = None,
     snapshot: dict[str, dict[str, float]] | None = None,
     max_positions: int = gf.MAX_POSITIONS,
 ) -> list[dict[str, Any]]:
-    """Top-level: return gap-fade short candidates for the open. ``fno_symbols`` = the NSE
-    F&O underlying universe (the shortable set). If ``snapshot`` is None, fetch live via
-    ``upstox`` + ``turnover_map``. Returns the top-K (by gap) short candidates."""
+    """Top-level: return gap-fade short candidates for the open. ``keymap`` =
+    ``{symbol: nse_eq_instrument_key}`` for the NSE F&O universe. If ``snapshot`` is None,
+    fetch live (open/high/low via get_ohlc_v3, prev_close via get_ltp_v3 cp, turnover from
+    ``turnover_map``). Top-K by gap."""
     if snapshot is None:
-        snapshot = fetch_open_snapshot(fno_symbols, upstox, turnover_map or {})
+        snapshot = fetch_open_snapshot(keymap, upstox, turnover_map or {})
     cands = build_candidates(snapshot, max_positions=max_positions)
     logger.info("gap_fade_scan universe=%d snapshot=%d candidates=%d",
-                len(fno_symbols), len(snapshot), len(cands))
+                len(keymap), len(snapshot), len(cands))
     return cands
