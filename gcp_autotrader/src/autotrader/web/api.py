@@ -1940,6 +1940,37 @@ def run_gap_fade_scan(
         raise
 
 
+@app.post("/jobs/core-rebalance")
+def run_core_rebalance(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """CORE quarterly rebalance (PAPER) — own CORE channel, long-only buy-and-HOLD CNC. The
+    system's BETA engine (large-cap top-30 momentum+low-vol blend). No-op unless CAPITAL_CORE>0
+    AND CORE_ENABLED. Runs premarket on the first trading day of each quarter. Buy-and-hold —
+    no stops; ws_monitor treats wl_type="core" as an overnight hold (Rule 8).
+    Cloud Scheduler job: autotrader-core-rebalance.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("CoreTradingService", "core_rebalance", "START", "", sched_ctx)
+        out = c.run_core_rebalance()
+        sink.action("CoreTradingService", "core_rebalance", "DONE", "core rebalance complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("CoreTradingService", "core_rebalance", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.post("/jobs/corp-reconcile")
 def run_corp_action_reconcile(
     x_job_token: str | None = Header(default=None),
