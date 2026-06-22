@@ -8,10 +8,16 @@ import { DataTable, type Column } from "@/components/shared/DataTable";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
 import { api } from "@/lib/api";
-import type { Position, PendingOrder } from "@/lib/types";
+import type { Channel, Position, PendingOrder } from "@/lib/types";
+import { CHANNEL_META, CHANNEL_ORDER } from "@/lib/constants";
 import { AlertTriangle } from "lucide-react";
 
 const LTP_STALE_MS = 5 * 60 * 1000; // 5 minutes
+
+// Positions carry a `channel` field at runtime (not yet in the TS type);
+// fall back to wl_type, then intraday, so every open position maps to a tab.
+const posChannel = (p: Position) =>
+  String((p as { channel?: string }).channel ?? p.wl_type ?? "intraday").toLowerCase();
 
 export default function PositionsPage() {
   const positions = useDashboardStore((s) => s.positions);
@@ -58,27 +64,24 @@ export default function PositionsPage() {
     }
   }, []);
 
-  const [channelFilter, setChannelFilter] = useState<"all" | "intraday" | "swing">("all");
+  const [channelFilter, setChannelFilter] = useState<"all" | Channel>("all");
 
   const openPositions = useMemo(
     () => positions.filter((p) => p.status === "OPEN" || p.status === "PENDING_AMO_EXIT"),
     [positions],
   );
 
-  // Per-channel counts for the tab badges + filtered view.
-  const intradayPositions = useMemo(
-    () => openPositions.filter((p) => (p.wl_type ?? "intraday") !== "swing"),
-    [openPositions],
-  );
-  const swingPositions = useMemo(
-    () => openPositions.filter((p) => p.wl_type === "swing"),
-    [openPositions],
-  );
+  // Channel tabs derived from whatever channels are actually open, in the
+  // canonical cockpit order. Keeps the tab row honest as positions change.
+  const channelTabs = useMemo<("all" | Channel)[]>(() => {
+    const present = new Set(openPositions.map(posChannel));
+    return ["all", ...CHANNEL_ORDER.filter((c) => present.has(c))];
+  }, [openPositions]);
+
   const filteredPositions = useMemo(() => {
-    if (channelFilter === "intraday") return intradayPositions;
-    if (channelFilter === "swing") return swingPositions;
-    return openPositions;
-  }, [channelFilter, openPositions, intradayPositions, swingPositions]);
+    if (channelFilter === "all") return openPositions;
+    return openPositions.filter((p) => posChannel(p) === channelFilter);
+  }, [channelFilter, openPositions]);
 
   // Compute days held for a swing position. Returns null for intraday or
   // when entry_ts is missing/unparseable.
@@ -393,10 +396,13 @@ export default function PositionsPage() {
           >
             {openPositions.length}
           </span>
-          {/* Per-channel breakdown indicator (visible when both channels have positions) */}
-          {openPositions.length > 0 && intradayPositions.length > 0 && swingPositions.length > 0 && (
+          {/* Per-channel breakdown indicator (visible when ≥2 channels have positions) */}
+          {openPositions.length > 0 && channelTabs.length > 2 && (
             <span className="text-[10px] text-text-secondary/60 font-mono">
-              {intradayPositions.length} intraday · {swingPositions.length} swing
+              {channelTabs
+                .filter((t): t is Channel => t !== "all")
+                .map((c) => `${openPositions.filter((p) => posChannel(p) === c).length} ${CHANNEL_META[c].label.toLowerCase()}`)
+                .join(" · ")}
             </span>
           )}
         </div>
@@ -446,30 +452,27 @@ export default function PositionsPage() {
           {/* Channel filter tabs — only show when there's something to filter */}
           {openPositions.length > 0 && (
             <div className="flex items-center gap-1 text-xs">
-              {(["all", "intraday", "swing"] as const).map((tab) => {
+              {channelTabs.map((tab) => {
                 const count =
                   tab === "all"
                     ? openPositions.length
-                    : tab === "intraday"
-                      ? intradayPositions.length
-                      : swingPositions.length;
+                    : openPositions.filter((p) => posChannel(p) === tab).length;
                 const active = channelFilter === tab;
+                const color = tab === "all" ? "#94a3b8" : CHANNEL_META[tab].color;
                 return (
                   <button
                     key={tab}
                     onClick={() => setChannelFilter(tab)}
                     className={cn(
-                      "px-3 py-1 rounded-full font-medium transition-colors capitalize",
+                      "px-3 py-1 rounded-full font-medium transition-colors",
                       active
-                        ? tab === "swing"
-                          ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
-                          : tab === "intraday"
-                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
-                            : "bg-bg-tertiary text-text-primary border border-bg-tertiary"
+                        ? "border"
                         : "text-text-secondary hover:text-text-primary border border-transparent",
                     )}
+                    style={active ? { background: `${color}22`, color, borderColor: `${color}66` } : undefined}
+                    title={tab === "all" ? "All channels combined" : CHANNEL_META[tab].blurb}
                   >
-                    {tab}
+                    {tab === "all" ? "All" : CHANNEL_META[tab].label}
                     <span className="ml-1.5 text-[10px] opacity-70">{count}</span>
                   </button>
                 );
@@ -482,15 +485,9 @@ export default function PositionsPage() {
             title={
               channelFilter === "all"
                 ? "No open positions"
-                : `No open ${channelFilter} positions`
+                : `No open ${CHANNEL_META[channelFilter as Channel]?.label ?? channelFilter} positions`
             }
-            description={
-              channelFilter === "swing"
-                ? "Swing positions hold overnight (CNC product). They appear here when the daily scanner fires a swing entry."
-                : channelFilter === "intraday"
-                  ? "Intraday positions auto-close at EOD (MIS product). They appear here when the 5m scanner fires an entry."
-                  : "Positions will appear here when the scanner places trades"
-            }
+            description="Positions appear here when the scanner places trades."
           />
         ) : (
           <DataTable

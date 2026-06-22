@@ -5,9 +5,10 @@ import { api } from "@/lib/api";
 import { EquityCurve } from "@/components/charts/EquityCurve";
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
 import { cn, formatCurrency, formatPercent, inferTradeChannel } from "@/lib/utils";
-import type { Trade, TradeSummary } from "@/lib/types";
+import type { Channel, Trade, TradeSummary } from "@/lib/types";
+import { CHANNEL_META, CHANNEL_ORDER } from "@/lib/constants";
 
-type ChannelFilter = "all" | "intraday" | "swing";
+type ChannelFilter = "all" | Channel;
 import {
   BarChart,
   Bar,
@@ -84,14 +85,14 @@ export default function JournalPage() {
   // Counts for the channel-filter tabs (computed on ALL trades, not the
   // post-filter view, so the badges stay stable as you toggle).
   const channelCounts = useMemo(() => {
-    let intraday = 0;
-    let swing = 0;
-    for (const { channel } of tradesWithChannel) {
-      if (channel === "swing") swing++;
-      else intraday++;
-    }
-    return { all: tradesWithChannel.length, intraday, swing };
+    const m: Record<string, number> = { all: tradesWithChannel.length };
+    for (const { channel } of tradesWithChannel) m[channel] = (m[channel] ?? 0) + 1;
+    return m;
   }, [tradesWithChannel]);
+  const channelTabs = useMemo<("all" | Channel)[]>(
+    () => ["all", ...CHANNEL_ORDER.filter((c) => (channelCounts[c] ?? 0) > 0)],
+    [channelCounts],
+  );
 
   // Trades after the channel-filter tab (drives BOTH the table and the
   // breakdown tabs so user sees a coherent story across views).
@@ -513,32 +514,24 @@ export default function JournalPage() {
       <div className="flex flex-wrap items-center gap-3">
         {/* Channel filter — pill-style tabs to mirror the Positions page UX */}
         <div className="flex items-center gap-1 text-xs">
-          {(["all", "intraday", "swing"] as const).map((tab) => {
-            const count = channelCounts[tab];
+          {channelTabs.map((tab) => {
+            const count = channelCounts[tab] ?? 0;
             const active = channelFilter === tab;
+            const color = tab === "all" ? "#94a3b8" : CHANNEL_META[tab].color;
             return (
               <button
                 key={tab}
                 onClick={() => setChannelFilter(tab)}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg font-medium transition-colors capitalize",
+                  "px-3 py-1.5 rounded-lg font-medium transition-colors",
                   active
-                    ? tab === "swing"
-                      ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
-                      : tab === "intraday"
-                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
-                        : "bg-bg-tertiary text-text-primary border border-bg-tertiary"
+                    ? "border"
                     : "text-text-secondary hover:text-text-primary border border-transparent",
                 )}
-                title={
-                  tab === "swing"
-                    ? "Overnight CNC trades"
-                    : tab === "intraday"
-                      ? "Same-day MIS trades"
-                      : "Both channels combined"
-                }
+                style={active ? { background: `${color}22`, color, borderColor: `${color}66` } : undefined}
+                title={tab === "all" ? "All channels combined" : CHANNEL_META[tab].blurb}
               >
-                {tab}
+                {tab === "all" ? "All" : CHANNEL_META[tab].label}
                 <span className="ml-1.5 text-[10px] opacity-70">{count}</span>
               </button>
             );

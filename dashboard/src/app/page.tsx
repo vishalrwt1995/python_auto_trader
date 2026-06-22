@@ -12,7 +12,7 @@ import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton";
 import { EquityCurve } from "@/components/charts/EquityCurve";
 import { isMarketOpen, formatTime, formatCurrency } from "@/lib/utils";
 import { api } from "@/lib/api";
-import type { Regime, RiskMode, TradeSummary } from "@/lib/types";
+import type { ChannelOverview, Regime, RiskMode, TradeSummary } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -31,7 +31,7 @@ import {
   Cell,
   ResponsiveContainer,
 } from "recharts";
-import { REGIME_COLORS, PARTICIPATION_COLORS } from "@/lib/constants";
+import { REGIME_COLORS, PARTICIPATION_COLORS, CHANNEL_META, CHANNEL_ORDER } from "@/lib/constants";
 import type { Participation } from "@/lib/types";
 
 const NEXT_JOBS = [
@@ -344,6 +344,9 @@ export default function CommandCenter() {
         </Link>
       </div>
 
+      {/* Per-channel capital strip — links to the cockpit */}
+      <ChannelStrip />
+
       {/* Equity Curve */}
       <div
         className="bg-bg-secondary rounded-lg border border-bg-tertiary p-4"
@@ -527,6 +530,55 @@ export default function CommandCenter() {
         </p>
       )}
     </div>
+  );
+}
+
+/** Compact per-channel capital strip. Links to the /channels cockpit.
+ *  Renders the funded channels (CHANNEL_ORDER) with capital + today's P&L,
+ *  plus the portfolio total. Renders null on fetch failure / empty data. */
+function ChannelStrip() {
+  const [overview, setOverview] = useState<ChannelOverview | null>(null);
+
+  useEffect(() => {
+    api.getChannelsOverview().then(setOverview).catch(() => {});
+  }, []);
+
+  if (!overview || !overview.channels || overview.channels.length === 0) return null;
+
+  const byChannel = new Map(overview.channels.map((c) => [c.channel, c]));
+  const funded = CHANNEL_ORDER.map((ch) => byChannel.get(ch)).filter((c): c is NonNullable<typeof c> => !!c);
+  if (funded.length === 0) return null;
+
+  return (
+    <Link
+      href="/channels"
+      className="flex flex-wrap items-center gap-x-5 gap-y-2 bg-bg-secondary rounded-lg border border-bg-tertiary px-4 py-3 hover:border-accent/50 transition-colors"
+    >
+      {funded.map((c) => {
+        const meta = CHANNEL_META[c.channel];
+        return (
+          <div key={c.channel} className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: meta.color }} />
+            <div className="leading-tight">
+              <p className="text-[11px] text-text-secondary">{meta.label}</p>
+              <p className="text-xs font-mono text-text-primary">
+                {formatCurrency(c.capital)}
+                <span className={`ml-1.5 ${c.today_pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                  {c.today_pnl >= 0 ? "+" : ""}{formatCurrency(c.today_pnl)}
+                </span>
+              </p>
+            </div>
+          </div>
+        );
+      })}
+      <div className="ml-auto flex items-center gap-1.5">
+        <span className="text-[10px] text-text-secondary uppercase tracking-wider">Total</span>
+        <span className="text-sm font-mono font-bold text-text-primary">
+          {formatCurrency(overview.totals.capital)}
+        </span>
+        <ChevronRight className="h-4 w-4 text-text-secondary" />
+      </div>
+    </Link>
   );
 }
 
