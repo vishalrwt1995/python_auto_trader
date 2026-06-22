@@ -79,6 +79,20 @@ export const api = {
 
   getScanLatest: () => api.get<import("./types").ScanLatest>("/dashboard/scan/latest"),
 
+  /* ── Channels (Phase 0) ── */
+
+  getChannelsOverview: () =>
+    api.get<import("./types").ChannelOverview>("/dashboard/channels/overview"),
+
+  getPositionsByChannel: () =>
+    api.get<{ channels: Record<string, Record<string, unknown>[]>; total: number }>(
+      "/dashboard/positions/by-channel",
+    ),
+
+  getCoreBasket: () => api.get<import("./types").CoreBasket>("/dashboard/core/basket"),
+
+  getGapFadeShorts: () => api.get<import("./types").GapFadeShorts>("/dashboard/gap-fade/shorts"),
+
   getUniverseStats: () => api.get<Record<string, unknown>>("/dashboard/universe/stats"),
 
   getUniverseList: (params?: Record<string, string>) => {

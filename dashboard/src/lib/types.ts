@@ -6,6 +6,69 @@ export type Participation = "STRONG" | "MODERATE" | "WEAK";
 export type SwingPermission = "ENABLED" | "REDUCED" | "DISABLED";
 export type MarketPhase = "PREMARKET" | "POST_OPEN" | "LIVE" | "EOD";
 
+// Channels (Phase 0/1, 2026-06-22) — the system's funded logical books.
+// corp_action shares the pead capital pool but is its own trade lineage.
+export type Channel = "swing" | "intraday" | "pead" | "corp_action" | "gap_fade" | "core";
+
+export interface ChannelOverviewRow {
+  channel: Channel;
+  capital: number;
+  enabled: boolean;
+  open_positions: number;
+  open_symbols: string[];
+  today_pnl: number;
+  open_risk: number;
+  max_positions: number | null;
+  daily_loss_limit: number;
+  daily_profit_limit: number;
+  breaker_tripped: boolean;
+  breaker_reason: string | null;
+}
+
+export interface ChannelOverview {
+  channels: ChannelOverviewRow[];
+  totals: { capital: number; today_pnl: number; open_positions: number; open_risk: number };
+  asof?: string;
+}
+
+export interface CoreHolding {
+  symbol: string;
+  qty: number;
+  entry_price: number;
+  sl_price?: number | null;
+  entry_ts: string;
+  notional: number;
+  weight_pct: number;
+}
+
+export interface CoreBasket {
+  channel: string;
+  capital: number;
+  enabled: boolean;
+  count: number;
+  deployed_notional: number;
+  holdings: CoreHolding[];
+}
+
+export interface GapFadeShort {
+  symbol: string;
+  qty: number;
+  entry_price: number;
+  sl_price?: number | null;
+  strategy?: string;
+  entry_ts: string;
+}
+
+export interface GapFadeShorts {
+  channel: string;
+  capital: number;
+  max_positions: number;
+  enabled: boolean;
+  count: number;
+  squareoff_ist: string;
+  shorts: GapFadeShort[];
+}
+
 export interface MarketBrainState {
   asof_ts: string;
   phase: MarketPhase;
