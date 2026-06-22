@@ -1239,11 +1239,16 @@ class OrderService:
             tag = str(pos.get("position_tag") or pos.get("_id") or "")
             if not tag:
                 continue
-            # Skip swing/CNC positions — they persist overnight
+            # Overnight SL-only channels persist past EOD — their own daily
+            # reconciliation (swing) / quarterly rebalance (core) / hard meeting
+            # exit (pead, corp_action) owns the close. EOD-squaring them here
+            # breaks the multi-day/quarterly hold — CORE was wrongly squared
+            # 2026-06-22 because only "swing" was exempt. Mirror
+            # ws_monitor_service._OVERNIGHT_SL_ONLY_WL exactly.
             _pos_wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
-            if _pos_wl_type == "swing":
+            if _pos_wl_type in ("swing", "pead", "corp_action", "core"):
                 remaining += 1
-                logger.info("eod_skip_swing tag=%s symbol=%s", tag, pos.get("symbol", ""))
+                logger.info("eod_skip_overnight tag=%s wl_type=%s symbol=%s", tag, _pos_wl_type, pos.get("symbol", ""))
                 continue
             # Skip positions with a queued AMO exit — will settle at market open
             if str(pos.get("status") or "") == "PENDING_AMO_EXIT":
