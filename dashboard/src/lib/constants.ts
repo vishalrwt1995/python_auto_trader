@@ -1,4 +1,4 @@
-import type { Regime, RiskMode, Participation } from "./types";
+import type { Regime, RiskMode, Participation, Channel } from "./types";
 
 export const REGIME_COLORS: Record<Regime, string> = {
   TREND_UP: "#22c55e",
@@ -47,8 +47,23 @@ export const PARTICIPATION_COLORS: Record<Participation, string> = {
   WEAK: "#ef4444",
 };
 
+// Channel display metadata. `CHANNEL_ORDER` is the five FUNDED channels shown
+// in the cockpit; corp_action folds into the pead pool but has its own label
+// for trade attribution.
+export const CHANNEL_META: Record<Channel, { label: string; color: string; blurb: string }> = {
+  swing:       { label: "Swing",        color: "#3b82f6", blurb: "CNC · 1–10 day holds" },
+  intraday:    { label: "Intraday",     color: "#06b6d4", blurb: "MIS · same-day" },
+  pead:        { label: "Event · PEAD", color: "#a855f7", blurb: "Post-earnings drift" },
+  corp_action: { label: "Corp Action",  color: "#8b5cf6", blurb: "Bonus/split run-up" },
+  gap_fade:    { label: "Gap Fade",     color: "#f97316", blurb: "Intraday >5% gap short" },
+  core:        { label: "Core",         color: "#22c55e", blurb: "Quarterly buy & hold" },
+};
+
+export const CHANNEL_ORDER: Channel[] = ["swing", "intraday", "pead", "gap_fade", "core"];
+
 export const NAV_ITEMS = [
   { label: "Command Center", href: "/", icon: "LayoutDashboard" },
+  { label: "Channels", href: "/channels", icon: "Layers" },
   { label: "Market Brain", href: "/market-brain", icon: "Brain" },
   { label: "Watchlist", href: "/watchlist", icon: "List" },
   { label: "Positions", href: "/positions", icon: "TrendingUp" },

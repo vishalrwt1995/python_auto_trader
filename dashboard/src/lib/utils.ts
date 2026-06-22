@@ -1,5 +1,6 @@
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
+import type { Channel } from "./types";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -65,19 +66,34 @@ export function isMarketOpen(): boolean {
  * Once the BQ writer persists `wl_type`, branches 2-4 become dead code; until
  * then they keep historic rows usable in the channel filters.
  */
+const _KNOWN_CHANNELS: Channel[] = ["swing", "intraday", "pead", "corp_action", "gap_fade", "core"];
+
 export function inferTradeChannel(t: {
   wl_type?: string;
+  channel?: string;
+  strategy?: string;
   hold_minutes?: number;
   entry_ts?: string;
   exit_ts?: string;
-}): "intraday" | "swing" {
-  const explicit = (t.wl_type || "").toString().trim().toLowerCase();
-  if (explicit === "swing") return "swing";
-  if (explicit === "intraday") return "intraday";
+}): Channel {
+  // 1. Explicit channel / wl_type wins (forward-compatible).
+  const explicit = (t.channel || t.wl_type || "").toString().trim().toLowerCase();
+  if ((_KNOWN_CHANNELS as string[]).includes(explicit)) return explicit as Channel;
 
+  // 2. Map the channel-specific strategies — the BQ `trades` table carries
+  //    `strategy` (not yet `channel`), so PEAD / GAP_FADE / CORE / corp route
+  //    directly instead of being mis-bucketed into swing/intraday.
+  const strat = (t.strategy || "").toString().trim().toUpperCase();
+  if (strat === "PEAD") return "pead";
+  if (strat === "GAP_FADE") return "gap_fade";
+  if (strat === "CORE") return "core";
+  if (strat.startsWith("CORP")) return "corp_action";
+
+  // 3. Legacy swing/intraday heuristic (rows with no channel tag): the regular
+  //    session is 9:15-15:30 IST = 375 min, so a >6h hold (or a cross-date
+  //    entry/exit) must have held overnight ⇒ swing.
   const hold = typeof t.hold_minutes === "number" ? t.hold_minutes : null;
   if (hold != null && hold > 360) return "swing";
-
   if (t.entry_ts && t.exit_ts) {
     const ed = isoDateIst(t.entry_ts);
     const xd = isoDateIst(t.exit_ts);

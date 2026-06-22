@@ -195,10 +195,10 @@ export default function AnalyticsPage() {
   // of the active filter so users can compare asymmetry at a glance.
   const channelStats = useMemo(() => {
     const init = () => ({ trades: 0, wins: 0, losses: 0, pnl: 0, biggestWin: -Infinity, biggestLoss: Infinity });
-    const stats = { intraday: init(), swing: init() };
+    const stats: Record<string, ReturnType<typeof init>> = {};
     for (const { trade, channel } of tradesWithChannel) {
       if (trade.exit_reason === "EOD_CLOSE_NO_QUOTE") continue;
-      const s = stats[channel];
+      const s = stats[channel] ?? (stats[channel] = init());
       s.trades++;
       s.pnl += trade.pnl || 0;
       if (trade.pnl > 0) {
@@ -219,7 +219,7 @@ export default function AnalyticsPage() {
       biggestLoss: s.biggestLoss === Infinity ? 0 : s.biggestLoss,
       avgPnl: s.trades > 0 ? Math.round((s.pnl / s.trades) * 100) / 100 : 0,
     });
-    return { intraday: finalize(stats.intraday), swing: finalize(stats.swing) };
+    return { intraday: finalize(stats.intraday ?? init()), swing: finalize(stats.swing ?? init()) };
   }, [tradesWithChannel]);
 
   // When channel filter is active, the server `summary` lies (it covers all

@@ -6,6 +6,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useAuthStore } from "@/stores/authStore";
 import {
   LayoutDashboard,
+  Layers,
   Brain,
   List,
   Briefcase,
@@ -23,6 +24,7 @@ import {
 
 const NAV = [
   { id: "/",             icon: LayoutDashboard, label: "Command Center" },
+  { id: "/channels",     icon: Layers,          label: "Channels"        },
   { id: "/market-brain", icon: Brain,           label: "Market Brain"   },
   { id: "/watchlist",    icon: List,            label: "Watchlist"       },
   { id: "/positions",    icon: Briefcase,       label: "Positions"       },
