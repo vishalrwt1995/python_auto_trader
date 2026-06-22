@@ -84,21 +84,23 @@ def plan_gap_fade_entries(
 
 # ── live I/O wrapper (validated in PAPER, not unit-tested — fail-closed) ───────
 def _channel_realized_today(state, asof: str) -> float:
-    """GAP_FADE channel realized P&L today (by channel="gap_fade") for the daily breaker.
-    Reuses the channel-keyed accounting; NaN on failure -> breaker trips (fail-closed)."""
-    from autotrader.services import pead_trading_service
+    """GAP_FADE channel realized P&L today (channel="gap_fade") for the daily breaker.
+    Mirrors PEAD's channel-keyed accounting (`_pead_realized_today`); NaN on read
+    failure -> breaker trips (fail-closed)."""
     try:
-        return pead_trading_service._channel_realized_today(state, asof, channel="gap_fade")
-    except Exception:
-        try:
-            tot = 0.0
-            for p in state.list_closed_positions_today(asof):
-                if str(p.get("channel", "")).strip().lower() == "gap_fade":
-                    tot += float(p.get("realized_pnl") or 0.0)
-            return tot
-        except Exception as exc:
-            logger.error("gap_fade_realized_today_failed asof=%s err=%s — breaker trips", asof, exc)
-            return float("nan")
+        total = 0.0
+        for p in state.list_all_positions(limit=500):
+            if str(p.get("channel", "")).strip().lower() != "gap_fade":
+                continue
+            if str(p.get("status", "")).upper() != "CLOSED":
+                continue
+            if str(p.get("exit_ts", ""))[:10] != asof:
+                continue
+            total += float(p.get("pnl", 0.0) or 0.0)
+        return total
+    except Exception as exc:
+        logger.error("gap_fade_realized_today_failed asof=%s err=%s — breaker trips", asof, exc)
+        return float("nan")
 
 
 def run_gap_fade_scan_once(*, settings, upstox, state, order_service, bq=None,
