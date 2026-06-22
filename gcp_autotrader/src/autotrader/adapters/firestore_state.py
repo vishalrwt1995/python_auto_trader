@@ -240,20 +240,34 @@ class FirestoreStateStore:
             return {}
         return out
 
-    def get_today_trade_count(self, today: str) -> int:
+    def get_today_trade_count(self, today: str, channels: set[str] | None = None) -> int:
         """Count positions entered today — used to enforce max_trades_day.
 
-        Counts ALL positions (OPEN and CLOSED) whose entry_ts starts with
-        the given ISO date. A position that was opened and stopped-out earlier
-        today still consumes a slot in the daily budget.
+        Counts positions (OPEN and CLOSED) whose entry_ts starts with the given
+        ISO date. A position opened and stopped-out earlier today still consumes
+        a slot in the daily budget.
+
+        When ``channels`` is given, only positions belonging to one of those
+        channels are counted, keeping the daily-trade cap PER-CHANNEL. A passive
+        channel's bulk activity (e.g. the CORE quarterly rebalance entering ~30
+        buy-and-hold names in one go) must NOT consume the swing/intraday budget
+        and silently halt those scanners (the 2026-06-22 incident). Channel
+        routing mirrors ``get_today_realized_pnl_by_channel``: prefer the explicit
+        ``channel`` field, else ``wl_type``, else legacy default 'intraday'.
+        ``channels=None`` counts every channel (back-compat).
         """
         count = 0
         try:
             for d in self._db().collection("positions").stream():
                 row = d.to_dict() or {}
                 entry_ts = str(row.get("entry_ts", "") or "")
-                if entry_ts.startswith(today):
-                    count += 1
+                if not entry_ts.startswith(today):
+                    continue
+                if channels is not None:
+                    ch = str(row.get("channel") or row.get("wl_type") or "intraday").strip().lower()
+                    if ch not in channels:
+                        continue
+                count += 1
         except Exception:
             # Best-effort — if Firestore read fails we fall back to not enforcing
             # the cap, since hard-blocking the scan on a transient read error

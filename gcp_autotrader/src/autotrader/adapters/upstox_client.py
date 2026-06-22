@@ -398,6 +398,11 @@ class UpstoxClient:
     def _extract_quote_from_row(cls, row: dict[str, Any]) -> Quote:
         ltpc = row.get("ltpc") if isinstance(row.get("ltpc"), dict) else {}
         ohlc = row.get("ohlc") if isinstance(row.get("ohlc"), dict) else {}
+        # Upstox v3 market-quote/ohlc nests OHLC under live_ohlc / prev_ohlc (not
+        # the v2 `ohlc` key). Without reading these the GAP_FADE open-snapshot got
+        # open=0 and silently dropped every symbol (snapshot=0). 2026-06-22 fix.
+        live_ohlc = row.get("live_ohlc") if isinstance(row.get("live_ohlc"), dict) else {}
+        prev_ohlc = row.get("prev_ohlc") if isinstance(row.get("prev_ohlc"), dict) else {}
         market_data = row.get("market_data") if isinstance(row.get("market_data"), dict) else {}
         ff = row.get("ff") if isinstance(row.get("ff"), dict) else {}
         ff_market = ff.get("marketFF") if isinstance(ff.get("marketFF"), dict) else {}
@@ -433,18 +438,24 @@ class UpstoxClient:
         open_px = (
             cls._safe_float(row.get("open"))
             or cls._safe_float(ohlc.get("open"))
+            or cls._safe_float(live_ohlc.get("open"))
+            or cls._safe_float(prev_ohlc.get("open"))
             or cls._safe_float(market_data.get("open"))
             or cls._safe_float(ff_ohlc.get("open"))
         )
         high_px = (
             cls._safe_float(row.get("high"))
             or cls._safe_float(ohlc.get("high"))
+            or cls._safe_float(live_ohlc.get("high"))
+            or cls._safe_float(prev_ohlc.get("high"))
             or cls._safe_float(market_data.get("high"))
             or cls._safe_float(ff_ohlc.get("high"))
         )
         low_px = (
             cls._safe_float(row.get("low"))
             or cls._safe_float(ohlc.get("low"))
+            or cls._safe_float(live_ohlc.get("low"))
+            or cls._safe_float(prev_ohlc.get("low"))
             or cls._safe_float(market_data.get("low"))
             or cls._safe_float(ff_ohlc.get("low"))
         )

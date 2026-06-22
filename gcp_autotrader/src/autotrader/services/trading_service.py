@@ -643,10 +643,20 @@ class TradingService:
             # the scan entirely, since every candidate downstream would be
             # blocked anyway and there is no partial-qualification path.
             _today_iso = now_ist_str()[:10]
+            # Per-channel scoping (2026-06-22): max_trades_day governs only the
+            # ACTIVE-trading channels this scan drives (swing / intraday). Count
+            # only those channels' entries — otherwise a passive channel's bulk
+            # activity (e.g. the CORE quarterly rebalance entering ~30 buy-and-hold
+            # names) trips the cap and silently halts swing+intraday for the day.
+            _scan_channels = (
+                {"swing"} if wl_filter == "swing"
+                else {"intraday"} if wl_filter == "intraday"
+                else {"swing", "intraday"}
+            )
             # M0.2 fail-closed: if we cannot read the day's trade count we
             # cannot enforce max_trades_day — SKIP rather than assume 0.
             try:
-                _today_trade_count = self.state.get_today_trade_count(_today_iso)
+                _today_trade_count = self.state.get_today_trade_count(_today_iso, channels=_scan_channels)
             except Exception:
                 logger.exception("today_trade_count_failed — failing closed")
                 self.log_sink.action(
