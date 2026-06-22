@@ -398,6 +398,221 @@ def get_pead_summary(
 
 
 # ---------------------------------------------------------------------------
+# Channels — per-channel overview (Phase 0, 2026-06-22)
+# ---------------------------------------------------------------------------
+#
+# The system runs five FUNDED channels (swing, intraday, pead, gap_fade, core)
+# under a Rs12L PAPER book. corp_action positions are tagged channel="pead"
+# (they share the EVENT pool), so they fold into the pead card. These GETs are
+# read-only + additive — no trading-path, schema, or env change.
+
+_CHANNELS: tuple[str, ...] = ("swing", "intraday", "pead", "gap_fade", "core")
+
+
+def _position_channel(p: dict[str, Any]) -> str:
+    """Derive a position's channel — mirrors firestore_state's routing: explicit
+    `channel`, else `wl_type`, else legacy default 'intraday'."""
+    return str(p.get("channel") or p.get("wl_type") or "intraday").strip().lower()
+
+
+def build_channel_overview(
+    channels: Any,
+    positions: Any,
+    pnl_by_channel: Any,
+    risk_by_channel: Any,
+    capital_of: Any,
+    max_positions_of: Any,
+    daily_loss_pct: float,
+    daily_profit_pct: float,
+) -> dict[str, Any]:
+    """PURE per-channel rollup (no I/O — unit-tested). For each channel: capital,
+    enabled, open-position count + symbols, today's realized P&L, open R-at-risk,
+    slot cap, and the daily-breaker limits + whether it has tripped. Unfunded
+    channels (capital 0) are `enabled=False` and never trip the breaker."""
+    grouped: dict[str, list] = {}
+    for p in positions or []:
+        grouped.setdefault(_position_channel(p), []).append(p)
+    rows: list[dict[str, Any]] = []
+    tot_cap = tot_pnl = tot_risk = 0.0
+    tot_open = 0
+    for ch in channels:
+        cap = float(capital_of(ch) or 0.0)
+        pnl = round(float((pnl_by_channel or {}).get(ch, 0.0)), 2)
+        risk = round(float((risk_by_channel or {}).get(ch, 0.0)), 2)
+        poss = grouped.get(ch, [])
+        loss_limit = round(-abs(daily_loss_pct) * cap, 2)
+        profit_limit = round(abs(daily_profit_pct) * cap, 2)
+        hit_loss = cap > 0 and pnl <= loss_limit
+        hit_profit = cap > 0 and pnl >= profit_limit
+        rows.append({
+            "channel": ch,
+            "capital": round(cap, 2),
+            "enabled": cap > 0,
+            "open_positions": len(poss),
+            "open_symbols": [str(p.get("symbol") or "") for p in poss],
+            "today_pnl": pnl,
+            "open_risk": risk,
+            "max_positions": max_positions_of(ch),
+            "daily_loss_limit": loss_limit,
+            "daily_profit_limit": profit_limit,
+            "breaker_tripped": bool(hit_loss or hit_profit),
+            "breaker_reason": ("daily_loss_limit_hit" if hit_loss
+                               else "daily_profit_target_hit" if hit_profit else None),
+        })
+        if cap > 0:
+            tot_cap += cap
+        tot_pnl += pnl
+        tot_risk += risk
+        tot_open += len(poss)
+    return {
+        "channels": rows,
+        "totals": {
+            "capital": round(tot_cap, 2),
+            "today_pnl": round(tot_pnl, 2),
+            "open_positions": tot_open,
+            "open_risk": round(tot_risk, 2),
+        },
+    }
+
+
+@router.get("/channels/overview")
+def get_channels_overview(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Per-channel cockpit: capital, today's P&L, open positions, R-at-risk,
+    slot cap, and daily-breaker state for each of the five funded channels."""
+    c = get_container()
+    s = c.settings.strategy
+    today = now_ist().strftime("%Y-%m-%d")
+    try:
+        positions = c.state.list_open_positions()
+    except Exception as exc:
+        logger.error("channels/overview positions failed: %s", exc)
+        positions = []
+    try:
+        pnl_by = c.state.get_today_realized_pnl_by_channel(today)
+    except Exception as exc:
+        logger.error("channels/overview pnl failed: %s", exc)
+        pnl_by = {}
+    try:
+        risk_by = c.state.get_open_risk_by_channel()
+    except Exception as exc:
+        logger.error("channels/overview risk failed: %s", exc)
+        risk_by = {}
+    max_pos = {"swing": s.swing_max_positions, "intraday": s.max_positions,
+               "pead": s.pead_max_positions, "gap_fade": s.gapfade_max_positions,
+               "core": None}
+    out = build_channel_overview(
+        _CHANNELS, positions, pnl_by, risk_by,
+        capital_of=s.channel_capital,
+        max_positions_of=lambda ch: max_pos.get(ch),
+        daily_loss_pct=s.daily_loss_pct, daily_profit_pct=s.daily_profit_pct,
+    )
+    out["asof"] = today
+    return out
+
+
+@router.get("/positions/by-channel")
+def get_positions_by_channel(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Open positions grouped by channel, with per-position detail."""
+    c = get_container()
+    try:
+        positions = c.state.list_open_positions()
+    except Exception as exc:
+        logger.error("positions/by-channel failed: %s", exc)
+        return {"channels": {}, "total": 0, "error": str(exc)}
+    grouped: dict[str, list] = {}
+    for p in positions:
+        grouped.setdefault(_position_channel(p), []).append({
+            "symbol": p.get("symbol"),
+            "side": p.get("side"),
+            "qty": p.get("qty"),
+            "entry_price": p.get("entry_price"),
+            "sl_price": p.get("sl_price"),
+            "target": p.get("target"),
+            "max_loss": p.get("max_loss"),
+            "strategy": p.get("strategy"),
+            "wl_type": p.get("wl_type"),
+            "entry_ts": str(p.get("entry_ts", ""))[:19],
+        })
+    return {"channels": grouped, "total": len(positions)}
+
+
+@router.get("/core/basket")
+def get_core_basket(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """CORE buy-and-hold basket — current holdings + entry-notional weights."""
+    c = get_container()
+    s = c.settings.strategy
+    try:
+        positions = [p for p in c.state.list_open_positions()
+                     if _position_channel(p) == "core"]
+    except Exception as exc:
+        logger.error("core/basket failed: %s", exc)
+        return {"channel": "core", "holdings": [], "count": 0, "error": str(exc)}
+    holdings: list[dict[str, Any]] = []
+    for p in positions:
+        qty = float(p.get("qty") or 0.0)
+        entry = float(p.get("entry_price") or 0.0)
+        holdings.append({
+            "symbol": p.get("symbol"),
+            "qty": int(qty),
+            "entry_price": entry,
+            "sl_price": p.get("sl_price"),
+            "entry_ts": str(p.get("entry_ts", ""))[:19],
+            "notional": round(qty * entry, 2),
+        })
+    total = sum(h["notional"] for h in holdings) or 0.0
+    for h in holdings:
+        h["weight_pct"] = round(100.0 * h["notional"] / total, 2) if total else 0.0
+    holdings.sort(key=lambda h: -h["notional"])
+    return {
+        "channel": "core",
+        "capital": s.channel_capital("core"),
+        "enabled": bool(s.core_enabled),
+        "count": len(holdings),
+        "deployed_notional": round(total, 2),
+        "holdings": holdings,
+    }
+
+
+@router.get("/gap-fade/shorts")
+def get_gap_fade_shorts(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """GAP_FADE channel — open intraday shorts (covered at the 15:25 squareoff)."""
+    c = get_container()
+    s = c.settings.strategy
+    try:
+        positions = [p for p in c.state.list_open_positions()
+                     if _position_channel(p) == "gap_fade"]
+    except Exception as exc:
+        logger.error("gap-fade/shorts failed: %s", exc)
+        return {"channel": "gap_fade", "shorts": [], "count": 0, "error": str(exc)}
+    shorts = [{
+        "symbol": p.get("symbol"),
+        "qty": p.get("qty"),
+        "entry_price": p.get("entry_price"),
+        "sl_price": p.get("sl_price"),
+        "strategy": p.get("strategy"),
+        "entry_ts": str(p.get("entry_ts", ""))[:19],
+    } for p in positions]
+    cap = s.channel_capital("gap_fade")
+    return {
+        "channel": "gap_fade",
+        "capital": cap,
+        "max_positions": s.gapfade_max_positions,
+        "enabled": bool(cap > 0 and s.gapfade_max_positions > 0),
+        "count": len(shorts),
+        "squareoff_ist": "15:25",
+        "shorts": shorts,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Market Brain — Tier-1 (PR-2)
 # ---------------------------------------------------------------------------
 #
