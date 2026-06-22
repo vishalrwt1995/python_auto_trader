@@ -5,6 +5,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useAuthStore } from "@/stores/authStore";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { CHANNEL_META, CHANNEL_ORDER } from "@/lib/constants";
+import type { ChannelOverview } from "@/lib/types";
 import {
   DollarSign,
   Layers,
@@ -138,6 +140,52 @@ function SettingCard({
     >
       <span className="font-mono text-[10px] text-text-secondary uppercase tracking-wide">{label}</span>
       <span className={cn("font-mono text-base font-bold", valueColor)}>{value}</span>
+    </div>
+  );
+}
+
+// Per-channel capital allocation (Phase 3) — corrects the single global `capital`
+// shown above by surfacing the ₹12L spread across the five funded channels.
+function ChannelCapitalSection() {
+  const [data, setData] = useState<ChannelOverview | null>(null);
+  useEffect(() => {
+    api.getChannelsOverview().then(setData).catch(() => {});
+  }, []);
+  if (!data) return null;
+  const rows = [...data.channels].sort(
+    (a, b) => CHANNEL_ORDER.indexOf(a.channel) - CHANNEL_ORDER.indexOf(b.channel),
+  );
+  return (
+    <div className="bg-bg-secondary rounded-xl border border-bg-tertiary p-5">
+      <div className="flex items-center gap-2 mb-1 pb-3 border-b border-bg-tertiary">
+        <span className="text-text-secondary"><Layers className="h-4 w-4" /></span>
+        <p className="text-xs text-text-secondary font-semibold uppercase tracking-wider">
+          Channels — Capital Allocation
+        </p>
+        <span className="ml-auto font-mono text-xs text-profit">{INR(data.totals.capital)} total</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 mt-3">
+        {rows.map((r) => {
+          const meta = CHANNEL_META[r.channel] ?? { label: r.channel, color: "#6b7280", blurb: "" };
+          return (
+            <div
+              key={r.channel}
+              className="flex flex-col gap-1 px-3 py-2.5 bg-bg-primary rounded-lg border-l-2"
+              style={{ borderLeftColor: meta.color }}
+              title={meta.blurb}
+            >
+              <span className="font-mono text-[10px] text-text-secondary uppercase tracking-wide">{meta.label}</span>
+              <span className={cn("font-mono text-base font-bold", r.capital > 0 ? "text-profit" : "text-text-secondary")}>
+                {r.capital > 0 ? INR(r.capital) : "—"}
+              </span>
+              <span className="font-mono text-[10px] text-text-secondary">
+                {r.max_positions != null ? `${r.max_positions} slots` : "buy & hold"}
+                {r.daily_loss_limit < 0 ? ` · ${INR(Math.abs(r.daily_loss_limit))} stop` : ""}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -283,6 +331,9 @@ export default function SettingsPage() {
           </div>
         ))
       )}
+
+      {/* Channels — capital allocation (Phase 3) */}
+      <ChannelCapitalSection />
 
       {/* Voice Alerts */}
       <div className="bg-bg-secondary rounded-xl border border-bg-tertiary p-5">
