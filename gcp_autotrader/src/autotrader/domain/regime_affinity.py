@@ -422,6 +422,33 @@ def swing_setup_allowed_in_regime(setup: str, regime: str) -> bool:
     return str(regime or "").strip().upper() in allowed
 
 
+# ── CORE-4 regime fold (2026-06-24) ─────────────────────────────────────────
+# Every validated backtest gates on the 4 BASE regimes. The live brain v4
+# (Phase D) emits refinements — EARLY_TREND_UP/DOWN, RANGE_ROTATING — that the
+# validated gate stack never saw (swing_s2_canonical loads a pre-folded core-4
+# regime artifact; intraday_baseline folds via CORE_MAP at load). Live
+# trading_service was passing the REFINED regime straight into the gates, so the
+# (intended, core-4-validated) playbook vetoed validated cells on refined-regime
+# days. Folding the regime back to its base BEFORE the swing gates restores
+# exact parity with the backtest. Value-identical to
+# backtest_v2.brain_reconstruct.CORE_MAP (drift-guarded by test).
+_CORE4_FOLD: dict[str, str] = {
+    "EARLY_TREND_UP": "TREND_UP",
+    "EARLY_TREND_DOWN": "TREND_DOWN",
+    "RANGE_ROTATING": "RANGE",
+}
+
+
+def core4_regime(regime: str) -> str:
+    """Fold a refined brain regime to its CORE-4 base (identity for base regimes).
+
+    Mirrors backtest_v2.brain_reconstruct.CORE_MAP so live gating matches the
+    validated backtests, which all gate on the folded core-4 regime set.
+    """
+    r = str(regime or "").strip().upper()
+    return _CORE4_FOLD.get(r, r)
+
+
 # Reserve-2-trend slot allocation (2026-06 swing-config): the RANGE-bucket cell
 # (MEAN_REVERSION) may hold at most 3 of the 5 swing slots concurrently, keeping
 # 2 free for the TREND-bucket cells (MOMENTUM/PULLBACK). Backtest evidence: MR

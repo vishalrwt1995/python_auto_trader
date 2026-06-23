@@ -4880,8 +4880,13 @@ class UniverseService:
             # its 200-day SMA — mean-revert a dip INSIDE an uptrend, never catch a
             # falling knife below trend. Below the 200-SMA the setup simply is not
             # emitted, matching the backtest skipping the trade. See swing_signals.
+            # BREAKOUT retired from the swing candidate set (2026-06-24): not a
+            # backtest-validated cell, and already excluded from selection by
+            # _MULTI_EMIT_SETUPS below. It was never tradeable live — hard-blocked in
+            # every trend regime pending VCP/base detection; MOMENTUM replaced it. The
+            # 3 validated swing cells are MOMENTUM/PULLBACK (uptrend) + MEAN_REVERSION
+            # (range). `breakout` score is still kept in the diagnostic row below.
             _long_candidates: list[tuple[str, str, float]] = [
-                ("BREAKOUT", "BUY", breakout),
                 ("PULLBACK", "BUY", pullback),
             ]
             if bool(r.get("mrAbove200Sma")):

@@ -16,6 +16,7 @@ from autotrader.domain.indicators import compute_indicators
 from autotrader.domain.daily_bias import compute_daily_bias
 from autotrader.domain.regime_affinity import (
     SWING_RANGE_GROUP_CAP,
+    core4_regime,
     regime_hard_blocks_strategy,
     regime_strategy_multiplier,
     swing_setup_allowed_in_regime,
@@ -1184,9 +1185,15 @@ class TradingService:
                     daily_bias=_daily_bias,
                 )
                 meta = score_signal(w.symbol, direction, ind, regime, self.settings.strategy, daily_bias=_daily_bias, setup=w.strategy)
+                # 2026-06-24: SWING gates on the CORE-4 FOLDED regime to match the
+                # validated backtests (which fold via brain_reconstruct.CORE_MAP);
+                # intraday keeps the refined regime. brain_state.regime stays refined
+                # for logging / scan_decisions. See regime_affinity.core4_regime.
+                _raw_brain_regime = brain_state.regime if brain_state else "RANGE"
+                _gate_regime = core4_regime(_raw_brain_regime) if _is_swing else _raw_brain_regime
                 # Apply regime-strategy affinity multiplier
                 _affinity_mult = regime_strategy_multiplier(
-                    brain_state.regime if brain_state else "RANGE",
+                    _gate_regime,
                     w.strategy,
                     direction,
                 )
@@ -1209,7 +1216,7 @@ class TradingService:
                 #   effective SL stays sensible and qty doesn't collapse to 1.
                 #
                 # Trend regimes: keep or slightly widen for momentum room.
-                _brain_regime = brain_state.regime if brain_state else "RANGE"
+                _brain_regime = _gate_regime  # CORE-4 folded for swing; refined for intraday (2026-06-24)
                 _brain_risk   = brain_state.risk_mode if brain_state else "NORMAL"
                 _is_reversal  = str(w.strategy or "").strip().upper() in ("MEAN_REVERSION", "VWAP_REVERSAL")
 
@@ -1610,7 +1617,9 @@ class TradingService:
                 else:
                     # Strategy-specific hard gates: validate that the current market
                     # structure actually matches the setup assigned at watchlist build time.
-                    _brain_regime = brain_state.regime if brain_state else ""
+                    # _gate_regime is CORE-4 folded for swing (matches the validated backtest);
+                    # refined for intraday. Used by check_swing_entry + check_playbook below.
+                    _brain_regime = _gate_regime
                     if _is_swing:
                         _strategy_ok, _strategy_fail = check_swing_entry(w.strategy, direction, ind, _daily_bias, regime=_brain_regime)
                     else:
@@ -1630,6 +1639,15 @@ class TradingService:
                         )
                         if not _pb_ok:
                             policy_block_reason = _pb_reason
+                    # NOTE (2026-06-24): with USE_PLAYBOOK_V1=true the elif branches
+                    # below (expected_edge, portfolio_sector/strategy_concentrated,
+                    # earnings_blackout) are INTENTIONALLY not reached. They are
+                    # live-only gates the validated backtest does not model
+                    # (equivalence_v2.DOCUMENTED_MISSING), so they stay off to preserve
+                    # backtest parity. USE_EXPECTED_EDGE_R_V1 is also set false. To
+                    # enable any of them, make it an independent `if` AND add it to the
+                    # backtest + re-validate first — do not simply promote it out of
+                    # this elif chain (that would silently diverge live from backtest).
                     # M3 — Expected_edge_R gate. Blocks when prior.n ≥
                     # min_sample_size AND expected_edge_R ≤ 0. Below the
                     # sample floor it's a no-op. Independent of the playbook
