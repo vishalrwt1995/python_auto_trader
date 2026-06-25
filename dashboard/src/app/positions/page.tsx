@@ -106,12 +106,12 @@ export default function PositionsPage() {
             <span
               className={cn(
                 "text-[9px] font-semibold px-1 py-0.5 rounded",
-                r.wl_type === "swing"
+                r.wl_type === "swing" || posChannel(r) === "core"
                   ? "bg-indigo-500/15 text-indigo-400"
                   : "bg-cyan-500/15 text-cyan-400",
               )}
             >
-              {r.wl_type === "swing" ? "CNC" : "MIS"}
+              {r.wl_type === "swing" || posChannel(r) === "core" ? "CNC" : "MIS"}
             </span>
             {r.status === "PENDING_AMO_EXIT" && (
               <span className="text-[9px] font-semibold px-1 py-0.5 rounded bg-neutral/20 text-neutral">
@@ -230,18 +230,29 @@ export default function PositionsPage() {
         key: "sl",
         label: "SL",
         className: "text-right font-mono text-loss/80",
-        render: (r) => <span>{r.sl_price != null ? r.sl_price.toFixed(2) : "—"}</span>,
+        render: (r) => {
+          if (posChannel(r) === "core") {
+            return <span className="text-[10px] text-neutral/60 font-sans">CATASTROPHE</span>;
+          }
+          return <span>{r.sl_price != null ? r.sl_price.toFixed(2) : "—"}</span>;
+        },
       },
       {
         key: "target",
         label: "Target",
         className: "text-right font-mono text-profit/80",
-        render: (r) => <span>{r.target != null ? r.target.toFixed(2) : "—"}</span>,
+        render: (r) => {
+          if (posChannel(r) === "core") {
+            return <span className="text-[10px] text-text-secondary font-sans">HOLD · Jul 1</span>;
+          }
+          return <span>{r.target != null ? r.target.toFixed(2) : "—"}</span>;
+        },
       },
       {
         key: "rr",
         label: "R:R",
         render: (r) => {
+          if (posChannel(r) === "core") return <span className="text-text-secondary/40">—</span>;
           const ltp = ltpCache[r.symbol] ?? r.entry_price;
           if (r.target == null || r.sl_price == null) return <span>—</span>;
           const totalRange = Math.abs(r.target - r.sl_price);
@@ -294,7 +305,7 @@ export default function PositionsPage() {
         render: (r) => {
           // Days-held is only meaningful for swing positions; intraday
           // closes same day so the value would always be 0 and adds noise.
-          if (r.wl_type !== "swing") return <span className="text-text-secondary/40">—</span>;
+          if (r.wl_type !== "swing" && posChannel(r) !== "core") return <span className="text-text-secondary/40">—</span>;
           const days = computeDaysHeld(r.entry_ts);
           if (days == null) return <span className="text-text-secondary/40">—</span>;
           // Highlight long-hold swings (≥7 days) so user notices stale positions.
