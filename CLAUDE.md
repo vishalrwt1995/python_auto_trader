@@ -11,9 +11,9 @@ Algorithmic trading system for Indian equities. Runs on GCP (Cloud Run + Firesto
 ## 🚨 Critical rules — violating any of these has broken production before
 
 ### Rule 1 — Deploy hygiene (sync main dir BEFORE every code deploy)
-`gcloud run deploy --source "/Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader"` builds from the **main working directory**. If that directory is behind `origin/main`, you'll silently roll back commits. **Always run before deploying:**
+`gcloud run deploy --source "/Users/apple/Projects_Migrated/Auto Trading Python GCP/gcp_autotrader"` builds from the **main working directory**. If that directory is behind `origin/main`, you'll silently roll back commits. **Always run before deploying:**
 ```bash
-cd "/Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader"
+cd "/Users/apple/Projects_Migrated/Auto Trading Python GCP/gcp_autotrader"
 git fetch origin main
 git log origin/main..HEAD                 # MUST be empty
 git merge --ff-only origin/main            # if behind
@@ -32,7 +32,7 @@ subprocess.run(['git', 'commit', '-m', 'msg'], cwd='/path/to/worktree', capture_
 The `vishalrwt1995@gmail.com` account has NO on-disk credentials. Before any `gcloud run deploy`:
 ```bash
 export CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
-gcloud run deploy autotrader --source "/Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader" \
+gcloud run deploy autotrader --source "/Users/apple/Projects_Migrated/Auto Trading Python GCP/gcp_autotrader" \
   --region asia-south1 --project grow-profit-machine --quiet
 ```
 Without the env var, the deploy fails with `does not have any valid credentials`.
@@ -54,7 +54,7 @@ This codebase has 78 days × 2,638 symbols × 5.89M bars of real 5m candle data 
 Incident: 2026-06-15, the swing exit overhaul shipped but the *intraday* half had **no effect** for two reasons. Both must be checked for any exit-logic change:
 1. **Two services, two deploys.** The intraday tick-exit loop runs in the **separate** `autotrader-ws-monitor` service, built from `Dockerfile.ws` via `cloudbuild.ws.yaml` (entrypoint `python -m autotrader.services.ws_monitor_service`). `gcloud run deploy autotrader --source` does **NOT** touch it. To ship a ws_monitor/exit change:
    ```bash
-   cd "/Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader"
+   cd "/Users/apple/Projects_Migrated/Auto Trading Python GCP/gcp_autotrader"
    gcloud builds submit --config cloudbuild.ws.yaml --project grow-profit-machine --region asia-south1 .
    gcloud run deploy autotrader-ws-monitor --image gcr.io/grow-profit-machine/autotrader-ws-monitor:latest \
      --region asia-south1 --project grow-profit-machine   # preserves env + min-instances=1
@@ -101,7 +101,7 @@ Python trading service on Cloud Run (`autotrader` service). Cloud Scheduler trig
 
 ```bash
 # 1. Set ADC token (needed for any gcloud read/write)
-export PATH="/Users/vishalrawat/google-cloud-sdk/bin:$PATH"
+export PATH="/opt/homebrew/bin:$PATH"  # gcloud at /opt/homebrew/bin/gcloud (installed 2026-06-25)
 export CLOUDSDK_AUTH_ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
 
 # 2. Verify production state
@@ -164,8 +164,8 @@ bq --project_id=grow-profit-machine --location=asia-south1 query --use_legacy_sq
 
 ### Run the test suite
 ```bash
-cd "/Users/vishalrawat/Auto Trading Python GCP/gcp_autotrader"
-PYTHONPATH=src /usr/local/bin/python3.13 -m pytest tests/ \
+cd "/Users/apple/Projects_Migrated/Auto Trading Python GCP/gcp_autotrader"
+PYTHONPATH=src /Users/apple/Projects_Migrated/Auto Trading Python GCP/gcp_autotrader/.venv/bin/python3.13 -m pytest tests/ \
   -k "trading or watchlist or vwap or guard or policy or pnl or phase_c or m4_portfolio or backtest or time" \
   --ignore=tests/test_api_watchlist_logging.py --ignore=tests/test_market_brain_v2.py -q
 ```
@@ -176,7 +176,7 @@ Should yield 240+ passed.
 ## File layout (quick reference)
 
 ```
-/Users/vishalrawat/Auto Trading Python GCP/      ← project root, you are here
+/Users/apple/Projects_Migrated/Auto Trading Python GCP/      ← project root, you are here
 ├── CLAUDE.md                                     ← this file
 ├── .claude/                                      ← Claude Code settings + worktrees
 ├── gcp_autotrader/                               ← THE CODE
