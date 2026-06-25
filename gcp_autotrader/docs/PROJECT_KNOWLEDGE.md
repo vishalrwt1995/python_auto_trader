@@ -275,7 +275,34 @@ Built + deployed + enabled (PR #31; see §8). Live shipped-edge **+1.54% net/eve
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
 
-### 2026-06-26 (latest) — New Mac setup + prod sync (no code change)
+### 2026-06-26 (latest) — Score-cache-0705 OOM root-cause identified + scheduler fix applied (env-only, no code deploy)
+
+**Problem:** Cloud Run instance was dead/restarting from ~07:39-08:20 IST. All early-morning critical jobs (pead, corp, gap_fade 09:16, swing-0922) ran during/after recovery. Root cause: the `score-cache-update-close-0705` scheduler job has `attemptDeadline=1800s` (30 min), but was configured with `api_cap=1800&run_intraday_update=true&intraday_api_cap=1800`. At 07:05 IST, the expectedLCD flips overnight by one trading day (yesterday's close becomes the new expected), making all ~2,600 universe symbols stale simultaneously. At ~1 API call/sec, 1800 calls = 30 min exactly → scheduler disconnects at 1800s with status 4 (UNKNOWN/504), Cloud Run (timeoutSeconds=3600) keeps processing as a zombie. The instance accumulates memory loading candle data for ~2,600 symbols over the remaining 13+ min and OOM-crashes (confirmed: early logs missing, later scans visible, UNREACHABLE responses for 0820 job → zombie + no SIGTERM). Lock `score_cache_update_close` (TTL=3600s) also blocks the 0820 job's lock check until ~08:05 IST.
+
+**Why reducing api_cap is safe:**
+1. At scan time (09:22 IST), `trading_service._prefetch_candles_parallel` fetches **fresh 1D candles live from Upstox** (lookback_days=120) — NOT from the GCS score cache. `daily_bias` and `check_swing_entry` are computed from this live fetch. Score cache staleness does NOT affect signal quality.
+2. The GCS score cache is only used by `build_watchlist` for universe ranking (`universe_score`). One-day-stale data on RSI/EMA over 700 bars = negligible ranking change.
+3. The 0820 job (api_cap=600, `attemptDeadline=1800s`) covers 600 more symbols by 08:30 IST — still well before swing scan at 09:22.
+4. The 1600 job (api_cap=1800) does the definitive full-universe refresh each EOD.
+5. `run_intraday_update=false` is safe: at 07:05 IST, today's 5m data doesn't exist (market hasn't opened), and the previous 1600 run already populated yesterday's 5m cache. The 0820 job handles any remaining 5m gaps.
+
+**Fix (env-only, via `gcloud scheduler jobs update`):**
+- **Before:** `api_cap=1800&run_intraday_update=true&intraday_api_cap=1800` → ~2600 API calls → 43 min → OOM
+- **After:** `api_cap=400&run_intraday_update=false` → ~400 API calls → ~7 min → clean finish within 1800s deadline
+- No code deploy needed (Rule 4). Applied 2026-06-26 ~01:00 IST. Verified via `gcloud scheduler jobs describe`.
+
+**Today's health check (normal operation post-crash, ~10:42+ IST onward):**
+- Brain: RANGE_ROTATING all day, tact=77.9, trend_score=25.5, risk=NORMAL. Writing to BQ normally.
+- All 33 positions (30 CORE + 3 swing) held correctly — EOD squareoff fix (PR #46) confirmed working (15:25/27/29 IST logs showed CORE/swing correctly skipped).
+- Scans running normally from 10:42 IST onward after instance recovery.
+
+**Pending / still-open:**
+- `scan_decisions` BQ table showed 0 rows today — separate issue from the outage, BQ write path not yet investigated.
+- gap_fade 09:16 live validation still unconfirmed (2nd consecutive day — UNREACHABLE during crash window).
+
+---
+
+### 2026-06-26 — New Mac setup + prod sync (no code change)
 
 **Goal:** migrated to new Mac (username: apple). gcloud SDK installed (`/opt/homebrew/bin/gcloud` v574.0.0). ADC configured. All memory files restored. CLAUDE.md + PROJECT_KNOWLEDGE.md paths updated. Prod state verified: autotrader `00275-xt9`, dashboard `00069-pjk`, ws-monitor `00044-rmw`.
 
