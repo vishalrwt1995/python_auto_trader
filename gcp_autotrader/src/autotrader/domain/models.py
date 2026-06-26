@@ -336,6 +336,10 @@ class MarketBrainState:
     prev_regime: str = ""                    # regime value before the most recent transition
     regime_age_seconds: float = 0.0          # time in current regime (seconds since last transition)
     regime_transitions_today: int = 0        # count of regime flips since IST midnight
+    # Breadth gate: % of universe stocks above their EMA200 (survivorship-free proxy).
+    # Gate: MOMENTUM and PULLBACK setups blocked when breadth_ema200_pct < 70.0.
+    # Default 50.0 = neutral (allows trading) for backward compat with old Firestore docs.
+    breadth_ema200_pct: float = 50.0
     # Confidence-decay telemetry (informational; already applied to market_confidence)
     signal_age_penalty: float = 0.0          # 0..40 points shaved from market_confidence due to stale VIX/PCR/FII
 

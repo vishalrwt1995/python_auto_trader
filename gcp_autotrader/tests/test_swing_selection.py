@@ -90,6 +90,9 @@ def test_trading_service_has_new_swing_policy_blocks():
     assert "swing_rs_below_market" in src
     assert "swing_breadth_below_60" in src
     assert "swing_range_slots_full" in src
+    # 2026-06: breadth EMA200 gate + pb_slot reservation
+    assert "swing_breadth_ema200_below_70" in src
+    assert "swing_pb_slot_reserved" in src
     # the in-scan RANGE-group counter must be incremented on qualification
     assert "_open_swing_range_count += 1" in src
 

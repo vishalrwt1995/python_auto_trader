@@ -83,6 +83,7 @@ class MarketBreadthService:
                 "qualifiedCount": 0,
                 "aboveEma20Pct": 0.0,
                 "aboveEma50Pct": 0.0,
+                "aboveEma200Pct": 0.0,
                 "positive20dPct": 0.0,
                 "near20dHighPct": 0.0,
                 "near20dLowPct": 0.0,
@@ -97,6 +98,8 @@ class MarketBreadthService:
 
         above20 = 0
         above50 = 0
+        above200 = 0
+        above200_eligible = 0
         positive20 = 0
         near_high = 0
         near_low = 0
@@ -124,6 +127,10 @@ class MarketBreadthService:
                 above20 += 1
             if close > ema50:
                 above50 += 1
+            if len(closes) >= 201:
+                above200_eligible += 1
+                if close > self._ema_last(closes, 200):
+                    above200 += 1
 
             prev20 = float(closes[-21]) if float(closes[-21]) > 0 else 0.0
             ret20 = ((close / prev20) - 1.0) if prev20 > 0 else 0.0
@@ -150,6 +157,7 @@ class MarketBreadthService:
         denom = max(1, processed)
         above20_pct = (above20 * 100.0) / denom
         above50_pct = (above50 * 100.0) / denom
+        above200_pct = (above200 * 100.0) / above200_eligible if above200_eligible else 0.0
         positive20_pct = (positive20 * 100.0) / denom
         near_high_pct = (near_high * 100.0) / denom
         near_low_pct = (near_low * 100.0) / denom
@@ -197,6 +205,7 @@ class MarketBreadthService:
             "processedCount": int(processed),
             "aboveEma20Pct": float(round(above20_pct, 2)),
             "aboveEma50Pct": float(round(above50_pct, 2)),
+            "aboveEma200Pct": float(round(above200_pct, 2)),
             "positive20dPct": float(round(positive20_pct, 2)),
             "near20dHighPct": float(round(near_high_pct, 2)),
             "near20dLowPct": float(round(near_low_pct, 2)),

@@ -1558,11 +1558,35 @@ class TradingService:
                     # buying dips only works when the rising tide is wide. Validated
                     # threshold from the backtest breadth sweep (50/60/70 plateau).
                     policy_block_reason = "swing_breadth_below_60"
+                elif (
+                    _is_swing
+                    and _strategy_upper in ("MOMENTUM", "PULLBACK")
+                    and float(getattr(brain_state, "breadth_ema200_pct", 0.0) or 0.0) > 0.0
+                    and float(getattr(brain_state, "breadth_ema200_pct", 0.0) or 0.0) < 70.0
+                ):
+                    # Breadth gate (2026-06): MOMENTUM and PULLBACK only fire when
+                    # ≥70% of the universe is above their EMA200.  Validated in
+                    # 11-yr survivorship-free backtest (OOS Calmar 0.79 vs 0.10
+                    # baseline; step-up confirmed 66-71%, not a single threshold
+                    # cliff).  Uses 0.0 as "not yet populated" sentinel — gate
+                    # is bypassed on first deploy until the brain re-runs.
+                    policy_block_reason = "swing_breadth_ema200_below_70"
                 elif (str(w.symbol).strip().upper(), str(direction).strip().upper()) in _open_symbol_dirs:
                     # Same-symbol dedup: already hold this (symbol, direction)
                     # open. Blocks unintended doubling-up on one name (DMART
                     # was held twice). Applies to swing + intraday alike.
                     policy_block_reason = "symbol_already_held"
+                elif (
+                    _is_swing
+                    and _strategy_upper not in ("PULLBACK",)
+                    and _open_swing_count >= max(1, self.settings.strategy.swing_max_positions - 1)
+                ):
+                    # pb_slot (2026-06): last swing slot is reserved for PULLBACK.
+                    # PULLBACK signals are rare (~5/yr); reserving slot-N avoids them
+                    # being crowded out by MOMENTUM on the same scan tick.
+                    # Validated in 11-yr backtest: pb_slot OOS Calmar 0.79 vs 0.67
+                    # without it. Non-PULLBACK can only hold slots 1 through N-1.
+                    policy_block_reason = "swing_pb_slot_reserved"
                 elif _is_swing and _open_swing_count >= self.settings.strategy.swing_max_positions:
                     policy_block_reason = "swing_max_positions_reached"
                 elif (

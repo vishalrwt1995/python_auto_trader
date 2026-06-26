@@ -114,6 +114,7 @@ class MarketBrainService:
             regime_age_seconds=float(payload.get("regime_age_seconds") or 0.0),
             regime_transitions_today=int(payload.get("regime_transitions_today") or 0),
             signal_age_penalty=float(payload.get("signal_age_penalty") or 0.0),
+            breadth_ema200_pct=float(payload.get("breadth_ema200_pct") or 0.0),
         )
 
     def _should_emit_pubsub(self, state: MarketBrainState) -> bool:
@@ -232,6 +233,9 @@ class MarketBrainService:
             "regime_age_seconds": state.regime_age_seconds,
             "regime_transitions_today": state.regime_transitions_today,
             "signal_age_penalty": state.signal_age_penalty,
+            # Breadth gate field — BQ ALTER TABLE needed; bq.insert wrapper silently
+            # drops unknown columns, so a pre-migration deploy stays safe.
+            "breadth_ema200_pct": state.breadth_ema200_pct,
         }
         if self.bq:
             self.bq.insert_market_brain(bq_row)
@@ -1480,6 +1484,7 @@ class MarketBrainService:
             regime_age_seconds=float(round(regime_age_seconds, 2)),
             regime_transitions_today=int(regime_transitions_today),
             signal_age_penalty=float(signal_age_penalty),
+            breadth_ema200_pct=round(float(breadth.get("aboveEma200Pct") or 0.0), 2),
         )
 
         context = {
