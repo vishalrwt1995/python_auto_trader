@@ -59,12 +59,13 @@ def _svc(thresholds: RegimeThresholds | None = None) -> MarketBrainService:
     )
 
 
-def _prev(regime: str, *, asof: datetime | None = None, breadth_score: float = 50.0) -> MarketBrainState:
+def _prev(regime: str, *, asof: datetime | None = None, breadth_score: float = 50.0, regime_age_seconds: float = 0.0) -> MarketBrainState:
     asof_ts = (asof or now_ist()).astimezone(IST).isoformat()
     return MarketBrainState(
         asof_ts=asof_ts,
         regime=regime,  # type: ignore[arg-type]
         breadth_score=breadth_score,
+        regime_age_seconds=regime_age_seconds,
     )
 
 
@@ -234,15 +235,34 @@ def test_regime_former_chop_maps_to_range() -> None:
     assert r == "RANGE"
 
 
-def test_regime_recovery_only_from_stressed_prior() -> None:
+def test_regime_panic_exit_always_lands_in_recovery() -> None:
+    """Phase 2 (2026-06-27): any exit from PANIC must enter RECOVERY first.
+    Even scores that would normally produce TREND_UP are redirected to RECOVERY."""
     svc = _svc()
     prev = _prev("PANIC", asof=now_ist() - timedelta(minutes=10))
+    # Low vol_stress → PANIC guard clears; Phase 2 forces RECOVERY
     r = _call(svc, prev=prev, trend_score=45.0, breadth_score=40.0, leadership_score=45.0, volatility_stress_score=55.0)
     assert r == "RECOVERY"
-    # From a healthy prior, same scores just map to RANGE
+    # Even with strong scores that would normally be TREND_UP, still RECOVERY
+    r2 = _call(svc, prev=prev, trend_score=80.0, breadth_score=75.0, leadership_score=70.0, volatility_stress_score=30.0)
+    assert r2 == "RECOVERY"
+    # From a healthy prior (not PANIC), same scores map to RANGE
     prev_range = _prev("RANGE", asof=now_ist() - timedelta(minutes=10))
-    r2 = _call(svc, prev=prev_range, trend_score=45.0, breadth_score=40.0, leadership_score=45.0, volatility_stress_score=55.0)
-    assert r2 != "RECOVERY"
+    r3 = _call(svc, prev=prev_range, trend_score=45.0, breadth_score=40.0, leadership_score=45.0, volatility_stress_score=55.0)
+    assert r3 != "RECOVERY"
+
+
+def test_regime_recovery_holds_for_4_days() -> None:
+    """Phase 2: once in RECOVERY, it holds for 4 calendar days before RANGE/TREND_UP."""
+    svc = _svc()
+    # Young RECOVERY (1 day in) — should stay RECOVERY even if scores say TREND_UP
+    prev_rec_young = _prev("RECOVERY", asof=now_ist() - timedelta(minutes=10), regime_age_seconds=86400.0)  # 1 day
+    r = _call(svc, prev=prev_rec_young, trend_score=80.0, breadth_score=75.0, leadership_score=70.0, volatility_stress_score=30.0)
+    assert r == "RECOVERY"
+    # Old RECOVERY (5 days in) — should now exit to TREND_UP
+    prev_rec_old = _prev("RECOVERY", asof=now_ist() - timedelta(minutes=10), regime_age_seconds=5 * 86400.0)  # 5 days
+    r2 = _call(svc, prev=prev_rec_old, trend_score=80.0, breadth_score=75.0, leadership_score=70.0, volatility_stress_score=30.0)
+    assert r2 == "TREND_UP"
 
 
 def test_regime_panic_exit_guard_breadth_below() -> None:

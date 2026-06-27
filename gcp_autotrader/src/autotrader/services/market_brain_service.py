@@ -980,6 +980,18 @@ class MarketBrainService:
                 # which collapses data_quality via stale-writer penalties.
                 if volatility_stress_score > t.panic_exit_stress_above or breadth_score < t.panic_exit_breadth_below:
                     return "PANIC"
+                # Phase 2 (2026-06-27): force RECOVERY as the first post-PANIC regime.
+                # Prevents PANIC → TREND_UP in a single tick when scores bounce.
+                regime = "RECOVERY"
+
+        # Phase 2 (2026-06-27): hold RECOVERY for ~4 trading sessions after PANIC.
+        # regime_age_seconds accumulates calendar seconds; 4 days ≈ 4 × 86400 / 5 × 7 ≈
+        # 4 trading sessions. Prevents premature promotion when markets are still fragile.
+        if prev.regime == "RECOVERY" and regime in {"RANGE", "RANGE_ROTATING", "TREND_UP"}:
+            _recovery_age_days = float(getattr(prev, "regime_age_seconds", 0) or 0) / 86400
+            if _recovery_age_days < 4.0:
+                return "RECOVERY"
+
         if prev.regime == "TREND_UP" and regime != "TREND_UP":
             if (
                 trend_score >= t.trend_up_hold_trend_min
