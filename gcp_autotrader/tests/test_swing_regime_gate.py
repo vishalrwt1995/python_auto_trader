@@ -1,34 +1,37 @@
 """Tests for the 2026-06 swing-config per-setup regime gate.
 
-The validated config trades exactly three long cells, each only in its regime bucket:
+The validated config trades three long cells:
   MOMENTUM / PULLBACK → uptrend bucket {TREND_UP}
-  MEAN_REVERSION       → range bucket  {RANGE, RANGE_ROTATING}
-Every other regime trades none of the three. Other setups (BREAKOUT, shorts,
-intraday) pass through this gate and are governed by _HARD_BLOCKS instead.
+  MEAN_REVERSION       → range/recovery bucket {RANGE, RANGE_ROTATING, RECOVERY}
+Phase 4 (2026-06-27): RECOVERY added for MR — post-PANIC oversold snaps are
+the sweet spot for mean reversion (affinity dict had RECOVERY → MR 0.7× already).
+Other setups (BREAKOUT, shorts, intraday) pass through this gate and are
+governed by _HARD_BLOCKS instead.
 """
 from __future__ import annotations
 
 from autotrader.domain.regime_affinity import swing_setup_allowed_in_regime
 
-_BLOCKED_FOR_LONGS = ("PANIC", "TREND_DOWN", "RECOVERY")
+_TREND_BLOCKED = ("RANGE", "RANGE_ROTATING", "PANIC", "TREND_DOWN", "RECOVERY")
+_MR_BLOCKED = ("TREND_UP", "PANIC", "TREND_DOWN")
 
 
 def test_momentum_only_in_uptrend_bucket():
     assert swing_setup_allowed_in_regime("MOMENTUM", "TREND_UP")
-    for r in ("RANGE", "RANGE_ROTATING", *_BLOCKED_FOR_LONGS):
+    for r in _TREND_BLOCKED:
         assert not swing_setup_allowed_in_regime("MOMENTUM", r), r
 
 
 def test_pullback_only_in_uptrend_bucket():
     assert swing_setup_allowed_in_regime("PULLBACK", "TREND_UP")
-    for r in ("RANGE", "RANGE_ROTATING", *_BLOCKED_FOR_LONGS):
+    for r in _TREND_BLOCKED:
         assert not swing_setup_allowed_in_regime("PULLBACK", r), r
 
 
-def test_mean_reversion_only_in_range_bucket():
-    assert swing_setup_allowed_in_regime("MEAN_REVERSION", "RANGE")
-    assert swing_setup_allowed_in_regime("MEAN_REVERSION", "RANGE_ROTATING")
-    for r in ("TREND_UP", *_BLOCKED_FOR_LONGS):
+def test_mean_reversion_in_range_and_recovery_bucket():
+    for r in ("RANGE", "RANGE_ROTATING", "RECOVERY"):
+        assert swing_setup_allowed_in_regime("MEAN_REVERSION", r), r
+    for r in _MR_BLOCKED:
         assert not swing_setup_allowed_in_regime("MEAN_REVERSION", r), r
 
 

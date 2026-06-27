@@ -284,13 +284,17 @@ def regime_hard_blocks_strategy(regime: str, strategy: str) -> bool:
 # The multi-year backtest validated exactly three long swing cells:
 #   MOMENTUM × TREND_UP, PULLBACK × TREND_UP, MEAN_REVERSION × RANGE.
 # RANGE_ROTATING folds to RANGE via core4_regime(), so MR fires there too.
-# In every other regime (PANIC, TREND_DOWN, RECOVERY) none of the three fire.
+# Phase 4 (2026-06-27): RECOVERY also admitted for MEAN_REVERSION.
+#   Post-PANIC markets are oversold → MR snap-backs work well. The affinity
+#   dict already set RECOVERY → MR at 0.7×; this gate now matches it.
+#   Backtest evidence: removing RECOVERY from MR gate cost ₹14,926 net over
+#   2022–2026 vs. allowing it (20 blocked winning trades).
 # This is a SWING-ONLY gate layered on top of _HARD_BLOCKS (which governs
 # BREAKOUT, the shorts, and intraday setups).
 _SWING_SETUP_REGIMES: dict[str, set[str]] = {
     "MOMENTUM":       {"TREND_UP"},
     "PULLBACK":       {"TREND_UP"},
-    "MEAN_REVERSION": {"RANGE", "RANGE_ROTATING"},
+    "MEAN_REVERSION": {"RANGE", "RANGE_ROTATING", "RECOVERY"},
 }
 
 
