@@ -338,10 +338,6 @@ class RegimeThresholds:
     trend_down_trend_max: float = 36.0
     trend_down_breadth_max: float = 40.0
     trend_down_leadership_max: float = 45.0
-    # CHOP entry
-    chop_stress_min: float = 62.0
-    chop_leadership_max: float = 46.0
-    chop_appetite_max: float = 46.0
     # RECOVERY entry
     recovery_trend_min: float = 40.0
     recovery_breadth_min: float = 35.0
@@ -530,9 +526,6 @@ class AppSettings:
                 trend_down_trend_max=_env_float("REGIME_TREND_DOWN_TREND_MAX", 36.0),
                 trend_down_breadth_max=_env_float("REGIME_TREND_DOWN_BREADTH_MAX", 40.0),
                 trend_down_leadership_max=_env_float("REGIME_TREND_DOWN_LEADERSHIP_MAX", 45.0),
-                chop_stress_min=_env_float("REGIME_CHOP_STRESS_MIN", 62.0),
-                chop_leadership_max=_env_float("REGIME_CHOP_LEADERSHIP_MAX", 46.0),
-                chop_appetite_max=_env_float("REGIME_CHOP_APPETITE_MAX", 46.0),
                 recovery_trend_min=_env_float("REGIME_RECOVERY_TREND_MIN", 40.0),
                 recovery_breadth_min=_env_float("REGIME_RECOVERY_BREADTH_MIN", 35.0),
                 recovery_leadership_min=_env_float("REGIME_RECOVERY_LEADERSHIP_MIN", 40.0),

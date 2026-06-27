@@ -453,8 +453,8 @@ def test_affinity_disabled_uses_raw_score(monkeypatch):
 # ── Regime hard-blocks ───────────────────────────────────────────────────
 
 
-def test_hard_block_drops_breakout_in_chop(monkeypatch):
-    """CHOP regime hard-blocks BREAKOUT — even a 100-score signal must not fire."""
+def test_hard_block_drops_breakout_in_range(monkeypatch):
+    """RANGE regime hard-blocks BREAKOUT — even a 100-score signal must not fire."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=100.0, atr=1.0)
 
     cfg = rp.PureReplayConfig(
@@ -464,7 +464,7 @@ def test_hard_block_drops_breakout_in_chop(monkeypatch):
     )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(
-        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+        cfg=cfg, brain=_brain_with_regime("RANGE"), warmup_bars=warmup,
     )
 
     bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
@@ -473,13 +473,13 @@ def test_hard_block_drops_breakout_in_chop(monkeypatch):
     result = eng.run(bars)
 
     assert len(result.trades) == 0, (
-        "BREAKOUT in CHOP must be hard-blocked by pure-replay (matches live "
+        "BREAKOUT in RANGE must be hard-blocked by pure-replay (matches live "
         "scan_service policy gate)."
     )
 
 
 def test_hard_block_disabled_lets_blocked_setup_through(monkeypatch):
-    """With apply_hard_blocks=False, BREAKOUT in CHOP fires anyway —
+    """With apply_hard_blocks=False, BREAKOUT in RANGE fires anyway —
     useful for counterfactual 'what if we removed this gate' studies."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
 
@@ -490,7 +490,7 @@ def test_hard_block_disabled_lets_blocked_setup_through(monkeypatch):
     )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(
-        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+        cfg=cfg, brain=_brain_with_regime("RANGE"), warmup_bars=warmup,
     )
 
     bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
@@ -502,7 +502,7 @@ def test_hard_block_disabled_lets_blocked_setup_through(monkeypatch):
 
 
 def test_hard_block_does_not_affect_unrelated_setup_in_same_regime(monkeypatch):
-    """CHOP hard-blocks BREAKOUT but allows VWAP_REVERSAL — verify only
+    """RANGE hard-blocks BREAKOUT but allows VWAP_REVERSAL — verify only
     the blocked setup is dropped, not all signals in that regime."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=85.0, atr=1.0)
 
@@ -514,7 +514,7 @@ def test_hard_block_does_not_affect_unrelated_setup_in_same_regime(monkeypatch):
     )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
     strat = rp.PureReplayStrategy(
-        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+        cfg=cfg, brain=_brain_with_regime("RANGE"), warmup_bars=warmup,
     )
 
     bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
@@ -601,9 +601,9 @@ def test_brain_haircut_disabled_passes_marginal_score(monkeypatch):
     assert len(result.trades) == 1
 
 
-def test_brain_haircut_chop_panic_extra_penalty(monkeypatch):
-    """CHOP/PANIC regimes get an extra ×0.88 on top of the risk_mode multiplier.
-    NORMAL × CHOP: ×1.0 × 0.88 = ×0.88. Raw 80 → 70 < 72, blocked.
+def test_brain_haircut_panic_extra_penalty(monkeypatch):
+    """PANIC regime gets an extra ×0.88 on top of the risk_mode multiplier.
+    NORMAL × PANIC: ×1.0 × 0.88 = ×0.88. Raw 80 → 70 < 72, blocked.
     NORMAL × RANGE: ×1.0 × 1.0 = ×1.0. Raw 80 → 80 ≥ 72, fires."""
     _patch_score_pipeline(monkeypatch, direction="BUY", score=80.0, atr=1.0)
     cfg = rp.PureReplayConfig(
@@ -614,14 +614,14 @@ def test_brain_haircut_chop_panic_extra_penalty(monkeypatch):
         apply_brain_haircut=True,
     )
     warmup = {"ACME": _make_warmup_bars("ACME", 90)}
-    # CHOP path → blocked by haircut.
-    strat_chop = rp.PureReplayStrategy(
-        cfg=cfg, brain=_brain_with_regime("CHOP"), warmup_bars=warmup,
+    # PANIC path → blocked by haircut.
+    strat_panic = rp.PureReplayStrategy(
+        cfg=cfg, brain=_brain_with_regime("PANIC"), warmup_bars=warmup,
     )
     bars = [_bar("ACME", f"2026-04-16T09:{30+i*5:02d}:00+05:30") for i in range(3)]
-    acc_chop = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
-    res_chop = BacktestEngine(account=acc_chop, strategy=strat_chop).run(bars)
-    assert len(res_chop.trades) == 0
+    acc_panic = SimAccount(SimAccountConfig(starting_cash=1_000_000.0), slippage=NoSlippage())
+    res_panic = BacktestEngine(account=acc_panic, strategy=strat_panic).run(bars)
+    assert len(res_panic.trades) == 0
 
 
 # ── Dynamic min_signal_score ─────────────────────────────────────────────

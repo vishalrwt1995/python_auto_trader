@@ -142,12 +142,12 @@ def test_narrative_headline_mentions_regime_risk_and_confidence() -> None:
 @pytest.mark.parametrize(
     "regime,expected_substring",
     [
-        ("TREND_UP",   "up-trend"),
-        ("TREND_DOWN", "down-trend"),
-        ("RANGE",      "range-bound"),
-        ("CHOP",       "choppy"),
-        ("PANIC",      "PANIC"),
-        ("RECOVERY",   "recovery"),
+        ("TREND_UP",       "up-trend"),
+        ("TREND_DOWN",     "down-trend"),
+        ("RANGE",          "range-bound"),
+        ("PANIC",          "PANIC"),
+        ("RECOVERY",       "recovery"),
+        ("RANGE_ROTATING", "range"),
     ],
 )
 def test_narrative_regime_phrase(regime: str, expected_substring: str) -> None:
@@ -192,9 +192,9 @@ def test_narrative_flags_transition_with_prev_regime() -> None:
 
 def test_narrative_warns_on_flippy_regime() -> None:
     svc = _svc()
-    st = _state(regime="CHOP", prev_regime="RANGE", regime_transitions_today=4)
+    st = _state(regime="RANGE_ROTATING", prev_regime="RANGE", regime_transitions_today=4)
     ctx = _ctx(regimeTransition={
-        "isTransition": True, "fromRegime": "RANGE", "toRegime": "CHOP",
+        "isTransition": True, "fromRegime": "RANGE", "toRegime": "RANGE_ROTATING",
         "ageSeconds": 0.0, "transitionsToday": 4,
     })
     n = svc.build_narrative(st, ctx)

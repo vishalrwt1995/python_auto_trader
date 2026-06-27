@@ -1222,7 +1222,7 @@ class TradingService:
 
                 if _brain_risk == "LOCKDOWN" or _brain_regime == "PANIC":
                     _atr_mult = round(self.settings.strategy.atr_sl_mult * 0.75, 3)
-                elif _brain_risk == "DEFENSIVE" or _brain_regime in ("TREND_DOWN", "CHOP"):
+                elif _brain_risk == "DEFENSIVE" or _brain_regime == "TREND_DOWN":
                     _atr_mult = round(self.settings.strategy.atr_sl_mult * 0.87, 3)
                 elif _brain_risk == "AGGRESSIVE" and _brain_regime == "TREND_UP":
                     _atr_mult = round(self.settings.strategy.atr_sl_mult * 1.20, 3)
@@ -1299,7 +1299,7 @@ class TradingService:
 
                 # ── Dynamic min_signal_score (Item 3) ────────────────────────
                 # adjust_signal() already penalises adjusted_score by 0.60–0.82×
-                # in DEFENSIVE/LOCKDOWN + an extra 0.88× in PANIC/CHOP regime.
+                # in DEFENSIVE/LOCKDOWN + an extra 0.88× in PANIC regime.
                 # Keeping a static threshold of 72 means even a raw-90 signal
                 # gets filtered in PANIC (90 × 0.72 = 64.8 < 72).  We lower the
                 # threshold proportionally so the *top decile* of raw signals
@@ -1331,7 +1331,7 @@ class TradingService:
                     # 2026-04-22 post-mortem: swing had 0 trades in 10 days because
                     # `adjusted_score` is haircut by risk_mode (×0.60–1.08) and
                     # chop/panic regime (×0.88) BEFORE being compared to the fixed
-                    # 75 swing threshold. In DEFENSIVE+CHOP (common in April) a
+                    # 75 swing threshold. In DEFENSIVE+PANIC (common in April) a
                     # raw-80 signal becomes adjusted-57 → blocked. The Market Brain
                     # multiplier is designed to dampen intraday size/frequency, not
                     # to double-penalise swing (which already has a hard 75 bar and
@@ -1363,7 +1363,7 @@ class TradingService:
                     # applies, so wave-of-low-quality trades remains capped.
                     if (
                         brain_state is not None
-                        and _brain_regime in ("RANGE", "CHOP")
+                        and _brain_regime in ("RANGE", "RANGE_ROTATING")
                         and getattr(brain_state, "breadth_score", 0) > 85
                         and getattr(brain_state, "trend_score", 50) < 30
                     ):
@@ -1484,7 +1484,7 @@ class TradingService:
                     policy_block_reason = "policy_short_disabled"
                 elif (
                     direction == "SELL"
-                    and _brain_regime in ("RANGE", "CHOP", "RECOVERY")
+                    and _brain_regime in ("RANGE", "RANGE_ROTATING", "RECOVERY")
                     and brain_state is not None
                     and brain_state.breadth_score >= 75
                     # P1 (2026-04-22): exempt swing shorts whose OWN daily trend
@@ -1528,12 +1528,12 @@ class TradingService:
                     policy_block_reason = "swing_short_breakdown_pre_10am"
                 elif regime_hard_blocks_strategy(_brain_regime, w.strategy):
                     # Regime playbook: hard-block mismatched strategies (e.g. BREAKOUT in RANGE,
-                    # any entry in CHOP). Stronger than the affinity multiplier — prevents
+                    # blocked strategies (e.g. BREAKOUT in RANGE). Stronger than the affinity multiplier — prevents
                     # wasting a position slot on a setup that can't work in this regime.
                     policy_block_reason = "regime_strategy_hard_block"
                 elif _is_swing and not swing_setup_allowed_in_regime(w.strategy, _brain_regime):
                     # 2026-06 swing-config: the three validated long cells fire only in
-                    # their regime bucket — MOMENTUM/PULLBACK in {TREND_UP, EARLY_TREND_UP},
+                    # their regime bucket — MOMENTUM/PULLBACK in {TREND_UP},
                     # MEAN_REVERSION in {RANGE, RANGE_ROTATING}. Every other regime trades
                     # none of the three. See regime_affinity._SWING_SETUP_REGIMES.
                     policy_block_reason = "swing_setup_regime_gate"

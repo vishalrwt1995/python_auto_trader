@@ -1,14 +1,11 @@
-"""Swing CORE-4 regime fold (2026-06-24).
+"""Swing CORE-4 regime fold (2026-06-24, updated 2026-06-27).
 
-Production swing diverged from the validated backtest because `trading_service`
-fed the brain's REFINED regime (RANGE_ROTATING, EARLY_TREND_UP) into the gates,
-while every validated backtest gates on CORE-4 folded regimes
-(`brain_reconstruct.CORE_MAP`). The intended, core-4-validated playbook then
-vetoed validated swing cells on refined-regime days (the RANGE_ROTATING drought).
+`regime_affinity.core4_regime` folds RANGE_ROTATING → RANGE before the swing
+gates so live matches the backtest. EARLY_TREND_UP/DOWN have been removed from
+the regime set entirely (2026-06-27); the fold now only covers RANGE_ROTATING.
 
-`regime_affinity.core4_regime` folds refined->base before the SWING gates so live
-matches the backtest. These tests lock the mapping, its parity with the backtest's
-CORE_MAP, the playbook-unblock effect, and that trading_service actually wires it.
+These tests lock the mapping, parity with the backtest CORE_MAP, and that
+trading_service wires the fold correctly.
 """
 from __future__ import annotations
 
@@ -20,14 +17,12 @@ from autotrader.services import trading_service as ts_mod
 
 
 # ── core4_regime mapping ─────────────────────────────────────────────────
-def test_core4_regime_folds_refined_to_base():
+def test_core4_regime_folds_range_rotating_to_range():
     assert core4_regime("RANGE_ROTATING") == "RANGE"
-    assert core4_regime("EARLY_TREND_UP") == "TREND_UP"
-    assert core4_regime("EARLY_TREND_DOWN") == "TREND_DOWN"
 
 
 def test_core4_regime_identity_on_base_regimes():
-    for r in ("TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"):
+    for r in ("TREND_UP", "TREND_DOWN", "RANGE", "PANIC", "RECOVERY"):
         assert core4_regime(r) == r
 
 
@@ -43,25 +38,15 @@ def test_core4_fold_matches_backtest_core_map():
     assert _CORE4_FOLD == CORE_MAP
 
 
-# ── the fold makes the playbook stop vetoing the validated cells ──────────
-def test_fold_unblocks_mean_reversion_in_range_rotating():
-    # Without the fold, the playbook vetoes MR in RANGE_ROTATING (edge.py predates it).
+# ── MR is allowed in RANGE_ROTATING (directly and via fold) ──────────────
+def test_mean_reversion_allowed_in_range_rotating():
+    # edge.py explicitly lists RANGE_ROTATING so the playbook allows it directly.
     raw_ok, _ = check_playbook(setup="MEAN_REVERSION", direction="BUY", regime="RANGE_ROTATING")
-    assert raw_ok is False
-    # Folded to RANGE -> allowed, exactly as a real RANGE day.
+    assert raw_ok is True
+    # Folded to RANGE -> also allowed, same result.
     folded_ok, _ = check_playbook(setup="MEAN_REVERSION", direction="BUY", regime=core4_regime("RANGE_ROTATING"))
     range_ok, _ = check_playbook(setup="MEAN_REVERSION", direction="BUY", regime="RANGE")
-    assert folded_ok is True
     assert folded_ok == range_ok
-
-
-def test_fold_unblocks_momentum_pullback_in_early_trend_up():
-    for setup in ("MOMENTUM", "PULLBACK"):
-        raw_ok, _ = check_playbook(setup=setup, direction="BUY", regime="EARLY_TREND_UP")
-        assert raw_ok is False, f"{setup} unexpectedly allowed without fold"
-        folded_ok, _ = check_playbook(setup=setup, direction="BUY", regime=core4_regime("EARLY_TREND_UP"))
-        tup_ok, _ = check_playbook(setup=setup, direction="BUY", regime="TREND_UP")
-        assert folded_ok is True and folded_ok == tup_ok
 
 
 def test_fold_is_identity_for_base_regimes_in_playbook():

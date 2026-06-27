@@ -162,8 +162,8 @@ class MarketBrainService:
         # "last-known-good" and contaminating future fallback reads.
         # Whitelist derived from the MarketRegimeV2 type = single source of truth,
         # so it can never drift from the classifier again. (Bug 2026-06-01: the old
-        # hardcoded set was missing Phase-D EARLY_TREND_UP/DOWN + RANGE_ROTATING,
-        # silently blocking persistence whenever the brain produced them → brain
+        # hardcoded set was missing RANGE_ROTATING,
+        # silently blocking persistence whenever the brain produced it → brain
         # froze at the last valid regime, e.g. stuck at 09:42 on June 1.)
         _valid_regimes = {str(r).upper() for r in get_args(MarketRegimeV2)}
         _valid_risk_modes = {"NORMAL", "DEFENSIVE", "AGGRESSIVE", "LOCKDOWN"}
@@ -646,8 +646,6 @@ class MarketBrainService:
             structure_state = "MATURE_TREND"
         elif regime == "TREND_DOWN" and breadth_delta < -2.0:
             structure_state = "DISTRIBUTION"
-        elif regime == "CHOP":
-            structure_state = "CHOPPY_NOISE"
         elif regime == "RANGE" and volatility_stress_score < 45.0:
             structure_state = "ORDERLY_RANGE"
         elif regime == "RANGE":
@@ -676,8 +674,6 @@ class MarketBrainService:
             sub_regime = "NARROW_TREND"
         elif regime == "TREND_DOWN" and volatility_stress_score < 55.0 and breadth_delta >= 2.0:
             sub_regime = "SHORT_COVERING_BOUNCE"
-        elif regime == "CHOP":
-            sub_regime = "HIGH_NOISE_CHOP" if volatility_stress_score >= 62.0 else "LOW_CONVICTION_CHOP"
         elif regime == "RANGE":
             sub_regime = "HEALTHY_RANGE" if volatility_stress_score < 45.0 and data_quality_score >= 70.0 else "LOW_CONVICTION_RANGE"
 
@@ -690,7 +686,7 @@ class MarketBrainService:
             event_state = "STRESS_EVENT"
         elif now_i.astimezone(IST).weekday() == 3 and phase in {"POST_OPEN", "LIVE"}:
             event_state = "EXPIRY_SESSION"
-        elif regime in {"CHOP", "PANIC"} and liquidity_health_score < 55.0 and risk_appetite < 45.0:
+        elif regime == "PANIC" and liquidity_health_score < 55.0 and risk_appetite < 45.0:
             event_state = "EXECUTION_FRAGILITY"
 
         return sub_regime, structure_state, recovery_state, event_state
@@ -966,52 +962,13 @@ class MarketBrainService:
         ):
             regime = "TREND_DOWN"
         elif (
-            volatility_stress_score >= t.chop_stress_min
-            and leadership_score <= t.chop_leadership_max
-            and risk_appetite <= t.chop_appetite_max
-        ):
-            regime = "CHOP"
-        elif (
             prev is not None
-            and prev.regime in {"PANIC", "TREND_DOWN", "CHOP"}
+            and prev.regime in {"PANIC", "TREND_DOWN"}
             and trend_score >= t.recovery_trend_min
             and breadth_score >= t.recovery_breadth_min
             and leadership_score >= t.recovery_leadership_min
         ):
             regime = "RECOVERY"
-
-        # E2E audit 2026-05-26 — EARLY_TREND_UP / EARLY_TREND_DOWN.
-        #
-        # The structural regime classification above lags by 10-15 sessions
-        # because trend_score is anchored on EMA50/EMA200. When the market
-        # transitions (e.g., NIFTY crosses EMA50 from below), this code
-        # stays in RANGE long after the new trend has begun.
-        #
-        # tactical_trend_score (EMA20/EMA50 + 10-day return) reacts in
-        # 3-5 sessions. We upgrade RANGE → EARLY_TREND_UP/DOWN when the
-        # fast signal confirms direction AND the structural signal hasn't
-        # contradicted it.
-        #
-        # Industry validation: Stan Weinstein's stage transitions, AQR/
-        # Winton 2-of-3 timeframe voting, Carver's "Tribend" concept.
-        #
-        # Downstream: EARLY_* regimes inherit TREND_* hard-blocks but get
-        # smaller affinity multipliers (see regime_affinity.py). Position
-        # sizing applies normally — half-size could be added later as a
-        # separate change.
-        if regime == "RANGE":
-            # Don't override if vol_stress is high (RANGE-with-vol is
-            # legitimate, fast signal could whipsaw).
-            _safe_vol = volatility_stress_score <= 65.0
-            # Don't override on data-quality issues.
-            _safe_dq = data_quality_score >= 60.0
-            if _safe_vol and _safe_dq:
-                # Fast bullish but structural not yet confirmed
-                if tactical_trend_score >= 70.0 and trend_score >= 25.0:
-                    regime = "EARLY_TREND_UP"
-                # Fast bearish but structural not yet confirmed
-                elif tactical_trend_score <= 30.0 and trend_score <= 75.0:
-                    regime = "EARLY_TREND_DOWN"
 
         if prev is None:
             return regime
@@ -1070,7 +1027,7 @@ class MarketBrainService:
             return "LOCKDOWN"
         if (
             regime == "PANIC"
-            or regime in {"CHOP", "TREND_DOWN"}
+            or regime == "TREND_DOWN"
             or volatility_stress_score >= t.defensive_stress_min
             or data_quality_score < t.defensive_dq_max
         ):
@@ -1091,8 +1048,6 @@ class MarketBrainService:
             long_bias, short_bias = 0.78, 0.22
         elif regime == "TREND_DOWN":
             long_bias, short_bias = 0.22, 0.78
-        elif regime == "CHOP":
-            long_bias, short_bias = 0.48, 0.52
         elif regime == "PANIC":
             long_bias, short_bias = 0.15, 0.85
         elif regime == "RECOVERY":
@@ -1174,7 +1129,7 @@ class MarketBrainService:
         )
         trend_score = self._compute_trend_score(regime_ctx)
         # E2E audit 2026-05-26: fast trend signal complementing slow trend_score.
-        # Enables EARLY_TREND_UP/DOWN regime detection 5-10 days before
+        # tactical_trend_score complements trend_score (EMA50/200) with a faster
         # the EMA50/EMA200-based trend_score catches up.
         tactical_trend_score = self._compute_tactical_trend(regime_ctx)
         breadth = self.compute_breadth_snapshot(expected_lcd=expected_lcd, rows=rows)
@@ -1271,7 +1226,7 @@ class MarketBrainService:
         intraday_state = self._classify_intraday_state(phase=phase, regime_ctx=regime_ctx)
         long_bias, short_bias = self._map_bias(regime, participation)
         swing_permission = "ENABLED"
-        if regime in {"CHOP", "RECOVERY"}:
+        if regime == "RECOVERY":
             swing_permission = "REDUCED"
         if regime in {"TREND_DOWN", "PANIC"}:
             # REDUCED instead of DISABLED: mean-reversion swings are
@@ -1328,12 +1283,12 @@ class MarketBrainService:
             "PHASE1_REVERSAL",   # 2026-05-08: same fix for the bearish-regime variant
             "MORNING_FADE",      # included for completeness (hard-blocked elsewhere)
         ]
-        if regime in {"CHOP", "PANIC"}:
+        if regime == "PANIC":
             # Remove momentum-chasing strategies; keep reversal/mean-reversion.
             # PULLBACK stays: short-side pullbacks are valid in bear markets.
             # PHASE1_MOMENTUM removed alongside MOMENTUM (same chasing-strength
-            # rationale fails in chop/panic). PHASE1_REVERSAL kept — oversold
-            # bounces are the primary edge in panic/chop.
+            # rationale fails in panic). PHASE1_REVERSAL kept — oversold
+            # bounces are the primary edge in panic.
             allowed_strategies = [s for s in allowed_strategies if s not in {"BREAKOUT", "OPEN_DRIVE", "MOMENTUM", "PHASE1_MOMENTUM"}]
         if regime in {"TREND_DOWN"}:
             # Down-trend: remove BREAKOUT (upside breakouts fail) and MOMENTUM
@@ -1710,7 +1665,6 @@ class MarketBrainService:
             "TREND_UP":   "Markets are in a confirmed up-trend",
             "TREND_DOWN": "Markets are in a confirmed down-trend",
             "RANGE":      "Markets are range-bound",
-            "CHOP":       "Markets are choppy with no clean direction",
             "PANIC":      "Markets are in PANIC — extreme stress detected",
             "RECOVERY":   "Markets are attempting a recovery from a stressed regime",
         }.get(regime, f"Regime is {regime}")

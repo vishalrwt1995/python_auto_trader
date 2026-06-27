@@ -57,7 +57,7 @@ class MarketPolicyService:
             dynamic_sector_cap_share = 0.12
             correlation_threshold = 0.75
 
-        if regime in {"CHOP", "PANIC"}:
+        if regime in {"PANIC"}:
             breakout_enabled = False
             open_drive_enabled = False
             # No additional score boost — the allowed_strategies filter
@@ -167,7 +167,7 @@ class MarketPolicyService:
             mult = 0.82
         else:
             mult = 0.60
-        if state.regime in {"CHOP", "PANIC"}:
+        if state.regime in {"PANIC"}:
             mult *= 0.88
         return int(max(0, min(100, round(base * mult))))
 

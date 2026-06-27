@@ -116,7 +116,7 @@ def _register_defaults() -> None:
         direction="LONG",
         # Mean-reversion plays the bounces best in PANIC / RANGE. Trend regimes
         # chew up mean-reversion signals (you're fading the dominant move).
-        allowed_regimes=("RANGE", "CHOP", "PANIC", "RECOVERY"),
+        allowed_regimes=("RANGE", "RANGE_ROTATING", "PANIC", "RECOVERY"),
         summary="Bollinger/RSI extreme reversal long; capitulation bounces.",
         priors_key="MEAN_REVERSION:LONG",
     ))
@@ -125,7 +125,7 @@ def _register_defaults() -> None:
         version="v1",
         setup="MEAN_REVERSION",
         direction="SHORT",
-        allowed_regimes=("RANGE", "CHOP"),
+        allowed_regimes=("RANGE",),
         summary="Overbought fade short; only in non-trending tape.",
         priors_key="MEAN_REVERSION:SHORT",
     ))

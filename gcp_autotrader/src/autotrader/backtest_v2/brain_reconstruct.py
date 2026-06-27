@@ -47,7 +47,7 @@ DAILY_TABLE = f"{PROJECT}.autotrader.candles_daily"
 # Stable core-4 regime: fold the recently-added (May-2026) refinement regimes
 # into their long-standing base, so a 2022-2026 backtest uses the regime logic
 # that was stable across the whole window.
-CORE_MAP = {"EARLY_TREND_UP": "TREND_UP", "EARLY_TREND_DOWN": "TREND_DOWN", "RANGE_ROTATING": "RANGE"}
+CORE_MAP = {"RANGE_ROTATING": "RANGE"}
 
 
 def core(regime: str) -> str:

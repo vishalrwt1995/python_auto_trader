@@ -75,22 +75,6 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "AUTO": 1.0,
         "DEFAULT": 1.0,
     },
-    "CHOP": {
-        "BREAKOUT": 0.3,
-        "SHORT_BREAKDOWN": 0.3,
-        "PULLBACK": 0.5,
-        "SHORT_PULLBACK": 0.5,
-        "MEAN_REVERSION": 1.2,
-        "VWAP_REVERSAL": 1.1,
-        "VWAP_TREND": 0.4,
-        "OPEN_DRIVE": 0.5,
-        "PHASE1_MOMENTUM": 0.4,
-        "PHASE1_REVERSAL": 0.9,   # choppy index can still produce oversold individual-stock bounces
-        "MOMENTUM": 0.4,          # momentum persistence breaks down in chop
-        "MORNING_FADE": 1.3,      # CHOP = pure mean-reverting; fades work great
-        "AUTO": 0.7,
-        "DEFAULT": 0.7,
-    },
     "PANIC": {
         "BREAKOUT": 0.2,
         "SHORT_BREAKDOWN": 0.8,
@@ -146,44 +130,6 @@ _AFFINITY: dict[str, dict[str, float]] = {
         "MORNING_FADE": 0.5,      # hard-blocked downstream
         "AUTO": 1.0,
         "DEFAULT": 1.0,
-    },
-    # Phase D 2026-05-26 — EARLY_TREND_UP / EARLY_TREND_DOWN.
-    # Multipliers ~70-80% of full TREND_* values. Rationale: fast tactical
-    # signal confirms direction but structural EMAs haven't yet — direction
-    # is plausible but not confirmed. Use moderate multipliers (not 1.4×)
-    # to size into the move conservatively. If structural catches up,
-    # regime becomes full TREND_UP/DOWN automatically.
-    "EARLY_TREND_UP": {
-        "BREAKOUT": 1.0,          # hard-blocked downstream (no pattern detector yet)
-        "SHORT_BREAKDOWN": 0.4,   # shorting nascent rally = wrong side
-        "PULLBACK": 1.1,          # buying dips in early uptrend is sound
-        "SHORT_PULLBACK": 0.5,
-        "MEAN_REVERSION": 0.7,    # not the primary edge but acceptable
-        "VWAP_REVERSAL": 0.6,
-        "VWAP_TREND": 1.0,        # neutral — let scoring decide
-        "OPEN_DRIVE": 1.0,
-        "PHASE1_MOMENTUM": 1.0,
-        "PHASE1_REVERSAL": 0.8,
-        "MOMENTUM": 1.2,          # near-full bonus — leading stocks extend
-        "MORNING_FADE": 0.4,
-        "AUTO": 1.0,
-        "DEFAULT": 1.0,
-    },
-    "EARLY_TREND_DOWN": {
-        "BREAKOUT": 0.5,          # hard-blocked downstream
-        "SHORT_BREAKDOWN": 1.1,   # primary edge but conservative until structural confirms
-        "PULLBACK": 0.6,
-        "SHORT_PULLBACK": 1.1,
-        "MEAN_REVERSION": 0.8,
-        "VWAP_REVERSAL": 0.7,
-        "VWAP_TREND": 0.7,
-        "OPEN_DRIVE": 0.8,
-        "PHASE1_MOMENTUM": 0.7,
-        "PHASE1_REVERSAL": 1.1,   # oversold bounces work in early decline
-        "MOMENTUM": 0.4,          # chasing strength in early decline is wrong
-        "MORNING_FADE": 1.0,
-        "AUTO": 0.9,
-        "DEFAULT": 0.9,
     },
 }
 
@@ -277,21 +223,6 @@ def regime_strategy_multiplier(
 #     effective in TREND_UP) but the explicit hard-block prevents wasted
 #     scan cycles. Allowed in TREND_DOWN (1.3× sweet spot) and PANIC (0.8×).
 _HARD_BLOCKS: dict[str, set[str]] = {
-    # CHOP: block high-risk momentum strategies. Keep VWAP_REVERSAL and
-    # VWAP_TREND — individual stocks can still trend/reverse even on choppy
-    # index days, and these provide the best edge in low-conviction markets.
-    "CHOP": {
-        "BREAKOUT", "SHORT_BREAKDOWN", "PULLBACK", "SHORT_PULLBACK",
-        "OPEN_DRIVE", "PHASE1_MOMENTUM",
-        "MOMENTUM",    # relative-strength leaders fail when index whipsaws
-        # 2026-05-20 (Batch H): MORNING_FADE re-enabled in CHOP. The
-        # 2026-05-08 17%-WR backtest was 30 trades — small sample, possibly
-        # tainted by the buggy replay infrastructure. Live data 2026-05-20
-        # produced 10 score-100 MORNING_FADE signals that ALL got blocked
-        # by hard_block — zero shot at validating in live paper. Re-enable
-        # in CHOP/RANGE (the mean-reverting regimes where the fade thesis
-        # is structurally correct) to gather real evidence.
-    },
     # RANGE: block pure-breakout strategies (fakeouts common) and OPEN_DRIVE
     # (needs gap/momentum at open). Allow VWAP_TREND — individual stocks trend
     # within a ranging index all the time, and blocking it leaves the system
@@ -302,9 +233,6 @@ _HARD_BLOCKS: dict[str, set[str]] = {
                                             #   live OLECTRA loss + audit data (3963
                                             #   PHASE1_MOMENTUM scans, 0 qualified)
         "SHORT_PULLBACK",  # 2026-05-08: 4/4 backtest losses; shorting in RANGE without bearish structure
-        # 2026-05-20 (Batch H): MORNING_FADE re-enabled in RANGE (see CHOP
-        # comment). The strategy was hard-blocked everywhere on a 30-trade
-        # backtest; live evidence is needed.
     },
     # PANIC: only allow counter-trend oversold bounces (MR) or short-breakdown
     # continuation. Everything else gets shredded.
@@ -314,62 +242,27 @@ _HARD_BLOCKS: dict[str, set[str]] = {
         "MOMENTUM",    # chasing strength into a panic = catching a knife
         "MORNING_FADE",  # 2026-05-08: PANIC opens often gap-down, fade thesis inverted
     },
-    # TREND_UP / TREND_DOWN: BREAKOUT parked here too (0/9 live WR, see comment
-    # block above). Other strategies still allowed — TREND regimes are where
-    # VWAP_TREND and MOMENTUM are designed to shine.
-    # MORNING_FADE blocked in TREND_UP — fading strong rallies is a knife-catch.
-    # E2E audit 2026-05-26: considered re-enabling BREAKOUT in TREND_UP but
-    # the regression test guard (test_breakout_still_hard_blocked_in_trend_regimes)
-    # documents that VCP/cup-handle pattern detection is required before
-    # re-enable. Current check_swing_entry() gates (ADX≥25, trend=UP, vol≥1.3)
-    # check that trend exists but NOT that the stock is breaking out of a
-    # base. MOMENTUM swing (re-enabled in this audit) serves as the trend-
-    # following entry that BREAKOUT was meant to be — without the base
-    # requirement — see comment at universe_service.py:4824.
+    # TREND_UP: BREAKOUT parked (0/9 live WR — pattern detection required before
+    # re-enable). MORNING_FADE blocked — fading strong rallies is a knife-catch.
     "TREND_UP":   {
         "BREAKOUT",
         "MORNING_FADE",
-        "SHORT_BREAKDOWN",   # 2026-05-08: explicit block for consistency (affinity already 0.24× effective)
+        "SHORT_BREAKDOWN",   # 2026-05-08: explicit block (affinity already 0.24× effective)
         "SHORT_PULLBACK",    # 2026-05-08: shorting strength in uptrend is structurally wrong
-        "PHASE1_MOMENTUM",   # 2026-05-08 mid-session: stale Phase-1 selections fire on
-                             #   yesterday's momentum, not today's tape (OLECTRA SL_HIT
-                             #   in 8 min). Phase 2 is the proper signal in TREND_UP.
-                             #   Allowed in PANIC/TREND_DOWN/RECOVERY where Phase 2 may
-                             #   struggle and Phase 1 fallback adds value.
+        "PHASE1_MOMENTUM",   # 2026-05-08: stale Phase-1 picks fire on yesterday's tape
     },
-    "TREND_DOWN": {"BREAKOUT"},  # 2026-05-20 (Batch H): MORNING_FADE re-enabled — a pop in a down market is a legitimate fade thesis
-    # 2026-05-08: RECOVERY added to enforce MORNING_FADE block consistently.
-    # Pre-fix RECOVERY had no entry in _HARD_BLOCKS → silently allowed all
-    # strategies. Add MORNING_FADE explicitly.
-    "RECOVERY":   {"MORNING_FADE"},
-    # RANGE_ROTATING (audit 2026-05-15): block the same loser set as TREND_UP
-    # so the regime-loosening doesn't silently re-admit known-bad strategies.
-    # MORNING_FADE block matches all other regimes (thesis dead). BREAKOUT
-    # blocked because false-breakouts at range edges are this regime's
-    # signature failure mode.
+    "TREND_DOWN": {"BREAKOUT"},  # MORNING_FADE allowed — a pop in a down market is a legitimate fade
+    # RECOVERY: BREAKOUT allowed (new highs are legitimate in early-bull phase, affinity 1.1×).
+    "RECOVERY":   {"MORNING_FADE", "MOMENTUM"},
+    # RANGE_ROTATING: block the same loser set as TREND_UP so the regime-loosening
+    # doesn't re-admit known-bad strategies. BREAKOUT blocked — false breakouts at
+    # range edges are this regime's signature failure mode.
     "RANGE_ROTATING": {
         "BREAKOUT",
         "SHORT_BREAKDOWN",
         "SHORT_PULLBACK",
         "PHASE1_MOMENTUM",
-        "MORNING_FADE",
-    },
-    # Phase D 2026-05-26 — EARLY_TREND_UP / EARLY_TREND_DOWN.
-    # New regimes detected when the fast tactical_trend_score confirms
-    # direction before structural trend_score does (3-5d lead vs EMA50/200
-    # framework). Inherit the same blocks as their parent TREND_* regimes
-    # so the system can't accidentally short in EARLY_TREND_UP or chase
-    # breakouts in EARLY_TREND_DOWN.
-    "EARLY_TREND_UP": {
-        "BREAKOUT",        # mirrors TREND_UP block; pattern detection still missing
-        "MORNING_FADE",    # fading early rallies is structurally wrong
-        "SHORT_BREAKDOWN", # no shorting strength in confirmed up-move
-        "SHORT_PULLBACK",  # ditto
-        "PHASE1_MOMENTUM", # stale picks — Phase 2 is correct path here
-    },
-    "EARLY_TREND_DOWN": {
-        "BREAKOUT",        # mirrors TREND_DOWN block
-        # NB: MORNING_FADE intentionally NOT blocked (Batch H rule for TREND_DOWN)
+        # MORNING_FADE allowed — range-like regime, same as RANGE
     },
 }
 
@@ -390,20 +283,13 @@ def regime_hard_blocks_strategy(regime: str, strategy: str) -> bool:
 # ── 2026-06 swing-config: per-setup regime gate ─────────────────────────────
 # The multi-year backtest validated exactly three long swing cells:
 #   MOMENTUM × TREND_UP, PULLBACK × TREND_UP, MEAN_REVERSION × RANGE.
-# It reconstructed regimes in "core-4" mode (backtest_v2/brain_reconstruct.CORE_MAP),
-# folding the live brain's refinement regimes into their base:
-#   EARLY_TREND_UP → TREND_UP,  EARLY_TREND_DOWN → TREND_DOWN,  RANGE_ROTATING → RANGE
-# So to reproduce the backtest LIVE, momentum/pullback must fire in the UPTREND
-# bucket {TREND_UP, EARLY_TREND_UP} and mean-reversion in the RANGE bucket
-# {RANGE, RANGE_ROTATING}. In every other regime (PANIC, TREND_DOWN, CHOP,
-# RECOVERY, EARLY_TREND_DOWN) none of the three fire — matching the config, which
-# attributes zero profit to those regimes. Gating on the literal "TREND_UP" only
-# would under-trade live, since the live brain splits backtest-TREND_UP days into
-# TREND_UP + EARLY_TREND_UP. This is a SWING-ONLY gate layered on top of
-# _HARD_BLOCKS (which still governs BREAKOUT, the shorts and intraday setups).
+# RANGE_ROTATING folds to RANGE via core4_regime(), so MR fires there too.
+# In every other regime (PANIC, TREND_DOWN, RECOVERY) none of the three fire.
+# This is a SWING-ONLY gate layered on top of _HARD_BLOCKS (which governs
+# BREAKOUT, the shorts, and intraday setups).
 _SWING_SETUP_REGIMES: dict[str, set[str]] = {
-    "MOMENTUM":       {"TREND_UP", "EARLY_TREND_UP"},
-    "PULLBACK":       {"TREND_UP", "EARLY_TREND_UP"},
+    "MOMENTUM":       {"TREND_UP"},
+    "PULLBACK":       {"TREND_UP"},
     "MEAN_REVERSION": {"RANGE", "RANGE_ROTATING"},
 }
 
@@ -413,8 +299,7 @@ def swing_setup_allowed_in_regime(setup: str, regime: str) -> bool:
 
     Only the three backtest-validated long cells are gated here; any other label
     (BREAKOUT, the shorts, intraday setups) returns True and is governed by
-    _HARD_BLOCKS / affinity instead. {TREND_UP, EARLY_TREND_UP} is the uptrend
-    bucket; {RANGE, RANGE_ROTATING} the range bucket (see note above).
+    _HARD_BLOCKS / affinity instead.
     """
     allowed = _SWING_SETUP_REGIMES.get(str(setup or "").strip().upper())
     if allowed is None:
@@ -422,19 +307,11 @@ def swing_setup_allowed_in_regime(setup: str, regime: str) -> bool:
     return str(regime or "").strip().upper() in allowed
 
 
-# ── CORE-4 regime fold (2026-06-24) ─────────────────────────────────────────
-# Every validated backtest gates on the 4 BASE regimes. The live brain v4
-# (Phase D) emits refinements — EARLY_TREND_UP/DOWN, RANGE_ROTATING — that the
-# validated gate stack never saw (swing_s2_canonical loads a pre-folded core-4
-# regime artifact; intraday_baseline folds via CORE_MAP at load). Live
-# trading_service was passing the REFINED regime straight into the gates, so the
-# (intended, core-4-validated) playbook vetoed validated cells on refined-regime
-# days. Folding the regime back to its base BEFORE the swing gates restores
-# exact parity with the backtest. Value-identical to
-# backtest_v2.brain_reconstruct.CORE_MAP (drift-guarded by test).
+# ── CORE-4 regime fold (2026-06-24, updated 2026-06-27) ─────────────────────
+# RANGE_ROTATING is a real live-brain regime that folds to RANGE for backtest
+# parity. EARLY_TREND_UP/DOWN have been removed from the regime set (2026-06-27);
+# this dict is now a single-entry identity for RANGE_ROTATING only.
 _CORE4_FOLD: dict[str, str] = {
-    "EARLY_TREND_UP": "TREND_UP",
-    "EARLY_TREND_DOWN": "TREND_DOWN",
     "RANGE_ROTATING": "RANGE",
 }
 
@@ -442,8 +319,7 @@ _CORE4_FOLD: dict[str, str] = {
 def core4_regime(regime: str) -> str:
     """Fold a refined brain regime to its CORE-4 base (identity for base regimes).
 
-    Mirrors backtest_v2.brain_reconstruct.CORE_MAP so live gating matches the
-    validated backtests, which all gate on the folded core-4 regime set.
+    RANGE_ROTATING → RANGE. All other regimes are returned unchanged.
     """
     r = str(regime or "").strip().upper()
     return _CORE4_FOLD.get(r, r)

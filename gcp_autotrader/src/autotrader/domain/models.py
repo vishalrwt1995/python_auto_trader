@@ -10,10 +10,8 @@ RegimeKind = Literal["TREND", "RANGE", "AVOID"]
 Bias = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 MarketPhase = Literal["PREMARKET", "POST_OPEN", "LIVE", "EOD"]
 MarketRegimeV2 = Literal[
-    "TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY",
-    "RANGE_ROTATING",     # added 2026-05-15 (Batch C) — present in classifier
-    "EARLY_TREND_UP",     # added 2026-05-26 (Phase D) — fast-trend confirms before structural
-    "EARLY_TREND_DOWN",   # added 2026-05-26 (Phase D)
+    "TREND_UP", "TREND_DOWN", "RANGE", "PANIC", "RECOVERY",
+    "RANGE_ROTATING",     # added 2026-05-15 (Batch C) — sector rotation within flat index
 ]
 ParticipationKind = Literal["STRONG", "MODERATE", "WEAK"]
 RiskModeKind = Literal["AGGRESSIVE", "NORMAL", "DEFENSIVE", "LOCKDOWN"]

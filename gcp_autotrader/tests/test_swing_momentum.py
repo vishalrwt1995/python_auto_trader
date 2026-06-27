@@ -82,12 +82,11 @@ def test_momentum_affinity_range_is_enabled():
 
 
 def test_momentum_hard_blocks():
-    # CHOP / PANIC / TREND_DOWN (via empty allowed_strategies) — MOMENTUM must not fire
-    assert regime_hard_blocks_strategy("CHOP", "MOMENTUM") is True
+    # PANIC / RECOVERY block MOMENTUM (chasing strength into stress = catching a knife)
     assert regime_hard_blocks_strategy("PANIC", "MOMENTUM") is True
-    # TREND_UP / RECOVERY / RANGE — must allow
+    assert regime_hard_blocks_strategy("RECOVERY", "MOMENTUM") is True
+    # TREND_UP / RANGE — must allow (setup gate handles the RANGE case at a higher level)
     assert regime_hard_blocks_strategy("TREND_UP", "MOMENTUM") is False
-    assert regime_hard_blocks_strategy("RECOVERY", "MOMENTUM") is False
     assert regime_hard_blocks_strategy("RANGE", "MOMENTUM") is False
 
 

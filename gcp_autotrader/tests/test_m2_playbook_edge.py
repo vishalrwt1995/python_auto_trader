@@ -119,9 +119,9 @@ def test_matching_edges_returns_direction_appropriate_edges():
     assert any(e.name == "breakout_short" for e in sells)
 
 
-def test_playbook_mean_reversion_allowed_in_range_and_chop():
+def test_playbook_mean_reversion_allowed_in_range_and_range_rotating():
     assert check_playbook("MEAN_REVERSION", "BUY", "RANGE", "NORMAL")[0]
-    assert check_playbook("MEAN_REVERSION", "BUY", "CHOP", "NORMAL")[0]
+    assert check_playbook("MEAN_REVERSION", "BUY", "RANGE_ROTATING", "NORMAL")[0]
 
 
 def test_playbook_mean_reversion_blocked_in_trend_down_for_long():

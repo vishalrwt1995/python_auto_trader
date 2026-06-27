@@ -563,7 +563,7 @@ class WsMonitorService:
         _active_trail_mult = 1.2 if pos.get("target_passed") else _trail_atr_mult
 
         # ── Regime-change tighten: if we entered in TREND_UP/RECOVERY but the
-        # market has turned to CHOP/PANIC, tighten SL to 0.8× ATR from current
+        # market has turned to PANIC/TREND_DOWN, tighten SL to 0.8× ATR from current
         # LTP immediately. One-shot: only applied once per position.
         #
         # Batch 2.3 (2026-04-22): gated to intraday only. Swing positions hold
@@ -583,7 +583,7 @@ class WsMonitorService:
             and atr > 0
             and not _pos_is_swing
             and entry_regime in ("TREND_UP", "RECOVERY")
-            and cur_regime in ("CHOP", "PANIC", "TREND_DOWN")
+            and cur_regime in ("PANIC", "TREND_DOWN")
         ):
             tighten_dist = atr * 0.8
             if side == "BUY":

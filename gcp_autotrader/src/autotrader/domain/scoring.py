@@ -43,10 +43,10 @@ def determine_direction(
     # Fix: force-direction purely from RSI, ALIGNED TO THE GATE'S TIMEFRAME.
     # - Intraday MR uses ind.rsi.curr (matches intraday MR gate at line 529)
     # - Swing MR uses daily_bias.rsi_daily (matches swing MR gate at line 789)
-    # Regime-aware thresholds match the gate's RANGE/CHOP vs other bands.
+    # Regime-aware thresholds match the gate's RANGE vs other bands.
     if _setup_upper in ("MEAN_REVERSION", "VWAP_REVERSAL"):
         _regime_str = str(getattr(regime, "regime", "") or "").strip().upper()
-        _is_range_like = _regime_str in ("RANGE", "CHOP")
+        _is_range_like = _regime_str == "RANGE"
         if _is_swing and daily_bias is not None and float(daily_bias.rsi_daily or 0) > 0:
             _rsi = float(daily_bias.rsi_daily)
             # Fix1 (2026-06): uniform RSI ≤ 35 regardless of regime; SELL disabled.
@@ -551,7 +551,7 @@ def check_strategy_entry(
         #      bid/ask noise (<0.5%).
         rsi = ind.rsi.curr
         _regime_upper = str(regime or "").strip().upper()
-        _is_range_like = _regime_upper in ("RANGE", "CHOP")
+        _is_range_like = _regime_upper == "RANGE"
 
         if is_buy:
             # BUY reversal: price must be below VWAP (oversold stretch)

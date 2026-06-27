@@ -219,7 +219,9 @@ def test_regime_trend_down_entry() -> None:
     assert r == "TREND_DOWN"
 
 
-def test_regime_chop_entry() -> None:
+def test_regime_former_chop_maps_to_range() -> None:
+    """Conditions that previously triggered CHOP now fall through to RANGE.
+    CHOP was removed 2026-06-27 (dead regime, unreachable in prod)."""
     svc = _svc()
     r = _call(
         svc,
@@ -229,7 +231,7 @@ def test_regime_chop_entry() -> None:
         volatility_stress_score=65.0,
         risk_appetite=44.0,
     )
-    assert r == "CHOP"
+    assert r == "RANGE"
 
 
 def test_regime_recovery_only_from_stressed_prior() -> None:

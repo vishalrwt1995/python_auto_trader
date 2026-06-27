@@ -57,7 +57,7 @@ def test_morning_fade_hard_blocked_only_in_trend_up_panic_recovery():
       - RECOVERY:   continuation regime, fading goes against the trend
     """
     blocked_regimes = ("TREND_UP", "PANIC", "RECOVERY")
-    allowed_regimes = ("CHOP", "RANGE", "TREND_DOWN")
+    allowed_regimes = ("RANGE", "TREND_DOWN", "RANGE_ROTATING")
     for regime in blocked_regimes:
         assert regime_hard_blocks_strategy(regime, "MORNING_FADE"), (
             f"MORNING_FADE must stay hard-blocked in {regime} (fading is "
@@ -65,8 +65,7 @@ def test_morning_fade_hard_blocked_only_in_trend_up_panic_recovery():
         )
     for regime in allowed_regimes:
         assert not regime_hard_blocks_strategy(regime, "MORNING_FADE"), (
-            f"MORNING_FADE must be ALLOWED in {regime} regime — re-enabled by "
-            f"Batch H 2026-05-20 to gather live evidence after blanket hard-block"
+            f"MORNING_FADE must be ALLOWED in {regime} regime"
         )
 
 
@@ -78,11 +77,10 @@ def test_morning_fade_in_blocked_regime_sets_individually():
         assert "MORNING_FADE" in block_set, (
             f"MORNING_FADE missing from _HARD_BLOCKS[{regime!r}]"
         )
-    for regime in ("CHOP", "RANGE", "TREND_DOWN"):
+    for regime in ("RANGE", "TREND_DOWN", "RANGE_ROTATING"):
         block_set = _HARD_BLOCKS.get(regime, set())
         assert "MORNING_FADE" not in block_set, (
-            f"MORNING_FADE incorrectly present in _HARD_BLOCKS[{regime!r}] — "
-            f"should be allowed per Batch H 2026-05-20"
+            f"MORNING_FADE incorrectly present in _HARD_BLOCKS[{regime!r}]"
         )
 
 
@@ -96,7 +94,6 @@ def test_short_pullback_hard_blocked_in_trend_up_and_range():
     bearish structure makes shorts viable."""
     assert regime_hard_blocks_strategy("TREND_UP", "SHORT_PULLBACK")
     assert regime_hard_blocks_strategy("RANGE", "SHORT_PULLBACK")
-    assert regime_hard_blocks_strategy("CHOP", "SHORT_PULLBACK")
     # Allow in regimes where shorts have edge (validated by affinity matrix):
     #   TREND_DOWN: 1.2× — the actual sweet spot
     #   PANIC: 0.6× — moderate but possible
@@ -115,9 +112,8 @@ def test_short_breakdown_hard_blocked_in_trend_up():
     saves wasted scan cycles. Strategy still allowed in its sweet-spot
     regimes TREND_DOWN (1.3×) and PANIC (0.8×)."""
     assert regime_hard_blocks_strategy("TREND_UP", "SHORT_BREAKDOWN")
-    # Existing blocks preserved:
+    # RANGE block preserved:
     assert regime_hard_blocks_strategy("RANGE", "SHORT_BREAKDOWN")
-    assert regime_hard_blocks_strategy("CHOP", "SHORT_BREAKDOWN")
     # Allow in bearish regimes where the strategy has edge:
     assert not regime_hard_blocks_strategy("TREND_DOWN", "SHORT_BREAKDOWN")
     assert not regime_hard_blocks_strategy("PANIC", "SHORT_BREAKDOWN")
@@ -228,7 +224,6 @@ def test_breakout_still_hard_blocked_in_trend_regimes():
     assert regime_hard_blocks_strategy("TREND_UP", "BREAKOUT")
     assert regime_hard_blocks_strategy("TREND_DOWN", "BREAKOUT")
     assert regime_hard_blocks_strategy("RANGE", "BREAKOUT")
-    assert regime_hard_blocks_strategy("CHOP", "BREAKOUT")
     assert regime_hard_blocks_strategy("PANIC", "BREAKOUT")
     # RECOVERY: not in hard-blocks (allow re-emergence in recovery regime
     # where new highs are legitimate continuation entries — affinity is 1.1×)
@@ -259,7 +254,7 @@ def test_auto_default_strategies_never_blocked():
     """AUTO and DEFAULT are catchall categories used when watchlist
     setup label is absent. They must NEVER be hard-blocked or trades
     can't fire on legitimate fallback signals."""
-    for regime in ("TREND_UP", "TREND_DOWN", "RANGE", "CHOP", "PANIC", "RECOVERY"):
+    for regime in ("TREND_UP", "TREND_DOWN", "RANGE", "PANIC", "RECOVERY", "RANGE_ROTATING"):
         assert not regime_hard_blocks_strategy(regime, "AUTO")
         assert not regime_hard_blocks_strategy(regime, "DEFAULT")
 
@@ -288,19 +283,19 @@ def test_phase1_momentum_in_allowed_strategies_for_trend_up():
     )
 
 
-def test_phase1_momentum_removed_from_panic_chop_trenddown():
+def test_phase1_momentum_removed_from_panic_trenddown():
     """PHASE1_MOMENTUM (like MOMENTUM) must be removed from the allowlist
-    in CHOP/PANIC/TREND_DOWN — chasing strength in those regimes fails.
+    in PANIC/TREND_DOWN — chasing strength in those regimes fails.
     PHASE1_REVERSAL stays since oversold bounces are the edge there."""
     import inspect
     from autotrader.services import market_brain_service as mbs_mod
     src = inspect.getsource(mbs_mod)
     # Look for the regime filter blocks that remove PHASE1_MOMENTUM.
     # Each block should mention "PHASE1_MOMENTUM" alongside MOMENTUM.
-    # Three filter blocks: CHOP/PANIC, TREND_DOWN, PANIC (separate).
-    assert src.count('"PHASE1_MOMENTUM"') >= 4, (
-        "Expected PHASE1_MOMENTUM in: 1× allowed_strategies list + 3× "
-        "regime-removal sets (CHOP/PANIC, TREND_DOWN, PANIC). "
+    # Two filter blocks: PANIC, TREND_DOWN.
+    assert src.count('"PHASE1_MOMENTUM"') >= 3, (
+        "Expected PHASE1_MOMENTUM in: 1× allowed_strategies list + 2× "
+        "regime-removal sets (PANIC, TREND_DOWN). "
         f"Found {src.count('PHASE1_MOMENTUM')} occurrences."
     )
 
@@ -316,7 +311,7 @@ def test_phase1_momentum_hard_blocked_in_trend_up():
 
     Hard-blocked regimes (4 of 6):
       * TREND_UP — added 2026-05-08 mid-session (this fix)
-      * RANGE/CHOP/PANIC — earlier audit (momentum-chasing fails)
+      * RANGE/PANIC — earlier audit (momentum-chasing fails)
 
     Allowed-through-_HARD_BLOCKS regimes (2 of 6):
       * TREND_DOWN — filtered at market_policy.allowed_strategies level
@@ -329,7 +324,6 @@ def test_phase1_momentum_hard_blocked_in_trend_up():
     )
     # Already-blocked regimes from earlier audit work
     assert regime_hard_blocks_strategy("RANGE", "PHASE1_MOMENTUM")
-    assert regime_hard_blocks_strategy("CHOP", "PHASE1_MOMENTUM")
     assert regime_hard_blocks_strategy("PANIC", "PHASE1_MOMENTUM")
     # Not in _HARD_BLOCKS (other gating layer applies)
     assert not regime_hard_blocks_strategy("TREND_DOWN", "PHASE1_MOMENTUM")
