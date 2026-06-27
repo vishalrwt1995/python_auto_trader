@@ -49,34 +49,14 @@ def determine_direction(
         _is_range_like = _regime_str in ("RANGE", "CHOP")
         if _is_swing and daily_bias is not None and float(daily_bias.rsi_daily or 0) > 0:
             _rsi = float(daily_bias.rsi_daily)
-            # Match swing MR gate (scoring.py ~789):
-            #   RANGE/CHOP:  BUY ≤ 45, SELL ≥ 55
-            #   Other:       BUY ≤ 35, SELL ≥ 65
-            _buy_max = 45.0 if _is_range_like else 35.0
-            _sell_min = 55.0 if _is_range_like else 65.0
-        else:
-            _rsi = float(ind.rsi.curr)
-            # Match intraday MR gate (scoring.py ~529):
-            #   RANGE/CHOP:  BUY ≤ 45, SELL ≥ 58
-            #   Other:       BUY ≤ 40, SELL ≥ 60
-            _buy_max = 45.0 if _is_range_like else 40.0
-            _sell_min = 58.0 if _is_range_like else 60.0
-        # Alpha-finder audit 2026-05-21 (SWING-ONLY gate): block "wrong-side"
-        # MR direction when it would be trend-continuation, not mean-reversion.
-        #
-        # Empirical evidence: 106 swing MR SELL trades in RANGE with
-        # daily_trend=DOWN produced 41.5% WR and -₹3,580 over 6 weeks
-        # (Apr 10 - May 21, 2026). The SELL signal fires when daily RSI ≥55
-        # (overbought) — but when daily_trend is DOWN, an "overbought"
-        # reading is a counter-trend bounce, and SELLing it tends to get
-        # stopped on continued bounce before the downtrend resumes.
-        #
-        # MR BUY: data shows 21 swing MR BUY trades in RANGE worked fine
-        # (66.7% WR, +₹191) regardless of daily_trend. Don't block.
-        if _is_swing and _rsi >= _sell_min and daily_bias is not None:
-            _daily_trend = str(getattr(daily_bias, "trend", "") or "").strip().upper()
-            if _daily_trend == "DOWN":
-                return "HOLD"  # swing MR SELL wrong-side
+            # Fix1 (2026-06): uniform RSI ≤ 35 regardless of regime; SELL disabled.
+            # OOS 2020-2026: RSI 35-45 zone produced WR 0% on SL exits (4,006 trades).
+            # Tightening to ≤35 flips swing MR from -₹50k drag to +₹48k contributor.
+            return "BUY" if _rsi <= 35.0 else "HOLD"
+        # intraday path unchanged
+        _rsi = float(ind.rsi.curr)
+        _buy_max = 45.0 if _is_range_like else 40.0
+        _sell_min = 58.0 if _is_range_like else 60.0
         if _rsi <= _buy_max:
             return "BUY"
         if _rsi >= _sell_min:
@@ -856,16 +836,11 @@ def check_swing_entry(
         return True, ""
 
     if s in ("MEAN_REVERSION", "VWAP_REVERSAL"):
-        # Swing mean-reversion: daily RSI threshold depends on regime
-        # RANGE: stock pulled back to lower portion of range → RSI ≤ 45 is good enough
-        # Other regimes: need truly stretched daily RSI (≤ 35) for multi-day bounce
-        _regime_upper = str(regime or "").strip().upper()
-        swing_mr_buy_limit = 45 if _regime_upper in ("RANGE", "CHOP") else 35
-        swing_mr_sell_floor = 55 if _regime_upper in ("RANGE", "CHOP") else 65
-        if is_buy and daily_bias.rsi_daily > swing_mr_buy_limit:
+        # Fix1 (2026-06): SELL disabled; universal RSI ≤ 35 gate regardless of regime.
+        if not is_buy:
+            return False, "swing_mr_sell_disabled"
+        if daily_bias.rsi_daily > 35:
             return False, "swing_mr_daily_rsi_not_oversold"
-        if not is_buy and daily_bias.rsi_daily < swing_mr_sell_floor:
-            return False, "swing_mr_daily_rsi_not_overbought"
         # Price should be near daily BB band (use support/resistance as proxy)
         # Support proximity: 10% band (was 3% — too tight, rejected stocks in the
         # bottom 30% of their range that are still 5-10% above the absolute 20-day low)
