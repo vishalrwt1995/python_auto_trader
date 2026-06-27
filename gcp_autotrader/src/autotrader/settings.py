@@ -425,7 +425,7 @@ class AppSettings:
             swing_rr=_env_float("SWING_RR", 2.0),
             swing_risk_per_trade=_env_float("SWING_RISK_PER_TRADE", 300),
             swing_max_positions=_env_int("SWING_MAX_POSITIONS", 5),
-            swing_max_hold_days=_env_int("SWING_MAX_HOLD_DAYS", 10),
+            swing_max_hold_days=_env_int("SWING_MAX_HOLD_DAYS", 20),
             # Batch 1.3 (2026-04-22): default aligned to dataclass (70). Prior
             # divergence (dataclass=70, env default=75) meant production — which
             # constructs StrategySettings via from_env() — silently used the OLD
