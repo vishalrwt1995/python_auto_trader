@@ -23,10 +23,11 @@ FAITHFULNESS AUDIT vs prod (2026-06-29, post entry/exit deep audit):
     Data                   ✅  bt_bhavcopy_adj: split/bonus-adjusted, survivorship-free
     Regime                 ✅  regime_faithful_2015.json: byte-identical 2015-2026
                                reconstruction running REAL _build_state/_map_regime
-    Entry pre-filter       ⚠   4-component scores reduce candidates before
-                               compute_indicators. Floor=45 is TIGHTER than prod's
-                               watchlist floor (~1) → can drop names prod keeps.
-                               (Net: fewer candidates than prod's top-150-by-wl_score.)
+    Entry pre-filter       ✅  T4: run() accepts emit_floor param (default 20 for
+                               MOM/PB diagnostic, 45 fallback). Prod watchlist floor
+                               is ~1 (all 150+ watchlist names checked); EMIT_FLOOR=45
+                               is tighter → can miss names prod finds. T4 lower floor
+                               closes this gap; effect measured in main() sweep.
     Direction              ✅  determine_direction() — real prod, all setups incl. MR
     Entry gates            ✅  check_swing_entry() — byte-exact
     Score (Layer 1)        ✅  VIX + nifty_pct + FII from market_inputs_2015.json
@@ -408,7 +409,7 @@ def _month_key(d: str) -> str:
 def run(symdata, regime: dict, market_inputs: dict,
         d0="2022-01-03", d1="2026-12-31",
         long_only=False, verbose=True,
-        setups=None):
+        setups=None, emit_floor=None):
     """Run the final prod-faithful swing backtest.
 
     Args:
@@ -419,8 +420,13 @@ def run(symdata, regime: dict, market_inputs: dict,
         long_only:     if True, suppress SELL signals
         verbose:       print results
         setups:        tuple of setup names to include (default: all MULTI_EMIT)
+        emit_floor:    component-score pre-filter floor (default: EMIT_FLOOR=45).
+                       T4: lower (e.g. 20) to match prod's ~1 watchlist floor and
+                       recover candidates that pass check_swing_entry but were
+                       dropped by the tight pre-filter.
     """
     _setups = tuple(setups) if setups else MULTI_EMIT
+    _emit_floor = emit_floor if emit_floor is not None else EMIT_FLOOR
     cfg = StrategySettings(
         capital_swing=CAP,
         swing_risk_per_trade=RISK,
@@ -477,7 +483,7 @@ def run(symdata, regime: dict, market_inputs: dict,
 
             for setup in _setups:
                 comp = sc[setup]
-                if comp < EMIT_FLOOR:
+                if comp < _emit_floor:
                     continue                  # fast reject — saves compute_indicators call
 
                 # ── Swing-only HARD regime gate (trading_service.py:1534) ────
@@ -699,8 +705,14 @@ def _report(taken, realized_day, cal, verbose):
 
 def main():
     import pickle
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pkl", default=BARS_PKL, help="bars pickle path")
+    ap.add_argument("--long", action="store_true", help="run 2015-2026 full history (slow)")
+    args = ap.parse_args()
+
     print("loading bars + regime + market_inputs ...")
-    raw = pickle.load(open(BARS_PKL, "rb"))
+    raw = pickle.load(open(args.pkl, "rb"))
     regime = json.load(open(REGIME_JSON))
     market_inputs = json.load(open(MARKET_INPUTS_JSON))
     print(f"  {len(raw)} symbols  |  regime: {len(regime)} days  |  market_inputs: {len(market_inputs)} days")
@@ -723,6 +735,18 @@ def main():
     print("\n-- DIAGNOSTIC: 2022-2026 MR only (RANGE signal quality) --")
     run(symdata, regime, market_inputs, d0="2022-01-03", d1="2026-12-31",
         setups=("MEAN_REVERSION",))
+
+    # ── T4: EMIT_FLOOR sweep — MOM+PB only (2022-2026) ───────────────────────
+    print("\n=== T4: EMIT_FLOOR sweep (MOM+PB only, 2022-2026) ===")
+    for floor in [45, 30, 20, 10, 1]:
+        print(f"\n-- emit_floor={floor} --")
+        run(symdata, regime, market_inputs, d0="2022-01-03", d1="2026-12-31",
+            setups=("MOMENTUM", "PULLBACK"), emit_floor=floor)
+
+    if args.long:
+        print("\n=== 2015-2026 MOM+PB only (T4: floor=20) ===")
+        run(symdata, regime, market_inputs, d0="2015-01-01", d1="2026-12-31",
+            setups=("MOMENTUM", "PULLBACK"), emit_floor=20)
 
 
 if __name__ == "__main__":

@@ -240,6 +240,11 @@ def main() -> int:
             _os._exit(0)
     validate = "validate" in argv
     start = next((a for a in argv if a[:4].isdigit() and "-" in a), "2015-01-01")
+    # T2: real 5m leadership for dates >= five_m_from.
+    # Usage: python3 faithful_regime.py 2015-01-01 5mfrom=2022-01-03
+    # Saves to regime_faithful_2015_5m.json (separate from daily-only baseline).
+    _5marg = next((a for a in argv if a.startswith("5mfrom=")), None)
+    five_m_from: str | None = _5marg.split("=", 1)[1] if _5marg else None
 
     if validate:
         # Small, fast check vs REAL-logged market_brain_history rows (2026-04+),
@@ -282,16 +287,26 @@ def main() -> int:
         days = days[:limit]
     print(f"[full] {len(days)} output days {days[0]}→{days[-1]}; bars from {bars_from}"
           + (f"..{daily_to}" if daily_to else ""), flush=True)
+    out_path = CACHE / ("regime_faithful_2015_5m.json" if five_m_from else "regime_faithful_2015.json")
     _, brain, _gcs, _prev = _setup(bars_from, daily_only=True, daily_to=daily_to)
     import collections
     # RESUME (insurance for restart-after-kill): load prior OUT, skip done days, and
     # WARM the hysteresis chain over the WARMUP days before the first new day (no write)
     # so _map_regime's holds are rebuilt faithfully. A fresh run (no OUT) skips this and
     # runs fully continuous → exact hysteresis. WARMUP ≥ any _map_regime hold window.
+    def _apply_5m(d: str) -> None:
+        """Load one day's 5m from candles_1m if d >= five_m_from; else daily-only."""
+        if five_m_from and d >= five_m_from:
+            _gcs.daily_only = False
+            _gcs._5m.clear()     # keep memory flat: one day at a time
+            _gcs.load_5m([d])
+        else:
+            _gcs.daily_only = True
+
     out: dict[str, dict] = {}
-    if OUT.exists():
+    if out_path.exists():
         try:
-            out = {d: v for d, v in json.loads(OUT.read_text()).items()
+            out = {d: v for d, v in json.loads(out_path.read_text()).items()
                    if str((v or {}).get("regime") or "") not in ("", "ERROR")}
         except Exception:
             out = {}
@@ -303,6 +318,7 @@ def main() -> int:
               f"compute from {days[resume_idx] if resume_idx < len(days) else 'DONE'}", flush=True)
         for d in days[w0:resume_idx]:
             try:
+                _apply_5m(d)
                 run_day(brain, _prev, d)
             except Exception:
                 _prev["state"] = None
@@ -314,6 +330,7 @@ def main() -> int:
         if (i - resume_idx) % 5 == 0:
             print(f"  {i}/{len(days)} {d} ({time.time()-t0:.0f}s) dist={dict(dist)}", flush=True)
         try:
+            _apply_5m(d)
             sc = run_day(brain, _prev, d)
         except Exception as e:
             sc = {"regime": "ERROR", "error": str(e)[:120]}
@@ -321,9 +338,9 @@ def main() -> int:
         out[d] = sc
         dist[sc["regime"]] += 1
         if (i - resume_idx) % 50 == 0:
-            OUT.write_text(json.dumps(out))
-    OUT.write_text(json.dumps(out))
-    print(f"\n[full] done {time.time()-t0:.0f}s → {OUT} | dist={dict(dist)} | total={len(out)}", flush=True)
+            out_path.write_text(json.dumps(out))
+    out_path.write_text(json.dumps(out))
+    print(f"\n[full] done {time.time()-t0:.0f}s → {out_path} | dist={dict(dist)} | total={len(out)}", flush=True)
     return 0
 
 

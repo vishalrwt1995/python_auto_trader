@@ -271,7 +271,7 @@ Intraday audit concluded candle-intraday is **cost-walled** (see §8 2026-06-15 
 Built + deployed + enabled (PR #31; see §8). Live shipped-edge **+1.54% net/event** (look-ahead-free, next-open, eq-weight benchmark, robust IS+OOS) — ~½ the +2.48% offset-headline after the look-ahead fix + NIFTY→eq-weight + next-open. **OPEN:** (1) monitor the FIRST live corp trade end-to-end (intimation→next-open entry, eq-weight anti-pump, hard meeting-day exit, wide protective SL, the ws_monitor overnight-skip) when a first-time bonus/split in an uptrend appears (~5/yr; none Monday). (2) Smart-entry (+0.45%, needs an intraday near-close order path) deferred. (3) Corp dashboard tab deferred (#56 — `corp_watchlist` Firestore + reuse the pead panel). (4) After a few live trades, consider folding to one EVENT capital pool / relaxing liquidity (≥2cr) if real slippage is benign.
 
 ### J. ③ Faithful backtest engine BUILT — edge/param grind next (UNBLOCKED 2026-06-29)
-Both foundational pieces are now in place: (a) `regime_faithful_2015.json` (§8 2026-06-29 ⑤; 2,825 days, byte-identical to prod `_map_regime`); (b) `scripts/redesign/swing_final.py` (§8 2026-06-29 ⑥; PR #50; all 4 layers faithful, exact prod config). **Baseline established:** 2021-2026 NET=₹1,80,628 / CAGR=5.8% / Calmar=0.44; 2022-2026 CAGR=2.0% / Calmar=0.13 (honest post-cost, ₹5L/₹7.5k risk). **Prime grind targets:** (1) MOMENTUM threshold/regime calibration (thin edge 2022-2026 at ₹9k on 82 trades; dominated by 2021 bull run ₹127k — regime multiplier + PANIC breadth thresholds); (2) `_map_regime` PANIC/TREND_DOWN fork (6/2,825 TREND_DOWN — test loosening breadth gate); (3) 2015+ coverage (needs `pull_swing_bars.py --force` re-pull → will add IS window 2015-2021 vs OOS 2022-2026). Discuss scope before grinding.
+Both foundational pieces are in place: (a) `regime_faithful_2015.json`; (b) `scripts/redesign/swing_final.py` (PR #50). T1-T3/T8-T9 implemented (2026-06-29). **Corrected T1 baseline (replaces ⑥ pre-gate numbers):** 2021-2026 NET=−₹80,678 / CAGR=−2.7% / maxDD=−21% / Calmar=−0.13; 2022-2026 CAGR=−2.6%. **2015-2026 full history:** MOM+PB CAGR=−0.9% (189 trades, maxDD=−32%); Full (add MR) CAGR=−1.6% (303 trades, maxDD=−39%). **Key findings:** (1) MR is the sole drag: −₹129k over 2015-2026; removing it adds +3.2pp CAGR, halves DD — should be disabled. (2) TREND_UP frequency is structurally low: 7% (2015,2018,2019) to 38% (2023); in years with ≤10% TREND_UP, MOM+PB gets zero or near-zero entries. (3) TREND_UP-only years (2023) show MOMENTUM working (+₹54k); the strategy needs better regime detection. (4) T2 (5m leadership) running — expected to increase TREND_UP % in 2022-2026. **Prime grind targets (updated):** (1) Disable MR, rerun 2015-2026 as MOM+PB-only baseline; (2) T2 regime file (in progress — will change RANGE→TREND_UP classification for 2022+); (3) T4 lower EMIT_FLOOR for MOM/PB only (2019: 18 TREND_UP days, zero entries — EMIT_FLOOR=45 is too tight); (4) `_map_regime` PANIC/TREND_DOWN fork (TREND_DOWN ≈ dead code; loosening breadth gate could add TREND_UP days); (5) If still negative after T2/T4, consider relaxing the per-day TREND_UP requirement (e.g., allow MOM/PB in RECOVERY). Discuss before grind.
 
 ---
 
@@ -279,7 +279,41 @@ Both foundational pieces are now in place: (a) `regime_faithful_2015.json` (§8 
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
 
-### 2026-06-29 (latest) — ⑦ T1 adaptive ATR + live validation: 100% ATR match / 99.99% affinity match on 8,271 prod scans (backtest tooling — NO prod/brain change)
+### 2026-06-29 (latest) — ⑧ T3/T8/T9 + MR diagnostic + 2015-2026 backtest (backtest tooling — NO prod/brain change, PAPER untouched)
+
+**T3/T8/T9 implemented in `swing_final.py` (commits `5a46227`, `ae77304`):**
+- **T3 DD governor:** weekly 5% / monthly 8% halt thresholds (PortfolioBook); zero effect on current signal volume (only ~0.1 entries/day, well under thresholds)
+- **T8 max_trades_day:** cap at 5 entries/day/channel; zero effect at current signal volume
+- **T9 daily-breaker timing:** fixed look-ahead bug — now uses PREVIOUS day's realized P&L (swing exits are EOD; can't use same-day P&L at entry time)
+- Added `setups=` parameter to `run()` for per-setup diagnostic runs
+
+**MR diagnostic results (2022-2026):**
+- Full (MOM+PB+MR): NET=−₹67k / CAGR=−2.6% / maxDD=−20%
+- MOM+PB only: NET=+₹11k / CAGR=+0.5% / maxDD=−11%
+- MR only: NET=−₹66k / CAGR=−2.5% / maxDD=−13%
+- **MR is 100% of the underperformance.** Removing it improves CAGR by +3.1pp and halves maxDD.
+
+**2015-2026 backtest (swing_adj_bars_2015.pkl, 2,244 symbols, all T1-T9 applied):**
+- MOM+PB only: 189 trades / WR=43.9% / NET=−₹47k / CAGR=−0.9% / maxDD=−32%
+  - 2019: ZERO entries (only 18 TREND_UP days in 2019 = 7% of year; EMIT_FLOOR=45 too tight)
+  - Good years: 2015=+₹20k, 2021=+₹31k, 2023=+₹54k (all high TREND_UP years)
+  - Bad years: 2020=−₹65k (COVID PANIC → entries in brief TREND_UP then stopped out)
+- Full (add MR): 303 trades / WR=40.6% / NET=−₹95k / CAGR=−1.6% / maxDD=−39%
+  - MR: n=131, −₹129k (dominant loser across all years)
+  - 2018: −₹139k (46% PANIC days; MR destroyed capital)
+
+**Regime distribution by year (key finding — TREND_UP is structurally rare):**
+- 2015: 7% TU | 2016: 11% | 2017: 21% | 2018: 7% | 2019: 7% | 2020: 15% | 2021: 25% | 2022: 18% | 2023: 38%
+- With <10% TREND_UP → MOM/PB gets 0 entries (2015, 2018, 2019)
+- 2023 was exceptional (38% TU → best year). Long-term average ~15%.
+
+**Honest assessment:** no demonstrated positive edge over 2015-2026 for MOM+PB (−0.9% CAGR). The 2022-2026 MOM+PB being marginally positive (+0.5%) is a single-period result driven by 2023's high TREND_UP. T2 (regime reclassification via 5m leadership) is the critical next lever — if it correctly identifies TREND_UP more often, signal frequency increases. T4 (lower EMIT_FLOOR) is also important to recover the missing 2019 entries.
+
+**Files:** `scripts/redesign/swing_final.py` (all commits) · `scripts/redesign/faithful_regime.py` (T2 in-progress)
+
+---
+
+### 2026-06-29 — ⑦ T1 adaptive ATR + live validation: 100% ATR match / 99.99% affinity match on 8,271 prod scans (backtest tooling — NO prod/brain change)
 
 **Goal (user):** apply T1 (adaptive ATR SL multiplier) to `swing_final.py`, validate the formula empirically against prod's `scan_decisions`, and confirm the backtest is correct against live data.
 
