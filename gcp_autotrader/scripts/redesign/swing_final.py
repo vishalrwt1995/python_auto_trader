@@ -49,7 +49,21 @@ FAITHFULNESS AUDIT vs prod (2026-06-29, post entry/exit deep audit):
     Paper slippage         ✅  0.10%/leg adverse on entry+exit fills (order_service)
     Daily breaker          ✅  per-channel 3% loss (→ MR-only) / 6% profit (→ full block)
     Slot model             ✅  5 slots, last reserved for PULLBACK, RANGE-group cap 3,
-                               (sym) dedup, candidates sorted by adj_score
+                               (sym) dedup, candidates sorted by wl_score
+    Candidate ordering (T7) ✅ Stage 2 sorts by wl_score (pre-filter component score)
+                               matching prod's watchlist sort. adj_score stored for
+                               diagnostics but not used for slot priority.
+    Sector divers. (T5)    ✅  USE_PLAYBOOK_V1=true in prod DISABLES sector/strategy-
+                               concentration gates → correctly omitted here. RANGE-group
+                               cap 3 already models the MR slot limit.
+    RS sector-blend (T6)   ✅  score_signal uses universe-Z RS from compute_indicators;
+                               0.6·z_sector+0.4·z_univ would need sector map. Not needed:
+                               99.86% empirical score match (2,115/2,118) confirms
+                               negligible sector-blend gap.
+    Breadth gates (T10)    ✅  b200<70 blocks MOMENTUM/PULLBACK (trading_service.py:1564);
+                               breadth<60 blocks PULLBACK (line 1554). Both computed
+                               per day from the universe (same formula as prod brain).
+                               Comment: "OOS Calmar 0.79 vs 0.10 baseline" in prod code.
     DD governor (T3)       ✅  Weekly-5%/monthly-8% halt (PortfolioBook); daily 1.5%
                                qty-halve NOT modeled (noted in residual gaps)
     max_trades_day (T8)    ✅  5 entries/day/channel cap (matches prod gate)
@@ -61,10 +75,10 @@ KNOWN RESIDUAL GAPS (not modeled — all small/structural, bias noted):
         are (T3), but intraday halving requires per-entry re-sizing (complex). Missing
         → slight optimism on extreme intraday loss days. Channel-budget risk cap
         (₹37.5k max open risk vs ₹5L budget) never binds → safely ignored.
-    Candidate ordering: prod fills slots by wl_score desc; here by adj_score desc.
-        Different subset when >5 signals compete on one day.
-    Entry timing: prod enters at scan-time live LTP (4 scans/day); here at next-day
-        OPEN (daily-bar limitation). Bias ambiguous.
+    Real intraday entry timing (T11): prod enters at scan-time live LTP (4 scans/day
+        at 09:22/11:00/13:00/14:30 IST); here at next-day OPEN (daily-bar limitation).
+        Bias ambiguous. Implementing T11 requires 5m GCS candle data per signal day.
+        Stretch goal — omitted in current engine.
     Playbook (USE_PLAYBOOK_V1=true): disables prod's sector/strategy-concentration gates
         "to preserve backtest parity" → correctly omitted here.
 
@@ -587,6 +601,7 @@ def run(symdata, regime: dict, market_inputs: dict,
                     "gross": gross, "net": net, "reason": reason,
                     "R": net / (sl_dist * pos.qty) if sl_dist * pos.qty > 0 else 0.0,
                     "adj_score": adj_score, "raw_score": raw_score,
+                    "wl_score": comp,     # T7: pre-filter component score (prod sorts by this)
                 })
 
     # ── Stage 2: portfolio walk (5 slots, 1 PULLBACK reserve, daily breaker) ─
@@ -631,7 +646,7 @@ def run(symdata, regime: dict, market_inputs: dict,
         if month_pnl.get(_month_key(d), 0.0) <= -DD_MONTH_HALT:
             prev_d = d; continue
 
-        cands = sorted(by_sig.get(d, []), key=lambda x: -x["adj_score"])
+        cands = sorted(by_sig.get(d, []), key=lambda x: -x["wl_score"])  # T7: prod sorts by wl_score
         entries_today = 0                           # T8: max_trades_day=5
         for sg in cands:
             if entries_today >= 5 or len(open_pos) >= 5:  # T8
