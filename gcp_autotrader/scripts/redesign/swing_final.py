@@ -723,20 +723,21 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--pkl", default=BARS_PKL, help="bars pickle path")
+    ap.add_argument("--regime", default=REGIME_JSON, help="regime JSON path (default: daily-only; use regime_faithful_2015_5m.json for T2)")
     ap.add_argument("--long", action="store_true", help="run 2015-2026 full history (slow)")
     args = ap.parse_args()
 
     print("loading bars + regime + market_inputs ...")
     raw = pickle.load(open(args.pkl, "rb"))
-    regime = json.load(open(REGIME_JSON))
+    regime = json.load(open(args.regime))
     market_inputs = json.load(open(MARKET_INPUTS_JSON))
-    print(f"  {len(raw)} symbols  |  regime: {len(regime)} days  |  market_inputs: {len(market_inputs)} days")
+    print(f"  {len(raw)} symbols  |  regime: {len(regime)} days ({os.path.basename(args.regime)})  |  market_inputs: {len(market_inputs)} days")
 
     print("building indicator series ...")
     symdata = {sym: Sym(bars) for sym, bars in raw.items() if len(bars) >= MIN_BARS_SWING}
     print(f"  {len(symdata)} symbols with ≥{MIN_BARS_SWING} bars\n")
 
-    print("=== SWING FINAL — prod-faithful, regime_faithful_2015, ₹5L/₹7500 ===")
+    print(f"=== SWING FINAL — prod-faithful, {os.path.basename(args.regime)}, ₹5L/₹7500 ===")
     print("\n-- 2022-2026 (current pickle coverage, faithful regime) --")
     run(symdata, regime, market_inputs, d0="2022-01-03", d1="2026-12-31")
 
