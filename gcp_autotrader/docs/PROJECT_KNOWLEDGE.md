@@ -294,11 +294,13 @@ Built + deployed + enabled (PR #31; see §8). Live shipped-edge **+1.54% net/eve
 ```bash
 cd "/Users/apple/Projects_Migrated/Auto Trading Python GCP/gcp_autotrader"
 PYTHONPATH=src .venv/bin/python3.13 scripts/redesign/swing_final.py \
+  --pkl ~/.autotrader_backtest_cache/swing_adj_bars_2015.pkl \
   --regime ~/.autotrader_backtest_cache/regime_faithful_2015_5m.json \
   --long > /tmp/t2_comparison.log 2>&1 &
 echo "T2 comparison PID: $!"
 ```
-The `--long` flag runs 2015-2026 MOM+PB with floor=10 (already hardcoded in main()). Compare CAGR/TREND_UP count vs daily-only baseline.
+Note: default pkl is 2020+ only; `swing_adj_bars_2015.pkl` starts 2015-01-01.
+The `--long` flag runs 2015-2026 MOM+PB with floor=10. Compare CAGR/TREND_UP count vs daily-only baseline.
 
 ---
 
