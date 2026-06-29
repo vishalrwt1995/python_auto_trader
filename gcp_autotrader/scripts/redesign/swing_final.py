@@ -67,6 +67,14 @@ KNOWN RESIDUAL GAPS (not modeled — all small/structural, bias noted):
     Playbook (USE_PLAYBOOK_V1=true): disables prod's sector/strategy-concentration gates
         "to preserve backtest parity" → correctly omitted here.
 
+MR DIAGNOSTIC (2026-06-29):
+    MOMENTUM+PULLBACK only: 79 trades, WR=46.8%, NET=+₹10,638, CAGR=+0.5%, maxDD=−11%
+    MR only (RANGE):        73 trades, WR=43.8%, NET=−₹65,709, CAGR=−2.5%, maxDD=−13%
+    Removing MR = +3.1pp CAGR improvement, maxDD nearly halved. MR has wildly negative
+    expectancy in 2022-2026 (2024 alone: −₹62k). MOMENTUM+PULLBACK is the structural
+    alpha. Regime = 47% RANGE, 22% TREND_UP (post core4-fold). High RANGE share forces
+    MR as dominant setup despite negative edge.
+
 DATA NOTE:
     swing_adj_bars.pkl starts 2020-07-01 → effective backtest start ~2021-01
     (180-bar warmup). For full 2015+ coverage: edit pull_swing_bars.py WHERE
@@ -399,7 +407,8 @@ def _month_key(d: str) -> str:
 
 def run(symdata, regime: dict, market_inputs: dict,
         d0="2022-01-03", d1="2026-12-31",
-        long_only=False, verbose=True):
+        long_only=False, verbose=True,
+        setups=None):
     """Run the final prod-faithful swing backtest.
 
     Args:
@@ -409,7 +418,9 @@ def run(symdata, regime: dict, market_inputs: dict,
         d0, d1:        backtest window (both inclusive)
         long_only:     if True, suppress SELL signals
         verbose:       print results
+        setups:        tuple of setup names to include (default: all MULTI_EMIT)
     """
+    _setups = tuple(setups) if setups else MULTI_EMIT
     cfg = StrategySettings(
         capital_swing=CAP,
         swing_risk_per_trade=RISK,
@@ -464,7 +475,7 @@ def run(symdata, regime: dict, market_inputs: dict,
             # ── Fast pre-filter: component scores (cheap, pre-computed series) ──
             sc = _component_scores(s, j, ret_mean, ret_std)
 
-            for setup in MULTI_EMIT:
+            for setup in _setups:
                 comp = sc[setup]
                 if comp < EMIT_FLOOR:
                     continue                  # fast reject — saves compute_indicators call
@@ -704,6 +715,14 @@ def main():
 
     print("\n-- 2021-2026 (full pickle coverage) --")
     run(symdata, regime, market_inputs, d0="2021-01-01", d1="2026-12-31")
+
+    print("\n-- DIAGNOSTIC: 2022-2026 MOMENTUM+PULLBACK only (excl MR) --")
+    run(symdata, regime, market_inputs, d0="2022-01-03", d1="2026-12-31",
+        setups=("MOMENTUM", "PULLBACK"))
+
+    print("\n-- DIAGNOSTIC: 2022-2026 MR only (RANGE signal quality) --")
+    run(symdata, regime, market_inputs, d0="2022-01-03", d1="2026-12-31",
+        setups=("MEAN_REVERSION",))
 
 
 if __name__ == "__main__":
