@@ -49,18 +49,21 @@ FAITHFULNESS AUDIT vs prod (2026-06-29, post entry/exit deep audit):
     Daily breaker          ✅  per-channel 3% loss (→ MR-only) / 6% profit (→ full block)
     Slot model             ✅  5 slots, last reserved for PULLBACK, RANGE-group cap 3,
                                (sym) dedup, candidates sorted by adj_score
+    DD governor (T3)       ✅  Weekly-5%/monthly-8% halt (PortfolioBook); daily 1.5%
+                               qty-halve NOT modeled (noted in residual gaps)
+    max_trades_day (T8)    ✅  5 entries/day/channel cap (matches prod gate)
+    Daily-breaker (T9)     ✅  Uses prev-day realized P&L (swing exits EOD, entries
+                               at scan time → no same-day look-ahead)
 
 KNOWN RESIDUAL GAPS (not modeled — all small/structural, bias noted):
-    DD governor (PortfolioBook, USE_PORTFOLIO_BOOK_V1=true): prod adds a 1.5%-daily-DD
-        throttle (halve qty) + weekly-5% / monthly-8% halts. NOT modeled here → backtest
-        is OPTIMISTIC in sustained drawdowns (prod would shrink/halt). Channel-budget
-        risk cap (₹37.5k max open risk vs ₹5L budget) never binds → safely ignored.
+    DD governor 1.5%-daily-DD throttle (halve qty): NOT modeled — weekly/monthly halts
+        are (T3), but intraday halving requires per-entry re-sizing (complex). Missing
+        → slight optimism on extreme intraday loss days. Channel-budget risk cap
+        (₹37.5k max open risk vs ₹5L budget) never binds → safely ignored.
     Candidate ordering: prod fills slots by wl_score desc; here by adj_score desc.
         Different subset when >5 signals compete on one day.
     Entry timing: prod enters at scan-time live LTP (4 scans/day); here at next-day
         OPEN (daily-bar limitation). Bias ambiguous.
-    max_trades_day=5 COUNT cap: prod caps 5 entries/day/channel; here only concurrent
-        slots capped. Rarely binds for multi-day swing holds.
     Playbook (USE_PLAYBOOK_V1=true): disables prod's sector/strategy-concentration gates
         "to preserve backtest parity" → correctly omitted here.
 
@@ -377,6 +380,21 @@ def adaptive_atr_mult(reg: str, risk_mode: str, setup: str, atr: float, px: floa
     return m
 
 
+# ── DD governor helpers (T3) ─────────────────────────────────────────────────
+
+def _week_key(d: str) -> str:
+    """ISO year-week key for DD governor weekly halt."""
+    from datetime import date as _date
+    dt = _date.fromisoformat(d)
+    y, w, _ = dt.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _month_key(d: str) -> str:
+    """Calendar month key for DD governor monthly halt."""
+    return d[:7]   # YYYY-MM
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def run(symdata, regime: dict, market_inputs: dict,
@@ -555,30 +573,51 @@ def run(symdata, regime: dict, market_inputs: dict,
                 })
 
     # ── Stage 2: portfolio walk (5 slots, 1 PULLBACK reserve, daily breaker) ─
+    # T3 DD governor thresholds (PortfolioBook, USE_PORTFOLIO_BOOK_V1=true)
+    DD_WEEK_HALT  = CAP * 0.05   # 5%  weekly loss  → halt all entries
+    DD_MONTH_HALT = CAP * 0.08   # 8%  monthly loss → halt all entries
+
     by_sig = collections.defaultdict(list)
     for sg in signals:
         by_sig[sg["sig_d"]].append(sg)
     open_pos = []
     realized_day = collections.defaultdict(float)
+    week_pnl     = collections.defaultdict(float)  # T3: {week_key: pnl}
+    month_pnl    = collections.defaultdict(float)  # T3: {month_key: pnl}
     taken = []
     held_syms = set()
+    prev_d = None                                   # T9: previous trading day
     for d in cal:
         still = []
         for p in open_pos:
             if p["exit_d"] < d:
-                realized_day[p["exit_d"]] += p["net"]
+                net = p["net"]
+                realized_day[p["exit_d"]] += net
+                week_pnl[_week_key(p["exit_d"])]   += net  # T3
+                month_pnl[_month_key(p["exit_d"])] += net  # T3
                 held_syms.discard(p["sym"])
             else:
                 still.append(p)
         open_pos = still
-        # Per-channel daily breaker (trading_service.py:1604-1614):
-        #   profit target  → full block;  loss limit → counter-trend (MR) only.
-        if realized_day[d] >= profit_lim:
-            continue
-        _loss_day = realized_day[d] <= -loss_lim
+
+        # T9: per-channel daily breaker (trading_service.py:1604-1614).
+        # Swing exits happen at EOD reconciliation; entries at scan time → use
+        # PREVIOUS day's realized P&L so we don't look into same-day exits.
+        prev_pnl = realized_day.get(prev_d, 0.0) if prev_d else 0.0
+        if prev_pnl >= profit_lim:          # profit target → full block
+            prev_d = d; continue
+        _loss_day = prev_pnl <= -loss_lim   # loss limit → MR-only
+
+        # T3: DD governor weekly/monthly halts
+        if week_pnl.get(_week_key(d), 0.0)   <= -DD_WEEK_HALT:
+            prev_d = d; continue
+        if month_pnl.get(_month_key(d), 0.0) <= -DD_MONTH_HALT:
+            prev_d = d; continue
+
         cands = sorted(by_sig.get(d, []), key=lambda x: -x["adj_score"])
+        entries_today = 0                           # T8: max_trades_day=5
         for sg in cands:
-            if len(open_pos) >= 5:
+            if entries_today >= 5 or len(open_pos) >= 5:  # T8
                 break
             if _loss_day and sg["setup"] != "MEAN_REVERSION":
                 continue                # loss-limit day: counter-trend (MR) only
@@ -591,8 +630,14 @@ def run(symdata, regime: dict, market_inputs: dict,
             if sum(p["notional"] for p in open_pos) + sg["notional"] > CAP:
                 continue
             open_pos.append(sg); held_syms.add(sg["sym"]); taken.append(sg)
+            entries_today += 1  # T8
+        prev_d = d  # T9
+
     for p in open_pos:
-        realized_day[p["exit_d"]] += p["net"]
+        net = p["net"]
+        realized_day[p["exit_d"]] += net
+        week_pnl[_week_key(p["exit_d"])]   += net
+        month_pnl[_month_key(p["exit_d"])] += net
 
     return _report(taken, realized_day, cal, verbose)
 
