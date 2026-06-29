@@ -23,11 +23,12 @@ FAITHFULNESS AUDIT vs prod (2026-06-29, post entry/exit deep audit):
     Data                   ✅  bt_bhavcopy_adj: split/bonus-adjusted, survivorship-free
     Regime                 ✅  regime_faithful_2015.json: byte-identical 2015-2026
                                reconstruction running REAL _build_state/_map_regime
-    Entry pre-filter       ✅  T4: run() accepts emit_floor param (default 20 for
-                               MOM/PB diagnostic, 45 fallback). Prod watchlist floor
-                               is ~1 (all 150+ watchlist names checked); EMIT_FLOOR=45
-                               is tighter → can miss names prod finds. T4 lower floor
-                               closes this gap; effect measured in main() sweep.
+    Entry pre-filter (T4)  ✅  run() accepts emit_floor param. Prod watchlist floor≈1
+                               (all ~150+ names checked); EMIT_FLOOR=45 was too tight →
+                               missed 36 PULLBACK signals/yr. T4 sweep (2022-2026 MOM+PB):
+                               floor=45 → CAGR=0.5%/PB=11t; floor=10 → CAGR=5.0%/PB=47t
+                               (Calmar=0.43). PULLBACK is the alpha driver (+₹141k at
+                               floor=10 vs +₹19k at 45). Optimal floor=10 for backtests.
     Direction              ✅  determine_direction() — real prod, all setups incl. MR
     Entry gates            ✅  check_swing_entry() — byte-exact
     Score (Layer 1)        ✅  VIX + nifty_pct + FII from market_inputs_2015.json
@@ -82,18 +83,27 @@ KNOWN RESIDUAL GAPS (not modeled — all small/structural, bias noted):
     Playbook (USE_PLAYBOOK_V1=true): disables prod's sector/strategy-concentration gates
         "to preserve backtest parity" → correctly omitted here.
 
-MR DIAGNOSTIC (2026-06-29):
-    MOMENTUM+PULLBACK only: 79 trades, WR=46.8%, NET=+₹10,638, CAGR=+0.5%, maxDD=−11%
-    MR only (RANGE):        73 trades, WR=43.8%, NET=−₹65,709, CAGR=−2.5%, maxDD=−13%
+MR DIAGNOSTIC (2026-06-29, 2022-2026):
+    MOMENTUM+PULLBACK, floor=45: 79 trades, WR=46.8%, NET=+₹10,638, CAGR=+0.5%, maxDD=−11%
+    MR only (RANGE):             73 trades, WR=43.8%, NET=−₹65,709, CAGR=−2.5%, maxDD=−13%
     Removing MR = +3.1pp CAGR improvement, maxDD nearly halved. MR has wildly negative
-    expectancy in 2022-2026 (2024 alone: −₹62k). MOMENTUM+PULLBACK is the structural
-    alpha. Regime = 47% RANGE, 22% TREND_UP (post core4-fold). High RANGE share forces
-    MR as dominant setup despite negative edge.
+    expectancy in 2022-2026 (2024 alone: −₹62k). Regime = 47% RANGE, 22% TREND_UP
+    (post core4-fold). High RANGE share forces MR as the dominant setup despite
+    negative edge. ⚠ Needs user approval before disabling MR in prod.
+
+T4 RESULTS (2026-06-29, MOM+PB only, 2022-2026, adj_score sort — T7 not applied):
+    floor=45: 79t, PB=11t, MOM=68t, NET=+₹10,638, CAGR=0.5%, Calmar=0.04
+    floor=30: 88t, PB=36t, MOM=52t, NET=−₹43,290, CAGR=−2.1%, Calmar=−0.11  ← worse
+    floor=20: 97t, PB=47t, MOM=50t, NET=+₹65,770, CAGR=+2.9%, Calmar=+0.24
+    floor=10: 97t, PB=47t, MOM=50t, NET=+₹117,111, CAGR=+5.0%, Calmar=+0.43  ← BEST
+    floor=1:  95t, PB=43t, MOM=52t, NET=+₹48,323,  CAGR=+2.2%, Calmar=+0.21
+    PULLBACK is the alpha driver: floor 45→10 grows PB from 11→47 trades and PB alone
+    earns +₹141k (vs +₹19k at 45). MOMENTUM is marginally negative at all floors.
+    Optimal floor = 10 for MOM+PB backtests. Need to validate on 2015-2026 (--long).
 
 DATA NOTE:
-    swing_adj_bars.pkl starts 2020-07-01 → effective backtest start ~2021-01
-    (180-bar warmup). For full 2015+ coverage: edit pull_swing_bars.py WHERE
-    clause to 'a.date >= 2014-01-01' and re-run with --force.
+    swing_adj_bars.pkl rebuilt 2014-01-01 → effective backtest start ~2015-01
+    (180-bar warmup). Use --long flag + 2015+ pickle for full 11-year runs.
 """
 from __future__ import annotations
 
@@ -760,9 +770,9 @@ def main():
             setups=("MOMENTUM", "PULLBACK"), emit_floor=floor)
 
     if args.long:
-        print("\n=== 2015-2026 MOM+PB only (T4: floor=20) ===")
+        print("\n=== 2015-2026 Full (T4: floor=10, MOM+PB only) ===")
         run(symdata, regime, market_inputs, d0="2015-01-01", d1="2026-12-31",
-            setups=("MOMENTUM", "PULLBACK"), emit_floor=20)
+            setups=("MOMENTUM", "PULLBACK"), emit_floor=10)
 
 
 if __name__ == "__main__":
