@@ -279,7 +279,50 @@ Both foundational pieces are now in place: (a) `regime_faithful_2015.json` (§8 
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
 
-### 2026-06-29 (latest) — ⑥ SWING_FINAL.PY prod-faithful backtest engine + baseline (backtest tooling — NO prod/brain change, PAPER untouched)
+### 2026-06-29 (latest) — ⑦ T1 adaptive ATR + live validation: 100% ATR match / 99.99% affinity match on 8,271 prod scans (backtest tooling — NO prod/brain change)
+
+**Goal (user):** apply T1 (adaptive ATR SL multiplier) to `swing_final.py`, validate the formula empirically against prod's `scan_decisions`, and confirm the backtest is correct against live data.
+
+**T1 — Adaptive ATR SL multiplier implemented in `swing_final.py`:**
+- `adaptive_atr_mult(regime, risk_mode, setup, atr, ltp)` — replicates `trading_service.py:1218-1257` exactly
+- Formula: `ATR_BASE_MULT=1.5` base → tier by (risk_mode × regime) → ATR%-band tweak → clamp [0.8, 3.0]
+- When result == 1.5 base → `atr_mult_override=None` → `calc_swing_position_size` falls back to `swing_atr_sl_mult=2.5` (NORMAL/non-reversal/ATR>3% names stay at 2.5×)
+- MR in RANGE: ~2.0× (1.5 × 1.33). DEFENSIVE: ~1.3×. LOCKDOWN/PANIC: ~1.1×. AGGRESSIVE/TREND_UP: ~1.8×+ATR-band.
+- Also applied simultaneously: `swing_setup_allowed_in_regime()` gate + paper slippage 0.10%/leg + daily-breaker → MR-only
+
+**T1-corrected backtest results (`regime_faithful_2015.json`, ₹5L/₹7,500):**
+
+*2022-2026 (4 years):*
+- 131 trades · WR=42.7% · GROSS=−₹34,923 · **NET=−₹67,146** · CAGR=−2.6% · maxDD=−20%
+- MR=n57 −₹94k · MOMENTUM=n63 +₹7k · PULLBACK=n11 +₹19k
+- RANGE=n57 −₹94k · TREND_UP=n74 +₹27k
+
+*2021-2026 (5 years):*
+- 161 trades · WR=42.2% · GROSS=−₹41,338 · **NET=−₹80,678** · CAGR=−2.7% · maxDD=−21%
+- MR=n66 −₹110k · MOMENTUM=n82 +₹16k · PULLBACK=n13 +₹14k
+- RANGE=n66 −₹110k · TREND_UP=n95 +₹30k · PANIC=n0
+
+**Interpretation:** MOMENTUM+PULLBACK in TREND_UP are profitable (+₹30k combined 2021-26). MR in RANGE is the sole drag (−₹110k). This is the regime-faithful result — the faithful brain labels 2022-2026 as mostly RANGE, suppressing MOMENTUM. The 2021 bull run (prior entry in §8 showed +₹107k for 2021) drove most of the engine's edge.
+
+**Note on prior baseline:** the §8-⑥ baseline (NET=+₹180k) was from BEFORE the `swing_setup_allowed_in_regime` gate was added. Adding that gate + slippage + daily-breaker fix + T1 gives the current −₹81k. The ⑥ numbers were the pre-gate "what the engine would do without regime restrictions" benchmark — they are correctly superseded by these.
+
+**Live validation — `scan_decisions` May 2026 (8,271 swing rows, 6-regime labels):**
+
+| Layer | Rows | Match |
+|-------|------|-------|
+| Affinity multiplier | 8,271 | **99.99%** (1 miss = HOLD dir, never enters) |
+| ATR multiplier | 8,271 | **100.00%** (0 misses — 6-regime era only) |
+| Score qualification | 2,118 | **99.86%** (3 FALSE_POS = SHORT_BREAKDOWN edge) |
+
+ATR mult: prior 90.5% was measured on pre-2026-06-24 data including RANGE_ROTATING old-code rows. For the current 6-regime brain (deployed 2026-06-28), the formula is exact.
+
+**Script:** `scratchpad/validate_prod_vs_backtest.py`
+
+**Root diagnostic:** the negative 2022-2026 result is driven entirely by MR in RANGE losing −₹94k. MOMENTUM/PULLBACK in TREND_UP are profitable. T2 (real 5m leadership score for 2022-26 regime reconstruction via `candles_1m`) is the next lever — better leadership may reduce false RANGE days that let through bad MR signals.
+
+---
+
+### 2026-06-29 — ⑥ SWING_FINAL.PY prod-faithful backtest engine + baseline (backtest tooling — NO prod/brain change, PAPER untouched)
 
 **Goal (user):** build the definitive final backtest engine with exact prod config. Prior engines (`swing_s2_faithful`, `swing_prod_faithful`) were each faithful on only 2 of 4 layers — complementary halves, neither complete.
 

@@ -10,25 +10,59 @@ DEPLOYED PROD CONFIG (as of 2026-06-29):
     CAPITAL_SWING = 500000        (₹5L)
     swing_atr_sl_mult = 2.5       (code default, no env override)
 
-FAITHFULNESS AUDIT vs prod (2026-06-29):
+EMPIRICAL VALIDATION (2026-06-29, 8,271 May-2026 prod scan_decisions):
+    Affinity multiplier   99.99% match (8,270/8,271; 1 miss = HOLD direction)
+    ATR multiplier        100.0% match (8,271/8,271; 6-regime era only)
+    Score qualification   99.86% match (2,115/2,118 score-decisive rows)
+    — confirms scoring + sizing layers are faithful to deployed prod code
+
+FAITHFULNESS AUDIT vs prod (2026-06-29, post entry/exit deep audit):
     Universe eligibility   ✅  BALANCED gates: top-1000 turnover, ≥180 bars,
-                               price ≥30, ATR% ≤12%, gap-risk ≤6%
+                               price ≥30, ATR% ≤12%, gap-risk ≤6% (UNIVERSE_MODE
+                               default = BALANCED, confirmed not overridden in prod)
     Data                   ✅  bt_bhavcopy_adj: split/bonus-adjusted, survivorship-free
     Regime                 ✅  regime_faithful_2015.json: byte-identical 2015-2026
                                reconstruction running REAL _build_state/_map_regime
-    Entry pre-filter       ✅  4-component scores used to reduce candidates before
-                               calling compute_indicators (same threshold as EMIT_FLOOR=45)
+    Entry pre-filter       ⚠   4-component scores reduce candidates before
+                               compute_indicators. Floor=45 is TIGHTER than prod's
+                               watchlist floor (~1) → can drop names prod keeps.
+                               (Net: fewer candidates than prod's top-150-by-wl_score.)
     Direction              ✅  determine_direction() — real prod, all setups incl. MR
     Entry gates            ✅  check_swing_entry() — byte-exact
     Score (Layer 1)        ✅  VIX + nifty_pct + FII from market_inputs_2015.json
     Score (Layer 2)        ⚠   PCR + oi_change_pcr ✅; max_pain_dist_pct ≡ 0 (no
                                historical max-pain → neutral 4 pts / 12 pts max)
     Score (Layers 3-5)     ✅  compute_indicators + compute_daily_bias on daily bars
-    Score threshold        ✅  adj_score = score * regime_multiplier ≥ 45
+    Score threshold        ✅  adj_score = score * regime_multiplier ≥ 45 (affinity
+                               score, no brain risk-mode haircut — matches swing path)
+    Swing regime gate      ✅  swing_setup_allowed_in_regime(): MOMENTUM/PULLBACK →
+                               TREND_UP only; MR → RANGE/RANGE_ROTATING/RECOVERY only
     Hard blocks            ✅  regime_hard_blocks_strategy()
-    Sizing                 ✅  calc_swing_position_size(), RISK=7500, ATR_SL=2.5
+    Sizing                 ✅  calc_swing_position_size(), RISK=7500; adaptive ATR SL
+                               mult (risk_mode×regime×ATR%-band, →2.5 fallback at base
+                               1.5) — 100% ATR match on 8.3k May-2026 6-regime scans
+                               (prior 90.5% miss was pre-2026-06-24 RANGE_ROTATING rows)
     Exit                   ✅  simulate_exit(): arm 1.75R, trail 1.0R, max 20d, gap-fill
+                               — shares trailed_stop() with live swing_reconciliation
     Costs                  ✅  CostConfig.upstox() — Upstox round-trip rates
+    Paper slippage         ✅  0.10%/leg adverse on entry+exit fills (order_service)
+    Daily breaker          ✅  per-channel 3% loss (→ MR-only) / 6% profit (→ full block)
+    Slot model             ✅  5 slots, last reserved for PULLBACK, RANGE-group cap 3,
+                               (sym) dedup, candidates sorted by adj_score
+
+KNOWN RESIDUAL GAPS (not modeled — all small/structural, bias noted):
+    DD governor (PortfolioBook, USE_PORTFOLIO_BOOK_V1=true): prod adds a 1.5%-daily-DD
+        throttle (halve qty) + weekly-5% / monthly-8% halts. NOT modeled here → backtest
+        is OPTIMISTIC in sustained drawdowns (prod would shrink/halt). Channel-budget
+        risk cap (₹37.5k max open risk vs ₹5L budget) never binds → safely ignored.
+    Candidate ordering: prod fills slots by wl_score desc; here by adj_score desc.
+        Different subset when >5 signals compete on one day.
+    Entry timing: prod enters at scan-time live LTP (4 scans/day); here at next-day
+        OPEN (daily-bar limitation). Bias ambiguous.
+    max_trades_day=5 COUNT cap: prod caps 5 entries/day/channel; here only concurrent
+        slots capped. Rarely binds for multi-day swing holds.
+    Playbook (USE_PLAYBOOK_V1=true): disables prod's sector/strategy-concentration gates
+        "to preserve backtest parity" → correctly omitted here.
 
 DATA NOTE:
     swing_adj_bars.pkl starts 2020-07-01 → effective backtest start ~2021-01
@@ -54,6 +88,7 @@ from autotrader.domain.regime_affinity import (
     core4_regime,
     regime_hard_blocks_strategy,
     regime_strategy_multiplier,
+    swing_setup_allowed_in_regime,
     swing_setup_group,
 )
 from autotrader.domain.risk import calc_swing_position_size
@@ -81,6 +116,8 @@ EMIT_FLOOR = 45.0                    # SWING_MIN_SIGNAL_SCORE env override
 MAX_HOLD = DEFAULT_MAX_HOLD_DAYS     # = 20 — SWING_MAX_HOLD_DAYS env override
 ACTIVATE_R = DEFAULT_ACTIVATE_R      # = 1.75
 TRAIL_R = DEFAULT_TRAIL_R            # = 1.0
+SLIP = 0.0010                        # paper_entry/exit_slippage_pct (order_service.py:161) — 0.10%/leg adverse
+ATR_BASE_MULT = 1.5                  # intraday atr_sl_mult; adaptive swing mult built off this (trading_service.py:1226-1234)
 
 # ── Universe gates (BALANCED, from universe_service.py) ──────────────────────
 SWING_TOPN_TURNOVER = 1000
@@ -309,6 +346,37 @@ def build_regime_snapshot(regime_label: str, mi: dict) -> RegimeSnapshot:
     )
 
 
+def adaptive_atr_mult(reg: str, risk_mode: str, setup: str, atr: float, px: float) -> float:
+    """Prod's adaptive swing SL multiplier — replicates trading_service.py:1218-1257.
+
+    Built off the 1.5 intraday base (NOT swing's 2.5), scaled by a risk_mode/regime
+    tier then an ATR%-band, clamped [0.8, 3.0]. Validated against 27,741 logged prod
+    swing scans (90.5% exact; misses are pre-2026-06-24 old-code rows). The caller
+    passes this as atr_mult_override UNLESS it lands on 1.5 — in which case prod falls
+    back to swing_atr_sl_mult=2.5 (override=None), so 2.5 IS used for base-tier names.
+    """
+    base = ATR_BASE_MULT
+    is_rev = setup in ("MEAN_REVERSION", "VWAP_REVERSAL")
+    if risk_mode == "LOCKDOWN" or reg == "PANIC":
+        m = round(base * 0.75, 3)
+    elif risk_mode == "DEFENSIVE" or reg == "TREND_DOWN":
+        m = round(base * 0.87, 3)
+    elif risk_mode == "AGGRESSIVE" and reg == "TREND_UP":
+        m = round(base * 1.20, 3)
+    elif is_rev and reg in ("RANGE", "RECOVERY"):
+        m = round(base * 1.33, 3)
+    else:
+        m = base
+    if px > 0 and atr > 0:                       # ATR%-band (matches prod's gate on ltp/atr)
+        p = atr / px
+        if p < 0.015:
+            m = round(m * 0.87, 3)
+        elif p <= 0.030:
+            m = round(m * 1.20, 3)
+        m = max(0.8, min(3.0, m))
+    return m
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def run(symdata, regime: dict, market_inputs: dict,
@@ -340,6 +408,7 @@ def run(symdata, regime: dict, market_inputs: dict,
         regime_entry = regime[d]
         reg = regime_entry.get("regime", "RANGE")
         reg = core4_regime(reg)           # fold 6-label to 4-label
+        risk_mode = str(regime_entry.get("risk_mode", "NORMAL"))  # for adaptive ATR mult (T1)
 
         mi = market_inputs.get(d, {})
         regime_snap = build_regime_snapshot(reg, mi)
@@ -381,6 +450,13 @@ def run(symdata, regime: dict, market_inputs: dict,
                 comp = sc[setup]
                 if comp < EMIT_FLOOR:
                     continue                  # fast reject — saves compute_indicators call
+
+                # ── Swing-only HARD regime gate (trading_service.py:1534) ────
+                # MOMENTUM/PULLBACK → TREND_UP only; MR → RANGE/RANGE_ROTATING/
+                # RECOVERY only. Prod's _SWING_SETUP_REGIMES allowlist; stronger
+                # than regime_hard_blocks_strategy (which doesn't block MOM in RANGE).
+                if not swing_setup_allowed_in_regime(setup, reg):
+                    continue
 
                 # Regime-level breadth gates (mirrors swing_prod_faithful.py)
                 if setup == "MEAN_REVERSION":
@@ -429,12 +505,17 @@ def run(symdata, regime: dict, market_inputs: dict,
                 if regime_hard_blocks_strategy(reg, setup):
                     continue
 
-                # ── Sizing (prod risk.py) ────────────────────────────────────
+                # ── Sizing (prod risk.py + adaptive ATR mult, T1) ────────────
                 ei = j + 1
                 entry_px = s.o[ei]
                 if entry_px <= 0:
                     continue
-                pos = calc_swing_position_size(entry_px, ind.atr, direction, cfg)
+                # Adaptive SL mult off signal-day price; ==1.5 → None → swing's 2.5×
+                _amult = adaptive_atr_mult(reg, risk_mode, setup, ind.atr, ind.close)
+                _override = _amult if _amult != ATR_BASE_MULT else None
+                pos = calc_swing_position_size(
+                    entry_px, ind.atr, direction, cfg, atr_mult_override=_override
+                )
                 if pos.qty < 1 or pos.sl_price <= 0:
                     continue
                 sl_dist = abs(entry_px - pos.sl_price)
@@ -449,12 +530,17 @@ def run(symdata, regime: dict, market_inputs: dict,
                 )
                 exit_i = min(ei + off, len(s.bars) - 1)
 
-                gross = ((exit_px - entry_px) if is_buy else (entry_px - exit_px)) * pos.qty
+                # Paper-mode fill slippage (prod order_service.py: 0.10%/leg, adverse).
+                # Sizing stays on the clean price (prod sizes on LTP, fills on LTP±slip).
+                entry_fill = entry_px * (1 + SLIP) if is_buy else entry_px * (1 - SLIP)
+                exit_fill = exit_px * (1 - SLIP) if is_buy else exit_px * (1 + SLIP)
+
+                gross = ((exit_fill - entry_fill) if is_buy else (entry_fill - exit_fill)) * pos.qty
                 cost = (
                     compute_leg_cost(side="BUY" if is_buy else "SELL",
-                                     qty=pos.qty, price=entry_px, is_swing=True, cfg=UPSTOX)
+                                     qty=pos.qty, price=entry_fill, is_swing=True, cfg=UPSTOX)
                     + compute_leg_cost(side="SELL" if is_buy else "BUY",
-                                       qty=pos.qty, price=exit_px, is_swing=True, cfg=UPSTOX)
+                                       qty=pos.qty, price=exit_fill, is_swing=True, cfg=UPSTOX)
                 )
                 net = gross - cost
                 signals.append({
@@ -485,12 +571,17 @@ def run(symdata, regime: dict, market_inputs: dict,
             else:
                 still.append(p)
         open_pos = still
-        if realized_day[d] <= -loss_lim or realized_day[d] >= profit_lim:
+        # Per-channel daily breaker (trading_service.py:1604-1614):
+        #   profit target  → full block;  loss limit → counter-trend (MR) only.
+        if realized_day[d] >= profit_lim:
             continue
+        _loss_day = realized_day[d] <= -loss_lim
         cands = sorted(by_sig.get(d, []), key=lambda x: -x["adj_score"])
         for sg in cands:
             if len(open_pos) >= 5:
                 break
+            if _loss_day and sg["setup"] != "MEAN_REVERSION":
+                continue                # loss-limit day: counter-trend (MR) only
             if sg["setup"] not in ("PULLBACK",) and len(open_pos) >= 4:
                 continue                # last slot reserved for PULLBACK
             if sg["sym"] in held_syms:
