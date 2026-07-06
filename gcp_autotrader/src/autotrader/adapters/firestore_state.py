@@ -356,6 +356,37 @@ class FirestoreStateStore:
             pass
         return round(total, 2)
 
+    def get_all_time_realized_net_pnl(self, channel: str) -> float:
+        """Sum ALL-TIME realized NET P&L for one channel (compounding equity input).
+
+        Used by swing compounding: equity = CAPITAL_SWING_BASE + this. Sizing is
+        `compound_pct% × equity`, so this MUST be NET (after full costs), not gross
+        — the `pnl` field is GROSS; we sum `net_pnl` (order_service writes both).
+        Compounding on gross would over-size every trade.
+
+        Channel routing follows `get_today_realized_pnl_by_channel`: prefer the
+        explicit `channel` field, else derive from `wl_type` ("swing" if
+        wl_type=="swing"), else "intraday".
+
+        FAIL-CLOSED: unlike the best-effort rolling-PnL helpers, a read failure here
+        raises — the caller must NOT size off a silently-zero equity (that would
+        reset compounding to the base and mis-size). Caller handles the exception.
+        """
+        want = str(channel or "").strip().lower()
+        total = 0.0
+        for d in self._db().collection("positions").stream():
+            row = d.to_dict() or {}
+            if str(row.get("status", "")).upper() != "CLOSED":
+                continue
+            ch = str(row.get("channel") or "").strip().lower()
+            if not ch:
+                wlt = str(row.get("wl_type") or "").strip().lower()
+                ch = "swing" if wlt == "swing" else "intraday"
+            if ch != want:
+                continue
+            total += float(row.get("net_pnl", 0) or 0)
+        return round(total, 2)
+
     def get_open_risk_by_channel(self) -> dict[str, float]:
         """M4 — aggregate open R-at-risk per channel (intraday/swing/positional/hedge).
 

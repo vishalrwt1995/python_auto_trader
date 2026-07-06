@@ -154,23 +154,20 @@ def test_universe_imports_swing_signals():
     assert "swing_signals.near_high_tilt(" in src
 
 
-def test_mr_gate_is_conditional_on_above_200sma():
-    """MEAN_REVERSION must be appended to the long candidate slate ONLY under the
-    mrAbove200Sma guard — never unconditionally. Reverting re-admits falling
-    knives below the 200-SMA (swing-edge #3)."""
+def test_mean_reversion_not_emitted_as_candidate():
+    """MEAN_REVERSION was REMOVED from the swing roster 2026-07-03 (gross-negative
+    every year 2015-2026, no validated edge). It must NOT be appended to the long
+    candidate slate at all — neither unconditionally nor under a gate. The regime
+    allowlist also blocks it, but not emitting keeps it off the watchlist entirely."""
     src = inspect.getsource(us_mod)
-    assert 'r.get("mrAbove200Sma")' in src, "the #3 gate flag must be consumed"
-    # The MEAN_REVERSION long candidate must sit under an mrAbove200Sma branch,
-    # not in an unconditional list literal.
-    assert re.search(
-        r'if\s+bool\(r\.get\("mrAbove200Sma"\)\):\s*\n\s*_long_candidates\.append\(\s*\(\s*"MEAN_REVERSION"',
-        src,
-    ), "MEAN_REVERSION must be appended only when mrAbove200Sma is True"
-    # And it must NOT also be present as an unconditional tuple in a list literal.
-    assert '("MEAN_REVERSION", "BUY", mean_rev),' not in src, (
-        "MEAN_REVERSION must not be an unconditional long candidate — that "
-        "bypasses the #3 200-SMA gate."
-    )
+    # No active MEAN_REVERSION candidate append (commented-out lines are fine).
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue  # ignore the retained-for-history commented lines
+        assert '_long_candidates.append(("MEAN_REVERSION"' not in stripped.replace(" ", ""), (
+            "MEAN_REVERSION must not be an active long candidate (removed 2026-07-03)"
+        )
 
 
 def test_momentum_tilt_applied_to_wl_score():
@@ -185,15 +182,16 @@ def test_momentum_tilt_applied_to_wl_score():
     ), "the tilt must apply to the MOMENTUM candidate's wl_score and no other"
 
 
-def test_fallback_honours_mr_gate():
+def test_fallback_excludes_mean_reversion():
     """The winner-takes-all fallback (fires when nothing clears the score floor)
-    must also drop MEAN_REVERSION below the 200-SMA; otherwise a high-scoring
-    falling-knife MR row slips back in as the fallback label and survives the
-    score floor, defeating the #3 gate."""
+    must NOT be able to pick MEAN_REVERSION — it's removed from the roster
+    (2026-07-03). The fallback's _setup_scores must contain only tradeable
+    setups (PULLBACK / MOMENTUM), never MEAN_REVERSION."""
     src = inspect.getsource(us_mod)
-    # In the fallback, MEAN_REVERSION is added to _setup_scores only under the
-    # gate guard (not an unconditional dict entry).
-    assert re.search(
-        r'if\s+bool\(r\.get\("mrAbove200Sma"\)\):\s*\n\s*_setup_scores\["MEAN_REVERSION"\]\s*=\s*mean_rev',
-        src,
-    ), "fallback _setup_scores must gate MEAN_REVERSION on mrAbove200Sma"
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert '_setup_scores["MEAN_REVERSION"]' not in stripped.replace(" ", ""), (
+            "fallback must not assign a MEAN_REVERSION score (removed 2026-07-03)"
+        )

@@ -71,14 +71,16 @@ def test_legacy_doc_without_new_fields_reads_zero():
     assert rows[0].breadth_pct == 0.0
 
 
-# ── reserve-2-trend group helper ─────────────────────────────────────────────
+# ── 5+2 slot bucket cap ──────────────────────────────────────────────────────
 
-def test_swing_setup_group_assignment():
-    assert swing_setup_group("MEAN_REVERSION") == "RANGE"
+def test_swing_range_bucket_cap_is_2():
+    # 2026-07-03 5+2 structure: RANGE bucket (RANGE-regime MOMENTUM) caps at 2,
+    # additive to the 5 TREND slots (total 7). Was 3 under the old MR reserve.
+    assert SWING_RANGE_GROUP_CAP == 2
+    # swing_setup_group() is retained (legacy helper) but no longer drives swing
+    # slot bucketing — that's now keyed on entry regime in trading_service.
     assert swing_setup_group("MOMENTUM") == "TREND"
     assert swing_setup_group("PULLBACK") == "TREND"
-    assert swing_setup_group("mean_reversion") == "RANGE"
-    assert SWING_RANGE_GROUP_CAP == 3
 
 
 # ── structural guards (source inspection) ────────────────────────────────────
@@ -95,6 +97,28 @@ def test_trading_service_has_new_swing_policy_blocks():
     assert "swing_pb_slot_reserved" in src
     # the in-scan RANGE-group counter must be incremented on qualification
     assert "_open_swing_range_count += 1" in src
+    # 2026-07-03 (9.7% config): TU-scoped filters + 5+2 regime-bucketed slots
+    assert "swing_mom_january_block" in src
+    assert "swing_mom_turnover_deadzone" in src
+    assert "swing_mom_same_day_cap" in src
+    assert "swing_pb_seasonal_block" in src
+    assert "swing_trend_slots_full" in src
+    # TREND bucket counter + same-day MOM-TU counter must be incremented on qualify
+    assert "_open_swing_trend_count += 1" in src
+    assert "_mom_tu_today_count += 1" in src
+
+
+def test_swing_compounding_and_liquidity_wired():
+    from autotrader.services import trading_service as ts_mod
+    src = inspect.getsource(ts_mod)
+    # compounding equity computed per-scan (fail-closed) and passed to sizing
+    assert "get_all_time_realized_net_pnl" in src
+    assert "swing_compound_pct" in src
+    assert "risk_override" in src and "capital_override" in src
+    # liquidity cap wired with fail-closed on missing turnover
+    assert "swing_liq_cap_pct" in src
+    assert "turnover_med_60d" in src
+    assert "max_qty" in src
 
 
 def test_universe_service_multi_emit_slates():

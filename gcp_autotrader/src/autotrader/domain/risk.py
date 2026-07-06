@@ -11,19 +11,34 @@ def calc_swing_position_size(
     cfg: StrategySettings,
     *,
     atr_mult_override: float | None = None,
+    risk_override: float | None = None,
+    capital_override: float | None = None,
+    max_qty: int | None = None,
 ) -> PositionSizing:
-    """Position sizing for swing (CNC) trades — wider SL, higher R:R."""
+    """Position sizing for swing (CNC) trades — wider SL, higher R:R.
+
+    Compounding (2026-07-03): pass `risk_override` = compound_pct% × rolling equity
+    and `capital_override` = rolling equity so BOTH the risk budget and the 20%
+    position cap scale with realized equity instead of the frozen config. Both
+    default to None → identical to the pre-compounding flat behavior.
+    """
     sl_mult = atr_mult_override if atr_mult_override is not None else cfg.swing_atr_sl_mult
     sl_dist = max(atr * sl_mult, entry_price * 0.01)  # floor at 1% for swing
     sl_price = entry_price - sl_dist if direction == "BUY" else entry_price + sl_dist
     target = entry_price + sl_dist * cfg.swing_rr if direction == "BUY" else entry_price - sl_dist * cfg.swing_rr
 
-    raw_qty = int(cfg.swing_risk_per_trade // sl_dist) if sl_dist > 0 else 0
+    _risk = risk_override if risk_override is not None else cfg.swing_risk_per_trade
+    raw_qty = int(_risk // sl_dist) if sl_dist > 0 else 0
     # Phase C v2 (2026-05-28): cap uses SWING channel capital when per-channel
     # capital is configured (CAPITAL_SWING set) — falls back to total `capital`
     # otherwise via channel_capital("swing"). 20% max position per swing.
-    _swing_cap = cfg.channel_capital("swing")
+    # Compounding: capital_override (= rolling equity) scales this cap too.
+    _swing_cap = capital_override if capital_override is not None else cfg.channel_capital("swing")
     qty = min(raw_qty, int((_swing_cap * 0.20) // max(entry_price, 1)))
+    # Liquidity cap (2026-07-03): further limit qty to a fillable size (≤ X% of the
+    # symbol's daily turnover). Caller passes the pre-computed share ceiling.
+    if max_qty is not None:
+        qty = min(qty, max_qty)
     # Risk-budget enforcement.
     #
     # Audit 2026-05-21: prior logic forced `qty=max(1, qty)` even when

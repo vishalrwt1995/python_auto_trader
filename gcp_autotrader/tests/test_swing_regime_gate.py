@@ -1,10 +1,10 @@
-"""Tests for the 2026-06 swing-config per-setup regime gate.
+"""Tests for the swing-config per-setup regime gate.
 
-The validated config trades three long cells:
-  MOMENTUM / PULLBACK → uptrend bucket {TREND_UP}
-  MEAN_REVERSION       → range/recovery bucket {RANGE, RANGE_ROTATING, RECOVERY}
-Phase 4 (2026-06-27): RECOVERY added for MR — post-PANIC oversold snaps are
-the sweet spot for mean reversion (affinity dict had RECOVERY → MR 0.7× already).
+2026-07-03 re-grind (full 2015-2026, IS/OOS-validated) config:
+  MOMENTUM       → {TREND_UP, RANGE}  (RANGE added — validated cell, +₹335k standalone)
+  PULLBACK       → {TREND_UP}         (PB×RANGE failed: IS-negative)
+  MEAN_REVERSION → (none)             (REMOVED — gross-negative every year, no edge)
+RANGE_ROTATING folds to RANGE via core4_regime() upstream, so it's covered.
 Other setups (BREAKOUT, shorts, intraday) pass through this gate and are
 governed by _HARD_BLOCKS instead.
 """
@@ -12,26 +12,27 @@ from __future__ import annotations
 
 from autotrader.domain.regime_affinity import swing_setup_allowed_in_regime
 
-_TREND_BLOCKED = ("RANGE", "RANGE_ROTATING", "PANIC", "TREND_DOWN", "RECOVERY")
-_MR_BLOCKED = ("TREND_UP", "PANIC", "TREND_DOWN")
+_MOM_BLOCKED = ("RANGE_ROTATING", "PANIC", "TREND_DOWN", "RECOVERY")  # RANGE_ROTATING folds→RANGE before this gate
+_PB_BLOCKED = ("RANGE", "RANGE_ROTATING", "PANIC", "TREND_DOWN", "RECOVERY")
+_MR_ALL = ("TREND_UP", "RANGE", "RANGE_ROTATING", "RECOVERY", "PANIC", "TREND_DOWN")
 
 
-def test_momentum_only_in_uptrend_bucket():
+def test_momentum_in_uptrend_and_range():
     assert swing_setup_allowed_in_regime("MOMENTUM", "TREND_UP")
-    for r in _TREND_BLOCKED:
+    assert swing_setup_allowed_in_regime("MOMENTUM", "RANGE")   # 2026-07-03: RANGE cell added
+    for r in _MOM_BLOCKED:
         assert not swing_setup_allowed_in_regime("MOMENTUM", r), r
 
 
 def test_pullback_only_in_uptrend_bucket():
     assert swing_setup_allowed_in_regime("PULLBACK", "TREND_UP")
-    for r in _TREND_BLOCKED:
+    for r in _PB_BLOCKED:
         assert not swing_setup_allowed_in_regime("PULLBACK", r), r
 
 
-def test_mean_reversion_in_range_and_recovery_bucket():
-    for r in ("RANGE", "RANGE_ROTATING", "RECOVERY"):
-        assert swing_setup_allowed_in_regime("MEAN_REVERSION", r), r
-    for r in _MR_BLOCKED:
+def test_mean_reversion_removed_blocked_everywhere():
+    # MR removed from the roster 2026-07-03 — empty allowlist blocks all regimes.
+    for r in _MR_ALL:
         assert not swing_setup_allowed_in_regime("MEAN_REVERSION", r), r
 
 
@@ -45,4 +46,5 @@ def test_other_setups_pass_through():
 
 def test_case_insensitive():
     assert swing_setup_allowed_in_regime("momentum", "trend_up")
-    assert not swing_setup_allowed_in_regime("momentum", "range")
+    assert swing_setup_allowed_in_regime("momentum", "range")   # RANGE now allowed
+    assert not swing_setup_allowed_in_regime("pullback", "range")
