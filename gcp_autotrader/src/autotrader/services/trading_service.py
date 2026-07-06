@@ -85,6 +85,7 @@ class TradingService:
                         wl_score=float(r.get("wl_score", 0.0) or 0.0),
                         rs_vs_mkt=float(r.get("rs_vs_mkt", 0.0) or 0.0),
                         breadth_pct=float(r.get("breadth_pct", 0.0) or 0.0),
+                        turnover_med_60d=float(r.get("turnover_med_60d", 0.0) or 0.0),
                     ))
                 if rows:
                     # 2026-06 swing-config: rank swing rows by the regime-weighted
@@ -735,6 +736,25 @@ class TradingService:
                 self.log_sink.action("TradingService", "run_scan_once", "SKIP", "watchlist empty")
                 return {"skipped": "watchlist_empty"}
 
+            # ── Swing compounding equity (computed ONCE per scan) ────────────
+            # risk/trade = swing_compound_pct% × rolling equity, where
+            # equity = CAPITAL_SWING base + all-time realized swing NET P&L.
+            # FAIL-CLOSED: a read failure must not silently size off base equity
+            # (that would reset compounding) — skip the scan instead.
+            _swing_equity = None
+            _swing_compound_risk = None
+            if (self.settings.strategy.swing_compound_pct > 0
+                    and any(getattr(w, "wl_type", "intraday") == "swing" for w in subset)):
+                try:
+                    _base = float(self.settings.strategy.capital_swing or 0.0)
+                    _swing_equity = max(0.0, _base + self.state.get_all_time_realized_net_pnl("swing"))
+                    _swing_compound_risk = _swing_equity * self.settings.strategy.swing_compound_pct / 100.0
+                except Exception:
+                    logger.exception("swing_compound_equity_read_failed — failing closed")
+                    self.log_sink.action("TradingService", "run_scan_once", "SKIP",
+                                         "swing_compound_equity_read_failed")
+                    return {"skipped": "swing_compound_equity_read_failed"}
+
             # 2026-05-06: MORNING_FADE overlay. For every intraday watchlist
             # row, inject a parallel row with strategy="MORNING_FADE". The
             # existing scan loop processes both rows naturally — the original
@@ -939,17 +959,29 @@ class TradingService:
                 )
                 return {"skipped": "earnings_blackout_read_failed"}
 
-            # Count existing swing positions for separate cap — total and the
-            # RANGE-group subset (2026-06 reserve-2-trend: MEAN_REVERSION may hold
-            # at most SWING_RANGE_GROUP_CAP of the swing slots concurrently).
+            # 5+2 slot accounting (2026-07-03): bucket open swing positions by ENTRY
+            # REGIME (not setup — MR removed; MOMENTUM spans both regimes):
+            #   TREND bucket = TREND_UP-regime trades (MOM-TU + PULLBACK), cap 5, PB-reserved
+            #   RANGE bucket = RANGE-regime trades (MOM-RANGE),           cap SWING_RANGE_GROUP_CAP (2)
+            # Also count today's MOM×TREND_UP entries for the same-day cap (max 2/day).
             _open_swing_count = 0
             _open_swing_range_count = 0
+            _open_swing_trend_count = 0
+            _mom_tu_today_count = 0
+            _today_iso_swing = now_ist_str()[:10]
             for p in self.state.list_open_positions():
                 if str(p.get("wl_type") or "").strip().lower() != "swing":
                     continue
                 _open_swing_count += 1
-                if swing_setup_group(str(p.get("strategy") or "")) == "RANGE":
+                _p_regime = core4_regime(str(p.get("regime") or ""))
+                if _p_regime == "RANGE":
                     _open_swing_range_count += 1
+                else:
+                    _open_swing_trend_count += 1
+                if (str(p.get("strategy") or "").strip().upper() == "MOMENTUM"
+                        and _p_regime == "TREND_UP"
+                        and str(p.get("entry_ts") or "")[:10] == _today_iso_swing):
+                    _mom_tu_today_count += 1
 
             # ── Re-entry cooldown (Batch 2.1, 2026-04-22) ──────────────────
             # Suppress symbols whose last position closed within the last
@@ -1266,7 +1298,24 @@ class TradingService:
                 )
 
                 if _is_swing:
-                    pos = calc_swing_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult if _atr_mult != self.settings.strategy.atr_sl_mult else None)
+                    _swing_kw: dict[str, Any] = {}
+                    if _atr_mult != self.settings.strategy.atr_sl_mult:
+                        _swing_kw["atr_mult_override"] = _atr_mult
+                    # Compounding: size off rolling equity (computed once per scan).
+                    if _swing_compound_risk is not None:
+                        _swing_kw["risk_override"] = _swing_compound_risk
+                        _swing_kw["capital_override"] = _swing_equity
+                    # Liquidity cap: ≤ swing_liq_cap_pct% of 60d turnover. Fail-closed —
+                    # missing turnover → max_qty=0 → qty=0 → skipped at the qty==0 gate.
+                    if self.settings.strategy.swing_liq_cap_pct > 0:
+                        _turn = float(getattr(w, "turnover_med_60d", 0.0) or 0.0)
+                        if _turn <= 0:
+                            logger.warning("swing_liq_cap_no_turnover symbol=%s — sizing to 0 (fail-closed)", w.symbol)
+                        _swing_kw["max_qty"] = (
+                            int((self.settings.strategy.swing_liq_cap_pct / 100.0 * _turn) // max(ltp, 1))
+                            if _turn > 0 else 0
+                        )
+                    pos = calc_swing_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, **_swing_kw)
                 else:
                     pos = calc_position_size(ltp, ind.atr, direction if direction != "HOLD" else "BUY", self.settings.strategy, atr_mult_override=_atr_mult, rr_override=_rr_override)
 
@@ -1571,33 +1620,68 @@ class TradingService:
                     # cliff).  Uses 0.0 as "not yet populated" sentinel — gate
                     # is bypassed on first deploy until the brain re-runs.
                     policy_block_reason = "swing_breadth_ema200_below_70"
+                elif (
+                    _is_swing and _strategy_upper == "MOMENTUM" and _brain_regime == "TREND_UP"
+                    and now_ist().month == 1
+                ):
+                    # MOM×TREND_UP January block (2026-07-03 grind, IS+OOS): January is
+                    # the only month negative in BOTH periods (cross-confirmed by PULLBACK).
+                    # TU-scoped — RANGE-regime MOMENTUM is exempt (filters don't transfer
+                    # across cells; RANGE cell trades raw).
+                    policy_block_reason = "swing_mom_january_block"
+                elif (
+                    _is_swing and _strategy_upper == "MOMENTUM" and _brain_regime == "TREND_UP"
+                    and 5.0e7 <= float(getattr(w, "turnover_med_60d", 0.0) or 0.0) < 4.0e8
+                ):
+                    # MOM×TREND_UP turnover "dead zone" (₹5-40cr/day median): negative both
+                    # periods. Thin (<₹5cr) names carry MOMENTUM's edge; this mid-liquidity
+                    # tier doesn't. TU-scoped. turnover_med_60d is ₹ (close×vol median).
+                    policy_block_reason = "swing_mom_turnover_deadzone"
+                elif (
+                    _is_swing and _strategy_upper == "MOMENTUM" and _brain_regime == "TREND_UP"
+                    and _mom_tu_today_count >= 2
+                ):
+                    # MOM×TREND_UP same-day cap = 2 (2026-07-03 grind): capping same-day
+                    # entries frees capital for staggered better trades (capital velocity).
+                    # Counts today's MOM-TU entries (open positions entered today +
+                    # in-scan entries accumulated below). TU-scoped.
+                    policy_block_reason = "swing_mom_same_day_cap"
+                elif (
+                    _is_swing and _strategy_upper == "PULLBACK"
+                    and now_ist().month in (1, 4, 7)
+                ):
+                    # PULLBACK Jan/Apr/Jul block (2026-07-03 grind, IS+OOS): all three
+                    # months negative in both periods.
+                    policy_block_reason = "swing_pb_seasonal_block"
                 elif (str(w.symbol).strip().upper(), str(direction).strip().upper()) in _open_symbol_dirs:
                     # Same-symbol dedup: already hold this (symbol, direction)
                     # open. Blocks unintended doubling-up on one name (DMART
                     # was held twice). Applies to swing + intraday alike.
                     policy_block_reason = "symbol_already_held"
+                # ── 5+2 slot gates (2026-07-03), bucketed by ENTRY REGIME ──────
+                # TREND bucket (TREND_UP regime: MOM-TU + PB): cap swing_max_positions
+                # (5), last slot PB-reserved. RANGE bucket (RANGE regime: MOM-RANGE):
+                # cap SWING_RANGE_GROUP_CAP (2). Total 7. `_brain_regime` is the
+                # core4-folded entry regime for this signal.
                 elif (
-                    _is_swing
+                    _is_swing and _brain_regime == "TREND_UP"
                     and _strategy_upper not in ("PULLBACK",)
-                    and _open_swing_count >= max(1, self.settings.strategy.swing_max_positions - 1)
+                    and _open_swing_trend_count >= max(1, self.settings.strategy.swing_max_positions - 1)
                 ):
-                    # pb_slot (2026-06): last swing slot is reserved for PULLBACK.
-                    # PULLBACK signals are rare (~5/yr); reserving slot-N avoids them
-                    # being crowded out by MOMENTUM on the same scan tick.
-                    # Validated in 11-yr backtest: pb_slot OOS Calmar 0.79 vs 0.67
-                    # without it. Non-PULLBACK can only hold slots 1 through N-1.
+                    # pb_slot: last TREND-bucket slot reserved for PULLBACK (rare, ~5/yr;
+                    # keeps MOM-TU from crowding it out). Non-PB TU fills slots 1..N-1.
                     policy_block_reason = "swing_pb_slot_reserved"
-                elif _is_swing and _open_swing_count >= self.settings.strategy.swing_max_positions:
-                    policy_block_reason = "swing_max_positions_reached"
                 elif (
-                    _is_swing
-                    and swing_setup_group(w.strategy) == "RANGE"
+                    _is_swing and _brain_regime == "TREND_UP"
+                    and _open_swing_trend_count >= self.settings.strategy.swing_max_positions
+                ):
+                    policy_block_reason = "swing_trend_slots_full"
+                elif (
+                    _is_swing and _brain_regime == "RANGE"
                     and _open_swing_range_count >= SWING_RANGE_GROUP_CAP
                 ):
-                    # 2026-06 reserve-2-trend: MEAN_REVERSION (RANGE group) may hold at
-                    # most 3 of the 5 swing slots; 2 stay reserved for MOMENTUM/PULLBACK
-                    # so frequent MR signals can't crowd out trend entries at the start
-                    # of a new uptrend. Backtest: ~+8k NET at ₹1L vs no reserve.
+                    # RANGE bucket (MOM-RANGE) capped at 2 — separate from the 5 TREND
+                    # slots (additive), so RANGE trades diversify without crowding TU.
                     policy_block_reason = "swing_range_slots_full"
                 elif not _is_swing and qualified >= max_signals_allowed:
                     policy_block_reason = "policy_max_positions_reached"
@@ -1759,19 +1843,33 @@ class TradingService:
                     })
                     # Update in-memory counters so later symbols in this cycle see the new position
                     if _is_swing:
-                        # Re-verify swing count from Firestore to prevent race condition
-                        # between concurrent scan instances both adding the last slot.
-                        _live_swing_count = sum(
-                            1 for p in self.state.list_open_positions()
+                        # Re-verify the relevant BUCKET count from Firestore to prevent a
+                        # race between concurrent scans both filling a bucket's last slot.
+                        # 5+2: TREND bucket cap = swing_max_positions, RANGE bucket cap =
+                        # SWING_RANGE_GROUP_CAP. Bucket keyed on entry regime.
+                        _live_swing = [
+                            p for p in self.state.list_open_positions()
                             if str(p.get("wl_type") or "").strip().lower() == "swing"
-                        )
-                        if _live_swing_count >= self.settings.strategy.swing_max_positions:
+                        ]
+                        if _brain_regime == "RANGE":
+                            _live_bucket = sum(1 for p in _live_swing
+                                               if core4_regime(str(p.get("regime") or "")) == "RANGE")
+                            _bucket_cap = SWING_RANGE_GROUP_CAP
+                        else:
+                            _live_bucket = sum(1 for p in _live_swing
+                                               if core4_regime(str(p.get("regime") or "")) != "RANGE")
+                            _bucket_cap = self.settings.strategy.swing_max_positions
+                        if _live_bucket >= _bucket_cap:
                             qualified -= 1
                             _scan_row_rich.update({"status": "filtered", "reason": "swing_race_condition_blocked"})
                             continue
                         _open_swing_count += 1
-                        if swing_setup_group(w.strategy) == "RANGE":
+                        if _brain_regime == "RANGE":
                             _open_swing_range_count += 1
+                        else:
+                            _open_swing_trend_count += 1
+                        if _strategy_upper == "MOMENTUM" and _brain_regime == "TREND_UP":
+                            _mom_tu_today_count += 1
                     if w.sector and w.sector.upper() != "UNKNOWN":
                         _portfolio_sectors.setdefault(w.sector.upper(), []).append(w.symbol)
                     _strat_key = str(w.strategy or "").strip().upper()

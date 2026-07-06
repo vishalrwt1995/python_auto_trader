@@ -4889,8 +4889,13 @@ class UniverseService:
             _long_candidates: list[tuple[str, str, float]] = [
                 ("PULLBACK", "BUY", pullback),
             ]
-            if bool(r.get("mrAbove200Sma")):
-                _long_candidates.append(("MEAN_REVERSION", "BUY", mean_rev))
+            # MEAN_REVERSION emission DISABLED 2026-07-03 — removed from the swing
+            # roster (gross-negative every year, no validated edge). The regime gate
+            # (_SWING_SETUP_REGIMES["MEAN_REVERSION"] = set()) blocks it anyway; not
+            # emitting keeps MR rows from consuming watchlist slots + scan cycles.
+            # `mean_rev` score is still computed above for the diagnostic row.
+            # if bool(r.get("mrAbove200Sma")):
+            #     _long_candidates.append(("MEAN_REVERSION", "BUY", mean_rev))
             _long_candidates.append(("MOMENTUM", "BUY", momentum))
 
             # Fix 3: short-side scoring in bearish regimes (PANIC / TREND_DOWN)
@@ -4993,15 +4998,13 @@ class UniverseService:
             # could trade" stable for diagnostics, even if no setup is
             # tradeable for this stock right now.
             if not _any_emitted:
-                # Honour the #3 gate here too: MEAN_REVERSION is only a candidate
-                # above the 200-SMA, so it must not slip back in as the fallback
-                # winner-takes-all label (it would otherwise survive the score floor
-                # below and become a tradeable falling-knife row, defeating the gate).
+                # Fallback diagnostic label. MEAN_REVERSION excluded 2026-07-03
+                # (removed from roster). BREAKOUT/MR are both gate-blocked anyway,
+                # but keeping the fallback to tradeable setups (PULLBACK/MOMENTUM)
+                # avoids emitting rows that can never trade.
                 _setup_scores = {
-                    "BREAKOUT": breakout, "PULLBACK": pullback, "MOMENTUM": momentum,
+                    "PULLBACK": pullback, "MOMENTUM": momentum,
                 }
-                if bool(r.get("mrAbove200Sma")):
-                    _setup_scores["MEAN_REVERSION"] = mean_rev
                 _top_label, _top_score = max(_setup_scores.items(), key=lambda kv: kv[1])
                 _fallback_score = round(max(0.0, min(100.0, _top_score)), 2)
                 if bool(r.get("recentEventFlag")):

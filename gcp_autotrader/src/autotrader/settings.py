@@ -95,6 +95,14 @@ class StrategySettings:
     # qty math envelope without changing the SL distance per share.
     swing_risk_per_trade: float = 300.0
     swing_max_positions: int = 5
+    # Compounding (2026-07-03): when > 0, swing risk/trade = this %% of ROLLING
+    # equity (= CAPITAL_SWING base + all-time realized swing net_pnl) instead of
+    # the flat swing_risk_per_trade. 0 = OFF (flat sizing, legacy behavior).
+    swing_compound_pct: float = 0.0
+    # Liquidity cap (2026-07-03): when > 0, cap each swing position at this %% of
+    # the symbol's 60d median daily turnover (₹). Keeps order size in the
+    # low-impact regime so backtest fills == prod fills. 0 = OFF (no cap).
+    swing_liq_cap_pct: float = 0.0
     # 2026-06: 10 → 20. The backtest-validated daily 1R trailing exit
     # (domain/swing_exit) lets winners ride; a 20-bar max-hold gives trend trades
     # room while the trail caps give-back. Counted in TRADING days in
@@ -420,6 +428,8 @@ class AppSettings:
             swing_atr_sl_mult=_env_float("SWING_ATR_SL_MULT", 2.5),
             swing_rr=_env_float("SWING_RR", 2.0),
             swing_risk_per_trade=_env_float("SWING_RISK_PER_TRADE", 300),
+            swing_compound_pct=_env_float("SWING_COMPOUND_PCT", 0.0),
+            swing_liq_cap_pct=_env_float("SWING_LIQ_CAP_PCT", 0.0),
             swing_max_positions=_env_int("SWING_MAX_POSITIONS", 5),
             swing_max_hold_days=_env_int("SWING_MAX_HOLD_DAYS", 20),
             # Batch 1.3 (2026-04-22): default aligned to dataclass (70). Prior

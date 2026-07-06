@@ -13,11 +13,31 @@ from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.attribution import build_row_from_position
-from autotrader.domain.risk import calc_round_trip_brokerage
+from autotrader.backtest.costs import CostConfig, compute_round_trip_cost
 from autotrader.settings import AppSettings
 from autotrader.time_utils import now_ist_str, now_utc_iso, parse_any_ts, today_ist
 
 logger = logging.getLogger(__name__)
+
+# Full Upstox realized-cost model (2026-07-03). Replaces risk.calc_round_trip_brokerage,
+# which under-charged ~3x: it booked STT 0.025%/leg for ALL trades, but delivery (CNC)
+# STT is 0.1%/leg (0.2% RT) and it omitted DP charges entirely — booking ~0.11-0.18%
+# vs the real ~0.24-0.58% round-trip. Compounding amplified that error, so realized
+# net_pnl now uses costs.py (verified ₹115.24 on a ₹20K swing RT = documented Upstox).
+_UPSTOX_COST = CostConfig.upstox()
+
+
+def _realized_round_trip_cost(product: str, qty: int, entry_price: float, exit_price: float) -> float:
+    """All-in round-trip cost (brokerage+STT+exchange+SEBI+GST+stamp+DP) to subtract
+    from gross for realized net_pnl. Delivery (CNC/D) vs intraday (MIS) drives the
+    correct STT/stamp/DP schedule — routed off the position's product field."""
+    if qty <= 0:
+        return 0.0
+    is_swing = str(product or "").upper() in {"CNC", "D", "DELIVERY"}
+    return compute_round_trip_cost(
+        qty=qty, entry_price=entry_price, exit_price=exit_price,
+        is_swing=is_swing, cfg=_UPSTOX_COST,
+    )
 
 
 def _bq_insert_with_retry(bq: BigQueryClient, trade_row: dict[str, Any], tag: str, max_attempts: int = 3) -> None:
@@ -259,7 +279,7 @@ class OrderService:
         # Prior behavior wrote gross pnl to BQ, masking ~0.10–0.20% cost drag
         # per trade. That cost eats the edge on small positions — trades must
         # clear brokerage + STT + GST + exchange before they're profitable.
-        brokerage = calc_round_trip_brokerage(qty, entry_price, exit_price) if qty > 0 else 0.0
+        brokerage = _realized_round_trip_cost(pos.get("product"), qty, entry_price, exit_price) if qty > 0 else 0.0
         # Add per-leg partial-exit brokerage if any partials happened.
         partial_brk = float(pos.get("partial_brokerage", 0.0) or 0.0)
         brokerage = round(brokerage + partial_brk, 2)
@@ -1077,7 +1097,7 @@ class OrderService:
             new_partial_pnl = round(float(pos.get("partial_pnl", 0)) + partial_pnl, 2)
             # Track partial-exit brokerage so final close can include it in net_pnl.
             # Each partial exit has its own entry+exit legs at the partial qty.
-            partial_brk = calc_round_trip_brokerage(exit_qty, entry_price, exit_price)
+            partial_brk = _realized_round_trip_cost(pos.get("product"), exit_qty, entry_price, exit_price)
             new_partial_brk = round(float(pos.get("partial_brokerage", 0)) + partial_brk, 2)
             self.state.update_position(position_tag, {
                 "qty": remaining_qty,
@@ -1130,7 +1150,7 @@ class OrderService:
         multiplier = 1 if side == "BUY" else -1
         partial_pnl = round((fill_price - entry_price) * exit_qty * multiplier, 2)
         new_partial_pnl = round(float(pos.get("partial_pnl", 0)) + partial_pnl, 2)
-        partial_brk = calc_round_trip_brokerage(exit_qty, entry_price, fill_price)
+        partial_brk = _realized_round_trip_cost(pos.get("product"), exit_qty, entry_price, fill_price)
         new_partial_brk = round(float(pos.get("partial_brokerage", 0)) + partial_brk, 2)
         self.state.update_position(position_tag, {
             "qty": remaining_qty,

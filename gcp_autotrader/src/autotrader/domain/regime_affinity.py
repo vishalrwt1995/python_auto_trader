@@ -280,21 +280,22 @@ def regime_hard_blocks_strategy(regime: str, strategy: str) -> bool:
     return strategy_upper in _HARD_BLOCKS.get(regime_upper, set())
 
 
-# ── 2026-06 swing-config: per-setup regime gate ─────────────────────────────
-# The multi-year backtest validated exactly three long swing cells:
-#   MOMENTUM × TREND_UP, PULLBACK × TREND_UP, MEAN_REVERSION × RANGE.
-# RANGE_ROTATING folds to RANGE via core4_regime(), so MR fires there too.
-# Phase 4 (2026-06-27): RECOVERY also admitted for MEAN_REVERSION.
-#   Post-PANIC markets are oversold → MR snap-backs work well. The affinity
-#   dict already set RECOVERY → MR at 0.7×; this gate now matches it.
-#   Backtest evidence: removing RECOVERY from MR gate cost ₹14,926 net over
-#   2022–2026 vs. allowing it (20 blocked winning trades).
-# This is a SWING-ONLY gate layered on top of _HARD_BLOCKS (which governs
-# BREAKOUT, the shorts, and intraday setups).
+# ── swing-config: per-setup regime gate ─────────────────────────────────────
+# 2026-07-03 (full 2015-2026 re-grind on the trusted engine, IS/OOS-validated):
+#   MOMENTUM × {TREND_UP, RANGE} — RANGE added: MOM×RANGE is a real cell
+#     (+₹335k standalone; overturns the June "momentum-RANGE dropped" verdict,
+#     which ran on the broken engine). RANGE_ROTATING folds to RANGE via
+#     core4_regime(), so it's covered.
+#   PULLBACK × TREND_UP — unchanged (PB×RANGE FAILED: IS-negative).
+#   MEAN_REVERSION × (none) — REMOVED. Gross-negative every year 2015-2026,
+#     unfixable by exit or selection; no regime home exists (PANIC/TREND_UP
+#     gate-unsatisfiable). Empty set = blocked in every regime. Emission also
+#     disabled in universe_service (no wasted watchlist rows).
+# This is a SWING-ONLY gate layered on top of _HARD_BLOCKS.
 _SWING_SETUP_REGIMES: dict[str, set[str]] = {
-    "MOMENTUM":       {"TREND_UP"},
+    "MOMENTUM":       {"TREND_UP", "RANGE"},
     "PULLBACK":       {"TREND_UP"},
-    "MEAN_REVERSION": {"RANGE", "RANGE_ROTATING", "RECOVERY"},
+    "MEAN_REVERSION": set(),   # removed 2026-07-03 — no validated edge
 }
 
 
@@ -329,13 +330,14 @@ def core4_regime(regime: str) -> str:
     return _CORE4_FOLD.get(r, r)
 
 
-# Reserve-2-trend slot allocation (2026-06 swing-config): the RANGE-bucket cell
-# (MEAN_REVERSION) may hold at most 3 of the 5 swing slots concurrently, keeping
-# 2 free for the TREND-bucket cells (MOMENTUM/PULLBACK). Backtest evidence: MR
-# signals are ~5× more frequent and otherwise crowd out the trend trades exactly
-# when a new uptrend starts — the reserve added ~+8k NET at ₹1L vs no cap.
-SWING_RANGE_GROUP_CAP = 3
-_SWING_RANGE_GROUP = {"MEAN_REVERSION"}
+# 5+2 additive slot structure (2026-07-03 combination grind): the swing book is
+# TREND bucket (TREND_UP-regime trades: MOMENTUM-TU + PULLBACK) = swing_max_positions
+# slots (5, last PB-reserved) PLUS a separate RANGE bucket (RANGE-regime MOMENTUM) =
+# this many slots. Total 5+2=7. Buckets are keyed on ENTRY REGIME, not setup (MR
+# removed; MOMENTUM now spans both regimes). Validated: 5+2 NET +₹558k / Calmar
+# 0.64 vs 5-shared +₹401k; the RANGE cell diversifies without crowding the TU book.
+SWING_RANGE_GROUP_CAP = 2
+_SWING_RANGE_GROUP = {"MEAN_REVERSION"}  # legacy (unused after MR removal)
 
 
 def swing_setup_group(setup: str) -> str:

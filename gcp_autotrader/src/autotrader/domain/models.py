@@ -283,6 +283,7 @@ class WatchlistRow:
     wl_score: float = 0.0    # regime-weighted final score — swing slot-ranking key
     rs_vs_mkt: float = 0.0   # ret60 − universe-mean ret60; MR/PULLBACK require > 0
     breadth_pct: float = 0.0  # % of swing universe above 50d SMA; PULLBACK needs ≥ 60
+    turnover_med_60d: float = 0.0  # ₹ 60d median daily turnover — swing liquidity cap input
 
 
 @dataclass
