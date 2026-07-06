@@ -16,6 +16,28 @@ EMPIRICAL VALIDATION (2026-06-29, 8,271 May-2026 prod scan_decisions):
     Score qualification   99.86% match (2,115/2,118 score-decisive rows)
     — confirms scoring + sizing layers are faithful to deployed prod code
 
+EMPIRICAL VALIDATION v2 (2026-07-01, widened to full April-July scan_decisions,
+corrected methodology — see PROJECT_KNOWLEDGE.md for the full investigation):
+    Two methodology bugs found + fixed before trusting any number:
+      1. scan_decisions.adjusted_score is ALWAYS the brain-haircut-inclusive score
+         (trading_service.py:1201); swing's real gate qualifies on _affinity_score
+         (haircut-free, :1721). Comparing against the haircut-inclusive column
+         understates match rate whenever risk_mode != NORMAL — fixed by
+         reconstructing the correct reference value.
+      2. Prod's own code changed mid-window (regime taxonomy dropped
+         EARLY_TREND_UP/DOWN + CHOP on 2026-06-27; swing_setup_allowed_in_regime()
+         and the adaptive ATR mult were themselves shipped inside this window).
+         Comparing current code to older logged decisions shows drift from prod
+         being a different codebase then — not a backtest fidelity gap.
+    On the stable post-06-27 window (current deployed config, 1,517 rows,
+    1,473 score-decisive): full pipeline (affinity+haircut) match 100.00%,
+    swing-qualification match (regime-allowlist + score vs prod `qualified`)
+    100.00%. Stronger and more current than the v1 May-only number above.
+    Side-finding (informational, NOT fixed — prod code, out of scope): prod's
+    own blocked_reason label at trading_service.py:1813 checks `adjusted_score`
+    instead of the swing-aware `_score_for_threshold` — cosmetic log mislabel
+    only, does not affect actual qualification (line 1722 uses the right var).
+
 FAITHFULNESS AUDIT vs prod (2026-06-29, post entry/exit deep audit):
     Universe eligibility   ✅  BALANCED gates: top-1000 turnover, ≥180 bars,
                                price ≥30, ATR% ≤12%, gap-risk ≤6% (UNIVERSE_MODE
@@ -65,17 +87,35 @@ FAITHFULNESS AUDIT vs prod (2026-06-29, post entry/exit deep audit):
                                breadth<60 blocks PULLBACK (line 1554). Both computed
                                per day from the universe (same formula as prod brain).
                                Comment: "OOS Calmar 0.79 vs 0.10 baseline" in prod code.
-    DD governor (T3)       ✅  Weekly-5%/monthly-8% halt (PortfolioBook); daily 1.5%
-                               qty-halve NOT modeled (noted in residual gaps)
+    DD governor (T3)       ⚠   Weekly-5%/monthly-8% halt modeled from SWING-ONLY
+                               realized P&L; real check_can_open() (portfolio_book.py)
+                               sums daily/weekly/monthly P&L GLOBALLY across intraday+
+                               swing+positional+hedge (get_realized_pnl_since has no
+                               channel filter). Swing-only proxy is an approximation,
+                               not a replication — bias direction unknown (depends on
+                               intraday's contribution on any given day). Daily 1.5%
+                               qty-halve NOT modeled at all (see residual gaps: 2026-07-01
+                               investigation found it's global-scoped + likely near-zero
+                               impact for swing given 09:22 scan timing — deliberately
+                               left unmodeled rather than approximated).
     max_trades_day (T8)    ✅  5 entries/day/channel cap (matches prod gate)
     Daily-breaker (T9)     ✅  Uses prev-day realized P&L (swing exits EOD, entries
                                at scan time → no same-day look-ahead)
 
 KNOWN RESIDUAL GAPS (not modeled — all small/structural, bias noted):
-    DD governor 1.5%-daily-DD throttle (halve qty): NOT modeled — weekly/monthly halts
-        are (T3), but intraday halving requires per-entry re-sizing (complex). Missing
-        → slight optimism on extreme intraday loss days. Channel-budget risk cap
-        (₹37.5k max open risk vs ₹5L budget) never binds → safely ignored.
+    DD governor 1.5%-daily-DD throttle (halve qty): NOT modeled. Investigated
+        2026-07-01: portfolio_book.check_can_open() scopes daily/weekly/monthly P&L
+        GLOBALLY (intraday+swing combined, no channel filter) — faithfully modeling
+        it here would need intraday P&L history that doesn't exist for 2015-2026.
+        Separately, swing's single scan fires at 09:22 IST (~7min post-open), when
+        same-day realized P&L from either channel is essentially always ~0 — so the
+        gate likely rarely binds for swing regardless of scope. Given the data gap
+        and low apparent impact, decided NOT to build a swing-only-proxy
+        approximation (would add complexity of unproven value). Same global-scope
+        caveat applies to the T3 weekly/monthly halt above, which IS modeled but
+        only as a swing-only proxy for what's really a global metric.
+        Channel-budget risk cap (₹37.5k max open risk vs ₹5L budget) never binds
+        → safely ignored.
     Real intraday entry timing (T11): prod enters at scan-time live LTP (4 scans/day
         at 09:22/11:00/13:00/14:30 IST); here at next-day OPEN (daily-bar limitation).
         Bias ambiguous. Implementing T11 requires 5m GCS candle data per signal day.
@@ -142,7 +182,25 @@ CACHE = os.path.expanduser("~/.autotrader_backtest_cache")
 BARS_PKL = os.path.join(CACHE, "swing_adj_bars.pkl")
 REGIME_JSON = os.path.join(CACHE, "regime_faithful_2015.json")
 MARKET_INPUTS_JSON = os.path.join(CACHE, "market_inputs_2015.json")
+SECTOR_MAPPING_JSON = os.path.join(CACHE, "sector_mapping.json")
 UPSTOX = CostConfig.upstox()
+
+
+def _load_sym_sector() -> dict:
+    """sym -> sector, from the cached ISIN-keyed sector_mapping.json (2,685 ISINs)."""
+    try:
+        raw = json.load(open(SECTOR_MAPPING_JSON))
+    except Exception:
+        return {}
+    out = {}
+    for _isin, _row in raw.items():
+        _sym = _row.get("sym"); _sec = _row.get("sector")
+        if _sym and _sec:
+            out[_sym] = _sec
+    return out
+
+
+SYM_SECTOR = _load_sym_sector()
 
 # ── Deployed prod config (2026-06-29) ────────────────────────────────────────
 RISK = 7500.0                        # SWING_RISK_PER_TRADE env override (flat, not 1.5%)
@@ -428,12 +486,62 @@ def _month_key(d: str) -> str:
     return d[:7]   # YYYY-MM
 
 
+# ── Data-gap guard (2026-07-02 finding) ─────────────────────────────────────
+# bt_bhavcopy_adj has real holes for some symbols (suspension/illiquidity) —
+# consecutive bars in `s.d` can jump weeks/months with no warning. A trade
+# whose hold window spans one of these gets a phantom entry/exit price pair
+# and an R-multiple with no basis in real trading (found: -3.46R to +5.35R,
+# vs every genuine trade in this engine landing in the normal -1.1R..+3R
+# band). Detected directly on the date sequence, not inferred from hold-vs-
+# calendar-span after the fact, so it catches the gap wherever it sits in
+# the holding window, not just at entry or exit.
+_MAX_INTRABAR_GAP_DAYS = 6   # generous: covers a long-weekend + one holiday
+
+
+def _spans_data_gap(dates: list, lo: int, hi: int) -> bool:
+    """True if any two consecutive bars in dates[lo:hi] are >6 calendar days
+    apart — a real trading gap (weekend+holiday) never gets close to this;
+    it means bars are simply missing, not that no trading happened."""
+    from datetime import date as _date
+    for k in range(lo, hi):
+        d0 = _date.fromisoformat(dates[k])
+        d1 = _date.fromisoformat(dates[k + 1])
+        if (d1 - d0).days > _MAX_INTRABAR_GAP_DAYS:
+            return True
+    return False
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def run(symdata, regime: dict, market_inputs: dict,
         d0="2022-01-03", d1="2026-12-31",
         long_only=False, verbose=True,
-        setups=None, emit_floor=None):
+        setups=None, emit_floor=None,
+        trades_out=None,
+        pb_month_block=None,
+        pb_b200_floor=None,
+        pb_month_block_maxb200=None,
+        setup_daily_cap=None,
+        mom_month_block=None,
+        mom_exit_override=None,
+        mom_turnover_exclude=None,
+        setup_daily_cap_rank_by=None,
+        mom_regimes=None,
+        mom_range_max_off_high=None,
+        mom_range_max_dsp=None,
+        pb_regimes=None,
+        pb_rsi_floor=None,
+        pb_exit_override=None,
+        mr_month_block=None,
+        mr_exit_override=None,
+        mr_regimes=None,
+        range_bucket_by_regime=False,
+        range_group_cap=None,
+        total_slots=None,
+        tu_slot_cap=None,
+        compound_pct=None,
+        liq_cap_pct=None,
+        bk_regimes=None):
     """Run the final prod-faithful swing backtest.
 
     Args:
@@ -463,11 +571,23 @@ def run(symdata, regime: dict, market_inputs: dict,
 
     # ── Stage 1: generate all qualified signals (portfolio-independent) ──────
     signals = []
+    _trend_up_streak = 0   # consecutive TREND_UP days leading into signal day
+    _prev_reg = ""
+    _last_panic_d = None   # most recent PANIC day seen so far (for days-since-PANIC filter)
+    from datetime import date as _dsp_date
     for d in cal:
         regime_entry = regime[d]
         reg = regime_entry.get("regime", "RANGE")
         reg = core4_regime(reg)           # fold 6-label to 4-label
         risk_mode = str(regime_entry.get("risk_mode", "NORMAL"))  # for adaptive ATR mult (T1)
+        _trend_up_streak = (_trend_up_streak + 1) if reg == "TREND_UP" else 0
+        _prev_reg = reg
+        if reg == "PANIC":
+            _last_panic_d = d
+        _days_since_panic = (
+            (_dsp_date.fromisoformat(d) - _dsp_date.fromisoformat(_last_panic_d)).days
+            if _last_panic_d else 9999
+        )
 
         mi = market_inputs.get(d, {})
         regime_snap = build_regime_snapshot(reg, mi)
@@ -514,7 +634,21 @@ def run(symdata, regime: dict, market_inputs: dict,
                 # MOMENTUM/PULLBACK → TREND_UP only; MR → RANGE/RANGE_ROTATING/
                 # RECOVERY only. Prod's _SWING_SETUP_REGIMES allowlist; stronger
                 # than regime_hard_blocks_strategy (which doesn't block MOM in RANGE).
-                if not swing_setup_allowed_in_regime(setup, reg):
+                if setup == "MOMENTUM" and mom_regimes is not None:
+                    # regime-cell exploration: override becomes the single source of
+                    # truth for MOMENTUM's regime permission (allowlist + hard-block)
+                    if reg not in mom_regimes:
+                        continue
+                elif setup == "PULLBACK" and pb_regimes is not None:
+                    if reg not in pb_regimes:
+                        continue
+                elif setup == "MEAN_REVERSION" and mr_regimes is not None:
+                    if reg not in mr_regimes:
+                        continue
+                elif setup == "BREAKOUT" and bk_regimes is not None:
+                    if reg not in bk_regimes:
+                        continue
+                elif not swing_setup_allowed_in_regime(setup, reg):
                     continue
 
                 # Regime-level breadth gates (mirrors swing_prod_faithful.py)
@@ -528,8 +662,42 @@ def run(symdata, regime: dict, market_inputs: dict,
                         continue
                     if breadth < 60.0:
                         continue
-                if setup in ("MOMENTUM", "PULLBACK") and b200 > 0.0 and b200 < 70.0:
+                    if pb_month_block and int(d[5:7]) in pb_month_block:
+                        # conditional: override the block when market is very strong
+                        _max_b200 = pb_month_block_maxb200 if pb_month_block_maxb200 is not None else 100.0
+                        if b200 < _max_b200:
+                            continue
+                if setup == "MOMENTUM" and b200 > 0.0 and b200 < 70.0:
                     continue
+                # MOMENTUM filters below are scoped to TREND_UP: they were validated
+                # on TREND_UP trades only (2026-07-02); the RANGE cell showed
+                # sign-flip/no-transfer for all three (Jan, turnover dead-zone,
+                # same-day cap) — do not broaden without re-validation per cell.
+                if setup == "MOMENTUM" and reg == "TREND_UP" and mom_month_block and int(d[5:7]) in mom_month_block:
+                    continue          # candidate filter: Jan consistently bad IS+OOS (2026-07-02 grind)
+                if setup == "MOMENTUM" and reg == "TREND_UP" and mom_turnover_exclude:
+                    _tlo, _thi = mom_turnover_exclude
+                    if _tlo <= (s.turnmed60[j] / 1e7) < _thi:
+                        continue      # candidate filter: 5-40cr "dead zone" bad IS+OOS (2026-07-02 grind)
+                if setup == "MOMENTUM" and reg == "RANGE" and mom_range_max_off_high is not None:
+                    # candidate filter (George-Hwang 52w-high effect): RANGE-cell momentum
+                    # >15% below its 52w high is consistently BAD IS+OOS; near-high is best.
+                    # Monotonic both periods on n=219 (2026-07-02 grind). RANGE-scoped.
+                    # ENGINE TEST RESULT: FAILED — slot reallocation swamps the ~20k direct
+                    # gain (raw +335,288 vs filtered +314,351). Kept for reference only.
+                    _hi52 = max(s.h[max(0, j - 251): j + 1])
+                    if _hi52 > 0 and (s.c[j] / _hi52 - 1.0) < -mom_range_max_off_high / 100.0:
+                        continue
+                if setup == "MOMENTUM" and reg == "RANGE" and mom_range_max_dsp is not None:
+                    # candidate filter: RANGE-cell momentum with no PANIC in the last N days
+                    # was consistently BAD IS+OOS (>90d: IS -0.15R n=26 / OOS -0.05R n=44).
+                    # Weakest mechanism grounding of the three — engine test decides.
+                    if _days_since_panic > mom_range_max_dsp:
+                        continue
+                if setup == "PULLBACK" and b200 < (pb_b200_floor if pb_b200_floor is not None else 70.0):
+                    continue
+                if setup == "MEAN_REVERSION" and mr_month_block and int(d[5:7]) in mr_month_block:
+                    continue          # candidate filter: Jan BAD both periods, 4th cross-setup confirmation (2026-07-02)
 
                 # ── Prod entry pipeline: real indicators → real gate stack ────
                 win = s.bars[max(0, j - 299): j + 1]
@@ -539,6 +707,12 @@ def run(symdata, regime: dict, market_inputs: dict,
                 except Exception:
                     continue
                 if ind is None or db is None:
+                    continue
+                if setup == "PULLBACK" and pb_rsi_floor is not None and ind.rsi.curr < pb_rsi_floor:
+                    # candidate filter (2026-07-02 grind): within PB's 40-60 daily-RSI
+                    # reload zone, the sub-47 half is consistently BAD IS+OOS (n=50,
+                    # -0.08/-0.20 avgR) — deepest dips keep dipping; upper half is
+                    # uniformly good. Engine test decides.
                     continue
 
                 direction = determine_direction(
@@ -562,7 +736,14 @@ def run(symdata, regime: dict, market_inputs: dict,
                 if adj_score < EMIT_FLOOR:
                     continue
                 if regime_hard_blocks_strategy(reg, setup):
-                    continue
+                    _override = (
+                        (setup == "MOMENTUM" and mom_regimes is not None and reg in mom_regimes)
+                        or (setup == "PULLBACK" and pb_regimes is not None and reg in pb_regimes)
+                        or (setup == "MEAN_REVERSION" and mr_regimes is not None and reg in mr_regimes)
+                        or (setup == "BREAKOUT" and bk_regimes is not None and reg in bk_regimes)
+                    )
+                    if not _override:
+                        continue
 
                 # ── Sizing (prod risk.py + adaptive ATR mult, T1) ────────────
                 ei = j + 1
@@ -583,11 +764,26 @@ def run(symdata, regime: dict, market_inputs: dict,
 
                 # ── Exit (prod simulate_exit) ────────────────────────────────
                 is_buy = direction == "BUY"
+                _max_hold, _trail_r, _activate_r = MAX_HOLD, TRAIL_R, ACTIVATE_R
+                if setup == "MOMENTUM" and mom_exit_override:
+                    _max_hold = mom_exit_override.get("max_hold", _max_hold)
+                    _trail_r = mom_exit_override.get("trail_R", _trail_r)
+                    _activate_r = mom_exit_override.get("activate_R", _activate_r)
+                if setup == "PULLBACK" and pb_exit_override:
+                    _max_hold = pb_exit_override.get("max_hold", _max_hold)
+                    _trail_r = pb_exit_override.get("trail_R", _trail_r)
+                    _activate_r = pb_exit_override.get("activate_R", _activate_r)
+                if setup == "MEAN_REVERSION" and mr_exit_override:
+                    _max_hold = mr_exit_override.get("max_hold", _max_hold)
+                    _trail_r = mr_exit_override.get("trail_R", _trail_r)
+                    _activate_r = mr_exit_override.get("activate_R", _activate_r)
                 off, exit_px, reason = simulate_exit(
-                    s.bars, ei, is_buy, sl_dist, MAX_HOLD,
-                    trail_R=TRAIL_R, activate_R=ACTIVATE_R,
+                    s.bars, ei, is_buy, sl_dist, _max_hold,
+                    trail_R=_trail_r, activate_R=_activate_r,
                 )
                 exit_i = min(ei + off, len(s.bars) - 1)
+                if _spans_data_gap(s.d, ei, exit_i):
+                    continue        # data-gap artifact — phantom R, not a real trade
 
                 # Paper-mode fill slippage (prod order_service.py: 0.10%/leg, adverse).
                 # Sizing stays on the clean price (prod sizes on LTP, fills on LTP±slip).
@@ -605,13 +801,30 @@ def run(symdata, regime: dict, market_inputs: dict,
                 signals.append({
                     "sig_d": d, "entry_d": s.d[ei], "exit_d": s.d[exit_i],
                     "sym": sym, "setup": setup, "dir": direction,
-                    "group": swing_setup_group(setup), "regime": reg,
+                    "group": ("RANGE" if (range_bucket_by_regime and reg == "RANGE")
+                              else swing_setup_group(setup)), "regime": reg,
+                    "risk_mode": risk_mode,
                     "qty": pos.qty, "entry": entry_px, "exit": exit_px,
+                    "sl_price": pos.sl_price,
                     "risk": sl_dist * pos.qty, "notional": entry_px * pos.qty,
                     "gross": gross, "net": net, "reason": reason,
+                    "hold": off,
                     "R": net / (sl_dist * pos.qty) if sl_dist * pos.qty > 0 else 0.0,
                     "adj_score": adj_score, "raw_score": raw_score,
-                    "wl_score": comp,     # T7: pre-filter component score (prod sorts by this)
+                    "wl_score": comp,
+                    "breadth": round(breadth, 1),
+                    "b200": round(b200, 1),
+                    "atr_pct": round(100.0 * ind.atr / entry_px, 2) if entry_px > 0 else 0.0,
+                    "sl_pct": round(100.0 * sl_dist / entry_px, 2) if entry_px > 0 else 0.0,
+                    "trend_streak": _trend_up_streak,
+                    "month": int(d[5:7]),
+                    "year": int(d[:4]),
+                    "rsi": round(ind.rsi.curr, 1),
+                    "adx_daily": round(db.adx_daily, 1),
+                    "volume_ratio": round(ind.volume.ratio, 2),
+                    "sector": SYM_SECTOR.get(sym, "UNKNOWN"),
+                    "turnover_cr": round(s.turnmed60[j] / 1e7, 2),
+                    "strength": round(float(db.strength or 0.0), 1),
                 })
 
     # ── Stage 2: portfolio walk (5 slots, 1 PULLBACK reserve, daily breaker) ─
@@ -629,6 +842,7 @@ def run(symdata, regime: dict, market_inputs: dict,
     taken = []
     held_syms = set()
     prev_d = None                                   # T9: previous trading day
+    _equity = CAP                                   # compounding: rolling realized equity
     for d in cal:
         still = []
         for p in open_pos:
@@ -638,41 +852,107 @@ def run(symdata, regime: dict, market_inputs: dict,
                 week_pnl[_week_key(p["exit_d"])]   += net  # T3
                 month_pnl[_month_key(p["exit_d"])] += net  # T3
                 held_syms.discard(p["sym"])
+                _equity += net
             else:
                 still.append(p)
         open_pos = still
+        # compounding mode: breaker/DD thresholds scale with equity (else 1.0 = flat)
+        _hs = (_equity / CAP) if compound_pct else 1.0
 
         # T9: per-channel daily breaker (trading_service.py:1604-1614).
         # Swing exits happen at EOD reconciliation; entries at scan time → use
         # PREVIOUS day's realized P&L so we don't look into same-day exits.
         prev_pnl = realized_day.get(prev_d, 0.0) if prev_d else 0.0
-        if prev_pnl >= profit_lim:          # profit target → full block
+        if prev_pnl >= profit_lim * _hs:    # profit target → full block
             prev_d = d; continue
-        _loss_day = prev_pnl <= -loss_lim   # loss limit → MR-only
+        _loss_day = prev_pnl <= -loss_lim * _hs   # loss limit → MR-only
 
         # T3: DD governor weekly/monthly halts
-        if week_pnl.get(_week_key(d), 0.0)   <= -DD_WEEK_HALT:
+        if week_pnl.get(_week_key(d), 0.0)   <= -DD_WEEK_HALT * _hs:
             prev_d = d; continue
-        if month_pnl.get(_month_key(d), 0.0) <= -DD_MONTH_HALT:
+        if month_pnl.get(_month_key(d), 0.0) <= -DD_MONTH_HALT * _hs:
             prev_d = d; continue
 
         cands = sorted(by_sig.get(d, []), key=lambda x: -x["wl_score"])  # T7: prod sorts by wl_score
         entries_today = 0                           # T8: max_trades_day=5
+        _setup_today = collections.defaultdict(int)  # candidate filter: same-day-per-setup cap
+        # candidate filter: rank same-day cap survivors by a different key than
+        # wl_score (e.g. ADX) while cross-setup slot priority stays wl_score-sorted.
+        _cap_ok_ids = None
+        if setup_daily_cap and setup_daily_cap_rank_by:
+            _cap_ok_ids = set()
+            _by_setup_today = collections.defaultdict(list)
+            for sg in cands:
+                _by_setup_today[sg["setup"]].append(sg)
+            for _su, _lst in _by_setup_today.items():
+                _rank_key = setup_daily_cap_rank_by.get(_su)
+                _cap_n = setup_daily_cap.get(_su, len(_lst))
+                _ranked = sorted(_lst, key=lambda x: -x.get(_rank_key, 0.0)) if _rank_key else _lst
+                for sg in _ranked[:_cap_n]:
+                    _cap_ok_ids.add(id(sg))
+        _tslots = total_slots if total_slots is not None else 5
         for sg in cands:
-            if entries_today >= 5 or len(open_pos) >= 5:  # T8
+            if entries_today >= 5 or len(open_pos) >= _tslots:  # T8 (entries/day stays 5 = prod gate)
                 break
             if _loss_day and sg["setup"] != "MEAN_REVERSION":
                 continue                # loss-limit day: counter-trend (MR) only
-            if sg["setup"] not in ("PULLBACK",) and len(open_pos) >= 4:
-                continue                # last slot reserved for PULLBACK
+            # TU sub-book cap (additive-slots mode): non-RANGE-bucket positions are
+            # capped at tu_slot_cap (default = total slots → no-op), with the last
+            # TU slot reserved for PULLBACK (generalizes the original >=4-of-5 rule;
+            # counts only non-RANGE positions, identical to legacy when bucket off).
+            _nonrange_open = sum(1 for p in open_pos if p["group"] != "RANGE")
+            if sg["group"] != "RANGE":
+                _tu_cap = tu_slot_cap if tu_slot_cap is not None else _tslots
+                if _nonrange_open >= _tu_cap:
+                    continue
+                if sg["setup"] not in ("PULLBACK",) and _nonrange_open >= _tu_cap - 1:
+                    continue            # last TU slot reserved for PULLBACK
             if sg["sym"] in held_syms:
                 continue
-            if sg["group"] == "RANGE" and sum(1 for p in open_pos if p["group"] == "RANGE") >= SWING_RANGE_GROUP_CAP:
+            if sg["group"] == "RANGE" and sum(1 for p in open_pos if p["group"] == "RANGE") >= (range_group_cap if range_group_cap is not None else SWING_RANGE_GROUP_CAP):
                 continue
-            if sum(p["notional"] for p in open_pos) + sg["notional"] > CAP:
+            if compound_pct and not sg.get("_scaled"):
+                # %-of-rolling-equity sizing: rescale this signal from flat RISK to
+                # compound_pct% of current realized equity. Linear scale of qty-
+                # proportional fields (costs ≈ linear in qty; ₹20 brokerage cap makes
+                # real costs sub-linear → linear is slightly conservative). R invariant.
+                _f = (_equity * compound_pct / 100.0) / RISK
+                for _k in ("qty", "notional", "risk", "gross", "net"):
+                    sg[_k] = sg[_k] * _f
+                sg["_scaled"] = True
+            if liq_cap_pct and not sg.get("_liqcapped"):
+                # LIQUIDITY CAP (prod-replicable): never take more than liq_cap_pct%
+                # of the symbol's TRAILING 60d median daily turnover (known pre-trade,
+                # no look-ahead — prod computes the identical cap). Shrink qty to fit;
+                # P&L scales linearly, R invariant. Keeps sizing in the low-impact
+                # regime where the flat 0.10% slippage is actually accurate, so the
+                # backtest fill == the prod fill by construction. Compounding then
+                # auto-plateaus at the edge's real capacity instead of assuming
+                # un-fillable orders.
+                _cap_notional = (liq_cap_pct / 100.0) * float(sg.get("turnover_cr", 0.0)) * 1e7
+                if _cap_notional > 0 and sg["notional"] > _cap_notional:
+                    _shrink = _cap_notional / sg["notional"]
+                    for _k in ("qty", "notional", "risk", "gross", "net"):
+                        sg[_k] = sg[_k] * _shrink
+                elif _cap_notional <= 0:
+                    continue   # no turnover data → cannot size safely, skip (fail-closed)
+                sg["_liqcapped"] = True
+            if sum(p["notional"] for p in open_pos) + sg["notional"] > CAP * _hs:
                 continue
+            # cap keys may be regime-scoped ("MOMENTUM@TREND_UP") or plain ("MOMENTUM");
+            # the scoped key wins when present — validated per-cell, not per-setup.
+            _cap_key = None
+            if setup_daily_cap:
+                _scoped = f"{sg['setup']}@{sg['regime']}"
+                _cap_key = _scoped if _scoped in setup_daily_cap else (sg["setup"] if sg["setup"] in setup_daily_cap else None)
+            if _cap_key is not None and _setup_today[_cap_key] >= setup_daily_cap[_cap_key]:
+                continue                # candidate filter: same-day clustering cap (IS+OOS validated for MOMENTUM×TREND_UP)
+            if _cap_ok_ids is not None and sg["setup"] in setup_daily_cap_rank_by and id(sg) not in _cap_ok_ids:
+                continue                # candidate filter: excluded by the custom cap-selection ranking key
             open_pos.append(sg); held_syms.add(sg["sym"]); taken.append(sg)
             entries_today += 1  # T8
+            if _cap_key is not None:
+                _setup_today[_cap_key] += 1
         prev_d = d  # T9
 
     for p in open_pos:
@@ -680,6 +960,9 @@ def run(symdata, regime: dict, market_inputs: dict,
         realized_day[p["exit_d"]] += net
         week_pnl[_week_key(p["exit_d"])]   += net
         month_pnl[_month_key(p["exit_d"])] += net
+
+    if trades_out is not None:
+        trades_out.extend(taken)
 
     return _report(taken, realized_day, cal, verbose)
 
@@ -733,9 +1016,67 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--pkl", default=BARS_PKL, help="bars pickle path")
-    ap.add_argument("--regime", default=REGIME_JSON, help="regime JSON path (default: daily-only; use regime_faithful_2015_5m.json for T2)")
-    ap.add_argument("--long", action="store_true", help="run 2015-2026 full history (slow)")
+    ap.add_argument("--regime", default=REGIME_JSON, help="regime JSON path")
+    ap.add_argument("--long", action="store_true", help="run 2015-2026 full history baseline")
+    ap.add_argument("--setups", default=None, help="comma-sep setup names, e.g. MOMENTUM,PULLBACK")
+    ap.add_argument("--floor", type=float, default=None, help="emit_floor override")
+    ap.add_argument("--by-year", action="store_true", help="year-by-year sweep 2015-2026 for --setups")
+    ap.add_argument("--d0", default=None, help="start date YYYY-MM-DD (single custom run)")
+    ap.add_argument("--d1", default=None, help="end date YYYY-MM-DD (single custom run)")
+    ap.add_argument("--mining", action="store_true", help="full setup×year matrix: all setups, every year, 2015-2026")
+    ap.add_argument("--trades-out", default=None, help="write executed trades to this CSV path for diagnosis")
+    ap.add_argument("--pb-month-block", default=None, help="months to skip for PULLBACK only, e.g. 1,4,7")
+    ap.add_argument("--pb-b200-floor", type=float, default=None, help="b200 floor for PULLBACK (default 70)")
+    ap.add_argument("--pb-month-block-maxb200", type=float, default=None,
+                    help="override month-block when b200 >= this (e.g. 85 = allow Jan/Apr/Jul in very strong markets)")
+    ap.add_argument("--setup-daily-cap", default=None,
+                    help="cap same-day entries per setup, e.g. MOMENTUM:1 or MOMENTUM:2,PULLBACK:1")
+    ap.add_argument("--mom-month-block", default=None, help="months to skip for MOMENTUM only, e.g. 1")
+    ap.add_argument("--mom-activate-r", type=float, default=None, help="MOMENTUM-only trail-arm threshold (default 1.75)")
+    ap.add_argument("--mom-trail-r", type=float, default=None, help="MOMENTUM-only trail width in R (default 1.0)")
+    ap.add_argument("--mom-max-hold", type=int, default=None, help="MOMENTUM-only max hold days (default 20)")
+    ap.add_argument("--mom-turnover-exclude", default=None, help="MOMENTUM-only: exclude turnover_cr range lo,hi e.g. 5,40")
+    ap.add_argument("--setup-daily-cap-rank-by", default=None, help="rank cap-selection by this field instead of wl_score, e.g. MOMENTUM:adx_daily")
+    ap.add_argument("--mom-regimes", default=None,
+                    help="regime-cell exploration: override MOMENTUM's allowed regimes (allowlist+hard-block), e.g. RANGE or TREND_UP,RANGE")
+    ap.add_argument("--mom-range-max-off-high", type=float, default=None,
+                    help="RANGE-cell MOMENTUM only: block entries more than this %% below the 52w high, e.g. 15")
+    ap.add_argument("--mom-range-max-dsp", type=int, default=None,
+                    help="RANGE-cell MOMENTUM only: block entries when no PANIC in the last N days, e.g. 90")
+    ap.add_argument("--pb-regimes", default=None,
+                    help="regime-cell exploration: override PULLBACK's allowed regimes (allowlist+hard-block), e.g. RANGE")
+    ap.add_argument("--pb-rsi-floor", type=float, default=None,
+                    help="PULLBACK only: block entries with signal-day RSI below this (e.g. 47)")
+    ap.add_argument("--pb-activate-r", type=float, default=None, help="PULLBACK-only trail-arm threshold (default 1.75)")
+    ap.add_argument("--pb-max-hold", type=int, default=None, help="PULLBACK-only max hold days (default 20)")
+    ap.add_argument("--mr-month-block", default=None, help="months to skip for MEAN_REVERSION only, e.g. 1")
+    ap.add_argument("--mr-activate-r", type=float, default=None, help="MR-only trail-arm threshold (default 1.75)")
+    ap.add_argument("--mr-max-hold", type=int, default=None, help="MR-only max hold days (default 20)")
+    ap.add_argument("--mr-regimes", default=None,
+                    help="regime-cell exploration: override MR's allowed regimes (allowlist+hard-block), e.g. PANIC")
+    ap.add_argument("--range-bucket-by-regime", action="store_true",
+                    help="slot partition: any RANGE-regime trade joins the RANGE slot bucket (capped)")
+    ap.add_argument("--range-group-cap", type=int, default=None,
+                    help="max concurrent RANGE-bucket positions (default SWING_RANGE_GROUP_CAP=3)")
+    ap.add_argument("--total-slots", type=int, default=None, help="total concurrent positions (default 5)")
+    ap.add_argument("--tu-slot-cap", type=int, default=None,
+                    help="cap on non-RANGE-bucket positions (additive-slots mode, e.g. 5 with --total-slots 7)")
+    ap.add_argument("--risk", type=float, default=None, help="risk per trade in ₹ (default 7500 = prod)")
+    ap.add_argument("--compound-pct", type=float, default=None,
+                    help="size risk as this %% of rolling realized equity (e.g. 2.0); default = flat RISK")
+    ap.add_argument("--bk-regimes", default=None,
+                    help="regime-cell exploration: override BREAKOUT's hard-blocks, e.g. TREND_UP,RANGE")
+    ap.add_argument("--slippage", type=float, default=None,
+                    help="override per-leg slippage fraction (default 0.0010 = 0.10%%); e.g. 0.003 for liquidity stress")
+    ap.add_argument("--liq-cap-pct", type=float, default=None,
+                    help="cap position at this %% of trailing 60d daily turnover (prod-replicable liquidity cap), e.g. 1.0")
     args = ap.parse_args()
+    if getattr(args, 'slippage', None) is not None:
+        globals()['SLIP'] = args.slippage
+        print(f"[slippage override] SLIP = {args.slippage:.4f} ({args.slippage*100:.2f}%/leg)")
+    if args.risk is not None:
+        global RISK
+        RISK = float(args.risk)
 
     print("loading bars + regime + market_inputs ...")
     raw = pickle.load(open(args.pkl, "rb"))
@@ -747,6 +1088,133 @@ def main():
     symdata = {sym: Sym(bars) for sym, bars in raw.items() if len(bars) >= MIN_BARS_SWING}
     print(f"  {len(symdata)} symbols with ≥{MIN_BARS_SWING} bars\n")
 
+    _setups_arg = tuple(s.strip().upper() for s in args.setups.split(",")) if args.setups else None
+    _floor = args.floor
+    _pb_month_block = set(int(m.strip()) for m in args.pb_month_block.split(",")) if getattr(args, 'pb_month_block', None) else None
+    _pb_b200_floor = getattr(args, 'pb_b200_floor', None)
+    _pb_month_block_maxb200 = getattr(args, 'pb_month_block_maxb200', None)
+    _setup_daily_cap = None
+    if getattr(args, 'setup_daily_cap', None):
+        _setup_daily_cap = {}
+        for _pair in args.setup_daily_cap.split(","):
+            _k, _v = _pair.split(":")
+            _setup_daily_cap[_k.strip().upper()] = int(_v.strip())
+    _mom_month_block = set(int(m.strip()) for m in args.mom_month_block.split(",")) if getattr(args, 'mom_month_block', None) else None
+    _mom_exit_override = None
+    if getattr(args, 'mom_activate_r', None) is not None or getattr(args, 'mom_trail_r', None) is not None or getattr(args, 'mom_max_hold', None) is not None:
+        _mom_exit_override = {}
+        if args.mom_activate_r is not None: _mom_exit_override["activate_R"] = args.mom_activate_r
+        if args.mom_trail_r is not None: _mom_exit_override["trail_R"] = args.mom_trail_r
+        if args.mom_max_hold is not None: _mom_exit_override["max_hold"] = args.mom_max_hold
+    _mom_turnover_exclude = None
+    if getattr(args, 'mom_turnover_exclude', None):
+        _lo, _hi = args.mom_turnover_exclude.split(",")
+        _mom_turnover_exclude = (float(_lo), float(_hi))
+    _setup_daily_cap_rank_by = None
+    if getattr(args, 'setup_daily_cap_rank_by', None):
+        _setup_daily_cap_rank_by = {}
+        for _pair in args.setup_daily_cap_rank_by.split(","):
+            _k, _v = _pair.split(":")
+            _setup_daily_cap_rank_by[_k.strip().upper()] = _v.strip()
+    _mom_regimes = set(r.strip().upper() for r in args.mom_regimes.split(",")) if getattr(args, 'mom_regimes', None) else None
+    _mom_range_max_off_high = getattr(args, 'mom_range_max_off_high', None)
+    _mom_range_max_dsp = getattr(args, 'mom_range_max_dsp', None)
+    _pb_regimes = set(r.strip().upper() for r in args.pb_regimes.split(",")) if getattr(args, 'pb_regimes', None) else None
+    _pb_rsi_floor = getattr(args, 'pb_rsi_floor', None)
+    _pb_exit_override = None
+    if getattr(args, 'pb_activate_r', None) is not None or getattr(args, 'pb_max_hold', None) is not None:
+        _pb_exit_override = {}
+        if args.pb_activate_r is not None: _pb_exit_override["activate_R"] = args.pb_activate_r
+        if args.pb_max_hold is not None: _pb_exit_override["max_hold"] = args.pb_max_hold
+    _mr_month_block = set(int(m.strip()) for m in args.mr_month_block.split(",")) if getattr(args, 'mr_month_block', None) else None
+    _mr_exit_override = None
+    if getattr(args, 'mr_activate_r', None) is not None or getattr(args, 'mr_max_hold', None) is not None:
+        _mr_exit_override = {}
+        if args.mr_activate_r is not None: _mr_exit_override["activate_R"] = args.mr_activate_r
+        if args.mr_max_hold is not None: _mr_exit_override["max_hold"] = args.mr_max_hold
+    _mr_regimes = set(r.strip().upper() for r in args.mr_regimes.split(",")) if getattr(args, 'mr_regimes', None) else None
+    _range_bucket = bool(getattr(args, 'range_bucket_by_regime', False))
+    _range_cap = getattr(args, 'range_group_cap', None)
+    _total_slots = getattr(args, 'total_slots', None)
+    _tu_slot_cap = getattr(args, 'tu_slot_cap', None)
+    _compound_pct = getattr(args, 'compound_pct', None)
+    _liq_cap_pct = getattr(args, 'liq_cap_pct', None)
+    _bk_regimes = set(r.strip().upper() for r in args.bk_regimes.split(",")) if getattr(args, 'bk_regimes', None) else None
+
+    # ── --by-year: year-by-year sweep for a specific setup group ─────────────
+    if args.by_year:
+        import csv
+        label = "+".join(s[:3] for s in _setups_arg) if _setups_arg else "ALL"
+        floor_label = int(_floor) if _floor is not None else "default(45)"
+        filt_parts = []
+        if _pb_month_block: filt_parts.append(f"pb_block={sorted(_pb_month_block)}")
+        if _pb_b200_floor is not None: filt_parts.append(f"pb_b200>={int(_pb_b200_floor)}")
+        if _pb_month_block_maxb200 is not None: filt_parts.append(f"override_if_b200>={int(_pb_month_block_maxb200)}")
+        if _setup_daily_cap: filt_parts.append(f"daily_cap={_setup_daily_cap}")
+        filt_label = ("  " + "  ".join(filt_parts)) if filt_parts else ""
+        print(f"=== YEAR-BY-YEAR: {label}, floor={floor_label}{filt_label}  {os.path.basename(args.regime)} ===")
+        _collector = [] if args.trades_out else None
+        for y in range(2015, 2027):
+            print(f"\n-- {y} --")
+            run(symdata, regime, market_inputs, d0=f"{y}-01-01", d1=f"{y}-12-31",
+                setups=_setups_arg, emit_floor=_floor, trades_out=_collector,
+                pb_month_block=_pb_month_block, pb_b200_floor=_pb_b200_floor,
+                pb_month_block_maxb200=_pb_month_block_maxb200, setup_daily_cap=_setup_daily_cap, mom_month_block=_mom_month_block, mom_exit_override=_mom_exit_override, mom_turnover_exclude=_mom_turnover_exclude, setup_daily_cap_rank_by=_setup_daily_cap_rank_by, mom_regimes=_mom_regimes, mom_range_max_off_high=_mom_range_max_off_high, mom_range_max_dsp=_mom_range_max_dsp, pb_regimes=_pb_regimes, pb_rsi_floor=_pb_rsi_floor, pb_exit_override=_pb_exit_override, mr_month_block=_mr_month_block, mr_exit_override=_mr_exit_override, mr_regimes=_mr_regimes, range_bucket_by_regime=_range_bucket, range_group_cap=_range_cap, total_slots=_total_slots, tu_slot_cap=_tu_slot_cap, compound_pct=_compound_pct, liq_cap_pct=_liq_cap_pct, bk_regimes=_bk_regimes)
+        print(f"\n-- 2015-2026 COMBINED --")
+        run(symdata, regime, market_inputs, d0="2015-01-01", d1="2026-12-31",
+            setups=_setups_arg, emit_floor=_floor,
+            pb_month_block=_pb_month_block, pb_b200_floor=_pb_b200_floor,
+            pb_month_block_maxb200=_pb_month_block_maxb200, setup_daily_cap=_setup_daily_cap, mom_month_block=_mom_month_block, mom_exit_override=_mom_exit_override, mom_turnover_exclude=_mom_turnover_exclude, setup_daily_cap_rank_by=_setup_daily_cap_rank_by, mom_regimes=_mom_regimes, mom_range_max_off_high=_mom_range_max_off_high, mom_range_max_dsp=_mom_range_max_dsp, pb_regimes=_pb_regimes, pb_rsi_floor=_pb_rsi_floor, pb_exit_override=_pb_exit_override, mr_month_block=_mr_month_block, mr_exit_override=_mr_exit_override, mr_regimes=_mr_regimes, range_bucket_by_regime=_range_bucket, range_group_cap=_range_cap, total_slots=_total_slots, tu_slot_cap=_tu_slot_cap, compound_pct=_compound_pct, liq_cap_pct=_liq_cap_pct, bk_regimes=_bk_regimes)
+        if _collector and args.trades_out:
+            fields = ["sig_d","entry_d","exit_d","sym","setup","dir","regime","risk_mode",
+                      "year","month","hold","adj_score","raw_score","wl_score",
+                      "entry","exit","sl_price","sl_pct","atr_pct",
+                      "qty","notional","risk","gross","net","R","reason",
+                      "breadth","b200","trend_streak","rsi","adx_daily","volume_ratio","strength",
+                      "sector","turnover_cr"]
+            with open(args.trades_out, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                w.writeheader(); w.writerows(_collector)
+            print(f"\n[trades-out] {len(_collector)} trades → {args.trades_out}")
+        return
+
+    # ── --mining: full setup×year matrix ─────────────────────────────────────
+    if args.mining:
+        floor_val = _floor if _floor is not None else 10.0
+        setup_groups = [
+            ("PULLBACK",),
+            ("MOMENTUM",),
+            ("MEAN_REVERSION",),
+            ("MOMENTUM", "PULLBACK"),
+            ("MOMENTUM", "PULLBACK", "MEAN_REVERSION"),
+        ]
+        for sg in setup_groups:
+            label = "+".join(s[:3] for s in sg)
+            fl = floor_val if "MEAN_REVERSION" not in sg else (floor_val if _floor is not None else 45.0)
+            print(f"\n{'='*65}")
+            print(f"=== SETUP: {label}  floor={int(fl)} ===")
+            print(f"{'='*65}")
+            for y in range(2015, 2027):
+                print(f"\n-- {y} --")
+                run(symdata, regime, market_inputs, d0=f"{y}-01-01", d1=f"{y}-12-31",
+                    setups=sg, emit_floor=fl)
+            print(f"\n-- 2015-2026 COMBINED --")
+            run(symdata, regime, market_inputs, d0="2015-01-01", d1="2026-12-31",
+                setups=sg, emit_floor=fl)
+        return
+
+    # ── single custom date range ──────────────────────────────────────────────
+    if args.d0 or args.d1:
+        d0 = args.d0 or "2015-01-01"
+        d1 = args.d1 or "2026-12-31"
+        label = "+".join(s[:3] for s in _setups_arg) if _setups_arg else "ALL"
+        print(f"=== {label}, floor={int(_floor) if _floor else 'default'}, {d0}→{d1} ===")
+        run(symdata, regime, market_inputs, d0=d0, d1=d1, setups=_setups_arg, emit_floor=_floor,
+            pb_month_block=_pb_month_block, pb_b200_floor=_pb_b200_floor,
+            pb_month_block_maxb200=_pb_month_block_maxb200, setup_daily_cap=_setup_daily_cap, mom_month_block=_mom_month_block, mom_exit_override=_mom_exit_override, mom_turnover_exclude=_mom_turnover_exclude, setup_daily_cap_rank_by=_setup_daily_cap_rank_by, mom_regimes=_mom_regimes, mom_range_max_off_high=_mom_range_max_off_high, mom_range_max_dsp=_mom_range_max_dsp, pb_regimes=_pb_regimes, pb_rsi_floor=_pb_rsi_floor, pb_exit_override=_pb_exit_override, mr_month_block=_mr_month_block, mr_exit_override=_mr_exit_override, mr_regimes=_mr_regimes, range_bucket_by_regime=_range_bucket, range_group_cap=_range_cap, total_slots=_total_slots, tu_slot_cap=_tu_slot_cap, compound_pct=_compound_pct, liq_cap_pct=_liq_cap_pct, bk_regimes=_bk_regimes)
+        return
+
+    # ── default: original baseline runs ──────────────────────────────────────
     print(f"=== SWING FINAL — prod-faithful, {os.path.basename(args.regime)}, ₹5L/₹7500 ===")
     print("\n-- 2022-2026 (current pickle coverage, faithful regime) --")
     run(symdata, regime, market_inputs, d0="2022-01-03", d1="2026-12-31")
@@ -762,7 +1230,6 @@ def main():
     run(symdata, regime, market_inputs, d0="2022-01-03", d1="2026-12-31",
         setups=("MEAN_REVERSION",))
 
-    # ── T4: EMIT_FLOOR sweep — MOM+PB only (2022-2026) ───────────────────────
     print("\n=== T4: EMIT_FLOOR sweep (MOM+PB only, 2022-2026) ===")
     for floor in [45, 30, 20, 10, 1]:
         print(f"\n-- emit_floor={floor} --")
