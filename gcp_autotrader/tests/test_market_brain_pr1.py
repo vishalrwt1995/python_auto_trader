@@ -201,10 +201,11 @@ def test_regime_panic_on_broken_data_pipeline() -> None:
 
 
 # --------------------------------------------------------------------- #
-# 2026-07-08 fix — the data-quality PANIC is suppressed during the market-open
-# warmup (PREMARKET/POST_OPEN), where a low data_quality just means intraday
-# bars haven't accumulated yet. Root-caused a daily false PANIC at ~09:20 that
-# locked the regime in RECOVERY indefinitely via the Phase-2 4-day hold.
+# 2026-07-08 fix — the data-quality PANIC is suppressed in every non-LIVE phase
+# (PREMARKET/POST_OPEN warmup + EOD/weekend), where a low data_quality just means
+# bars are absent or still accumulating, not a broken pipeline. Root-caused a
+# daily false PANIC at ~09:20 that locked the regime in RECOVERY indefinitely via
+# the Phase-2 4-day hold. Only during LIVE does low dq trip PANIC.
 # --------------------------------------------------------------------- #
 
 
@@ -216,7 +217,7 @@ def test_dq_panic_suppressed_during_open_warmup() -> None:
         svc,
         trend_score=32.0, breadth_score=78.0, leadership_score=60.0,
         volatility_stress_score=38.0, data_quality_score=16.0,
-        is_open_warmup=True,
+        is_low_data_phase=True,
     )
     assert r != "PANIC"
     assert r == "RANGE_ROTATING"   # breadth 78 ≥ 65 rotating bar, misses the 80 TREND_UP bar
@@ -229,14 +230,14 @@ def test_dq_panic_still_fires_in_live_window() -> None:
     assert _call(
         svc,
         breadth_score=78.0, leadership_score=60.0, volatility_stress_score=38.0,
-        data_quality_score=16.0, is_open_warmup=False,
+        data_quality_score=16.0, is_low_data_phase=False,
     ) == "PANIC"
 
 
 def test_warmup_does_not_suppress_real_stress_panic() -> None:
     # A real volatility spike must PANIC even in the warmup window.
     svc = _svc()
-    assert _call(svc, volatility_stress_score=82.0, is_open_warmup=True) == "PANIC"
+    assert _call(svc, volatility_stress_score=82.0, is_low_data_phase=True) == "PANIC"
 
 
 def test_warmup_does_not_suppress_breadth_capitulation() -> None:
@@ -244,7 +245,7 @@ def test_warmup_does_not_suppress_breadth_capitulation() -> None:
     svc = _svc()
     assert _call(
         svc, breadth_score=10.0, trend_score=60.0, leadership_score=60.0,
-        is_open_warmup=True,
+        is_low_data_phase=True,
     ) == "PANIC"
 
 
@@ -258,8 +259,8 @@ def test_fix_is_noop_at_backtest_dq_60() -> None:
         dict(trend_score=72.0, breadth_score=64.0, leadership_score=58.0, volatility_stress_score=40.0),
         dict(trend_score=20.0, breadth_score=30.0, leadership_score=35.0, volatility_stress_score=70.0),
     ):
-        warm = _call(svc, data_quality_score=60.0, is_open_warmup=True, **scores)
-        live = _call(svc, data_quality_score=60.0, is_open_warmup=False, **scores)
+        warm = _call(svc, data_quality_score=60.0, is_low_data_phase=True, **scores)
+        live = _call(svc, data_quality_score=60.0, is_low_data_phase=False, **scores)
         assert warm == live
 
 
@@ -268,7 +269,7 @@ def test_warmup_suppress_toggle_off_restores_panic() -> None:
     svc = _svc(RegimeThresholds(panic_dq_warmup_suppress=False))
     assert _call(
         svc, breadth_score=78.0, leadership_score=60.0, volatility_stress_score=38.0,
-        data_quality_score=16.0, is_open_warmup=True,
+        data_quality_score=16.0, is_low_data_phase=True,
     ) == "PANIC"
 
 
@@ -279,7 +280,7 @@ def test_recovery_lock_holds_then_releases_once_panic_stops() -> None:
     # the true (tradeable) regime — which is how swing gets un-frozen.
     svc = _svc()
     healthy = dict(trend_score=32.0, breadth_score=78.0, leadership_score=60.0,
-                   volatility_stress_score=38.0, data_quality_score=16.0, is_open_warmup=True)
+                   volatility_stress_score=38.0, data_quality_score=16.0, is_low_data_phase=True)
 
     held = _call(svc, prev=_prev("RECOVERY", regime_age_seconds=1 * 86400), **healthy)
     assert held == "RECOVERY"          # still within the 4-day hold — but NOT via a fresh PANIC
@@ -287,6 +288,27 @@ def test_recovery_lock_holds_then_releases_once_panic_stops() -> None:
     aged_prev = _prev("RECOVERY", asof=now_ist() - timedelta(days=6), regime_age_seconds=6 * 86400)
     released = _call(svc, prev=aged_prev, **healthy)
     assert released == "RANGE_ROTATING"   # hold expired, no PANIC to reset it → un-frozen
+
+
+def test_is_low_data_phase_helper() -> None:
+    # Only LIVE expects real data flow; every other phase legitimately has low dq.
+    assert MarketBrainService._is_low_data_phase("LIVE") is False
+    assert MarketBrainService._is_low_data_phase("live") is False
+    for p in ("PREMARKET", "POST_OPEN", "EOD", ""):
+        assert MarketBrainService._is_low_data_phase(p) is True
+
+
+def test_dq_panic_suppressed_at_eod() -> None:
+    # 2026-07-08 EOD hardening: EOD/weekend also has legitimately-low dq (market
+    # closed) — must NOT PANIC, else a post-close persist could re-lock RECOVERY.
+    svc = _svc()
+    r = _call(
+        svc,
+        trend_score=32.0, breadth_score=78.0, leadership_score=60.0,
+        volatility_stress_score=38.0, data_quality_score=16.0,
+        is_low_data_phase=True,   # EOD is now a low-data phase too
+    )
+    assert r != "PANIC"
 
 
 def test_regime_trend_up_standard_entry() -> None:
