@@ -288,13 +288,29 @@ Config live in PAPER (rev `00282-p4b`) but NOT yet validated forward or live (re
 
 T11 (real intraday entry timing, 5m data) remains the one un-modeled backtest gap — stretch goal, not blocking.
 
+### L. CORE compounding — pending prod-change proposal (backtest finding 2026-07-08, NOT shipped)
+
+CORE's `plan_core_rebalance` sizes new buys off the FIXED `channel_capital` and never reinvests gains → ~30% idle cash → CORE realizes only ~9.5% CAGR (lags Nifty ~11% on raw return, wins only on DD). Offline faithful grind (`scripts/redesign/core_*.py`, IS/OOS, vs Nifty50) found the fix: **size new buys off CURRENT NAV (compound, keep stayers)** → **~13.0% CAGR / −35% DD / Calmar 0.38**, idle cash → 0, OOS-robust (5%→9.4%), beats Nifty on return + DD + risk-adjusted. Ceiling ~15.8% (pure_mom top20, −48% DD); 25-40% impossible for long-only large-cap; timing overlays (regime/debounce/Nifty-200SMA) are a look-ahead dead-end. **PENDING before shipping:** hardening validation (more windows + the exact prod-implementation shape of "size off NAV") → then a reviewed PR to core sizing + explicit approval (never a backtest side effect). PAPER/prod untouched. See §8 ⑫ + memory `project_core_channel_grind`.
+
 ---
 
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
 
-### 2026-07-08 (latest) — ⑪ BRAIN RECOVERY-LOCK FIXED + DEPLOYED (PR #52, rev `autotrader-00282-p4b`)
+### 2026-07-08 (latest) — ⑫ CORE grind: compounding is the one real edge (backtest tooling — NO prod change, PAPER untouched)
+
+**What:** pointed the faithful-engine discipline at the CORE channel (₹3L quarterly large-cap momentum+low-vol buy-hold). New isolated scripts `scripts/redesign/core_{faithful,capital,grind,compound,stack,timing}.py` import the PROD functions (`rank_blend_select`, `plan_core_rebalance`, `costs`) on cached daily bars 2016-26, integer shares + price cap + full-Upstox cost + catastrophe stop, benchmarked vs Nifty50. READ-ONLY, prod byte-untouched ([[feedback_channel_work_isolation]]).
+
+**Findings:**
+- Prod CORE today (fixed-capital sizing) ≈ **9.5% CAGR / −30% DD / Calmar 0.32** — LAGS Nifty (~11%) on return, wins only on DD. Root cause: **~30% idle cash** (sizes off fixed `channel_capital`, never reinvests gains → ~70% deployed). Capital level barely matters (+0.4% ₹3L→₹5Cr).
+- **The one real edge — compounding:** size new buys off current NAV (keep stayers) → **13.0% CAGR / −35% DD / Calmar 0.38**, idle→0, OOS-robust (5→9.4%). **Beats Nifty on return, DD AND risk-adjusted.** Selection/concentration tweaks add ~nothing on top.
+- Ceiling ~15.8% (pure_mom top20, −48% DD); **25-40% impossible** for long-only large-cap (full 12-config sweep tops ~16%).
+- **Timing overlays DO NOT work:** regime/debounce/Nifty-200SMA all underperform buy-hold net of realistic cost. The SMA200 "18-23% CAGR / Calmar 1.39" was a **look-ahead artifact** (day-t close gating day-t exposure); lagged 1 day → 6-8%, worse than holding. DD can't be cost-effectively timed away with stocks.
+
+**Status:** compounding is a real prod inefficiency + fix, validated OFFLINE only → §7-L. Shipping = separate reviewed PR to core sizing + user approval. Memory: `project_core_channel_grind`.
+
+### 2026-07-08 — ⑪ BRAIN RECOVERY-LOCK FIXED + DEPLOYED (PR #52, rev `autotrader-00282-p4b`)
 
 **Symptom:** swing placed 0 trades for 8 days (last entry 2026-06-24). The market brain was frozen in `RECOVERY` — a regime not in the swing allowlist — the whole time (zero TREND_UP/RANGE in 8 days), despite a healthy market (breadth 78, tactical 74, calm vol).
 
