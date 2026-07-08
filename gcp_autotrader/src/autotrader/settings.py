@@ -323,6 +323,13 @@ class RegimeThresholds:
     panic_stress_min: float = 82.0
     panic_breadth_max: float = 12.0
     panic_dq_max: float = 30.0
+    # 2026-07-08: suppress the data-quality PANIC during the market-open warmup
+    # (PREMARKET/POST_OPEN), where a low data_quality just means intraday bars
+    # haven't accumulated yet — not a broken pipeline. A genuine mid-session
+    # outage still trips dq-PANIC in the LIVE phase; vol/breadth PANIC fire in
+    # every phase. Prevents the daily ~09:20 false PANIC that (via the Phase-2
+    # force-RECOVERY hold) locked the regime in RECOVERY indefinitely.
+    panic_dq_warmup_suppress: bool = True
     # TREND_UP entry (standard)
     trend_up_trend_min: float = 70.0
     trend_up_breadth_min: float = 62.0
@@ -523,6 +530,7 @@ class AppSettings:
                 panic_stress_min=_env_float("REGIME_PANIC_STRESS_MIN", 82.0),
                 panic_breadth_max=_env_float("REGIME_PANIC_BREADTH_MAX", 12.0),
                 panic_dq_max=_env_float("REGIME_PANIC_DQ_MAX", 30.0),
+                panic_dq_warmup_suppress=_env_bool("REGIME_PANIC_DQ_WARMUP_SUPPRESS", True),
                 trend_up_trend_min=_env_float("REGIME_TREND_UP_TREND_MIN", 70.0),
                 trend_up_breadth_min=_env_float("REGIME_TREND_UP_BREADTH_MIN", 62.0),
                 trend_up_leadership_min=_env_float("REGIME_TREND_UP_LEADERSHIP_MIN", 56.0),

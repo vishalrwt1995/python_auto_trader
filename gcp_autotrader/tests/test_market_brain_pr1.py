@@ -200,6 +200,95 @@ def test_regime_panic_on_broken_data_pipeline() -> None:
     assert _call(svc, data_quality_score=25.0) == "PANIC"
 
 
+# --------------------------------------------------------------------- #
+# 2026-07-08 fix — the data-quality PANIC is suppressed during the market-open
+# warmup (PREMARKET/POST_OPEN), where a low data_quality just means intraday
+# bars haven't accumulated yet. Root-caused a daily false PANIC at ~09:20 that
+# locked the regime in RECOVERY indefinitely via the Phase-2 4-day hold.
+# --------------------------------------------------------------------- #
+
+
+def test_dq_panic_suppressed_during_open_warmup() -> None:
+    # Healthy market (breadth 78, calm vol) but dq=16 from the open-warmup gap.
+    # With the warmup gate this must NOT PANIC — it reads the true regime.
+    svc = _svc()
+    r = _call(
+        svc,
+        trend_score=32.0, breadth_score=78.0, leadership_score=60.0,
+        volatility_stress_score=38.0, data_quality_score=16.0,
+        is_open_warmup=True,
+    )
+    assert r != "PANIC"
+    assert r == "RANGE_ROTATING"   # breadth 78 ≥ 65 rotating bar, misses the 80 TREND_UP bar
+
+
+def test_dq_panic_still_fires_in_live_window() -> None:
+    # Same low dq but NOT in the warmup window = a genuine mid-session pipeline
+    # outage → must still PANIC (protection intact).
+    svc = _svc()
+    assert _call(
+        svc,
+        breadth_score=78.0, leadership_score=60.0, volatility_stress_score=38.0,
+        data_quality_score=16.0, is_open_warmup=False,
+    ) == "PANIC"
+
+
+def test_warmup_does_not_suppress_real_stress_panic() -> None:
+    # A real volatility spike must PANIC even in the warmup window.
+    svc = _svc()
+    assert _call(svc, volatility_stress_score=82.0, is_open_warmup=True) == "PANIC"
+
+
+def test_warmup_does_not_suppress_breadth_capitulation() -> None:
+    # Breadth capitulation must PANIC even in the warmup window.
+    svc = _svc()
+    assert _call(
+        svc, breadth_score=10.0, trend_score=60.0, leadership_score=60.0,
+        is_open_warmup=True,
+    ) == "PANIC"
+
+
+def test_fix_is_noop_at_backtest_dq_60() -> None:
+    # The backtest stubs data_quality=60 (faithful_regime.py). At dq=60 the dq
+    # trigger is inactive (60 > 30) regardless of the warmup gate, so the fix is
+    # a provable no-op for the backtest → the regime cache / 9.7% are unchanged.
+    svc = _svc()
+    for scores in (
+        dict(trend_score=32.0, breadth_score=78.0, leadership_score=60.0, volatility_stress_score=38.0),
+        dict(trend_score=72.0, breadth_score=64.0, leadership_score=58.0, volatility_stress_score=40.0),
+        dict(trend_score=20.0, breadth_score=30.0, leadership_score=35.0, volatility_stress_score=70.0),
+    ):
+        warm = _call(svc, data_quality_score=60.0, is_open_warmup=True, **scores)
+        live = _call(svc, data_quality_score=60.0, is_open_warmup=False, **scores)
+        assert warm == live
+
+
+def test_warmup_suppress_toggle_off_restores_panic() -> None:
+    # Fail-safe: with the toggle disabled, low dq PANICs even in the warmup window.
+    svc = _svc(RegimeThresholds(panic_dq_warmup_suppress=False))
+    assert _call(
+        svc, breadth_score=78.0, leadership_score=60.0, volatility_stress_score=38.0,
+        data_quality_score=16.0, is_open_warmup=True,
+    ) == "PANIC"
+
+
+def test_recovery_lock_holds_then_releases_once_panic_stops() -> None:
+    # The lock scenario: prev=RECOVERY, healthy market, dq=16 at open. With the
+    # fix there is no PANIC, so the age timer is no longer reset each morning.
+    # Within the 4-day hold it stays RECOVERY; once aged past it, it releases to
+    # the true (tradeable) regime — which is how swing gets un-frozen.
+    svc = _svc()
+    healthy = dict(trend_score=32.0, breadth_score=78.0, leadership_score=60.0,
+                   volatility_stress_score=38.0, data_quality_score=16.0, is_open_warmup=True)
+
+    held = _call(svc, prev=_prev("RECOVERY", regime_age_seconds=1 * 86400), **healthy)
+    assert held == "RECOVERY"          # still within the 4-day hold — but NOT via a fresh PANIC
+
+    aged_prev = _prev("RECOVERY", asof=now_ist() - timedelta(days=6), regime_age_seconds=6 * 86400)
+    released = _call(svc, prev=aged_prev, **healthy)
+    assert released == "RANGE_ROTATING"   # hold expired, no PANIC to reset it → un-frozen
+
+
 def test_regime_trend_up_standard_entry() -> None:
     svc = _svc()
     # All four conditions met
