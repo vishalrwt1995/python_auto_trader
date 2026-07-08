@@ -916,11 +916,22 @@ class MarketBrainService:
         risk_appetite: float,
         prev: MarketBrainState | None,
         tactical_trend_score: float = 50.0,
+        is_open_warmup: bool = False,
     ) -> str:
         t = self.thresholds
         regime = "RANGE"
-        # PANIC entry — extreme stress, capitulation breadth, or broken data pipeline
-        if volatility_stress_score >= t.panic_stress_min or breadth_score <= t.panic_breadth_max or data_quality_score <= t.panic_dq_max:
+        # PANIC entry — extreme stress, capitulation breadth, or broken data pipeline.
+        # The data-quality ("broken pipeline") trigger is suppressed during the
+        # market-open warmup (PREMARKET/POST_OPEN): a low data_quality there just
+        # means intraday bars haven't accumulated yet, not a real outage. Without
+        # this, a daily false PANIC at ~09:20 fed the Phase-2 force-RECOVERY hold
+        # and locked the regime in RECOVERY indefinitely (incident 2026-07-08).
+        # Genuine stress (vol/breadth) still triggers PANIC in every phase; a real
+        # mid-session pipeline break still trips dq-PANIC once in the LIVE phase.
+        dq_panic = data_quality_score <= t.panic_dq_max
+        if is_open_warmup and t.panic_dq_warmup_suppress:
+            dq_panic = False
+        if volatility_stress_score >= t.panic_stress_min or breadth_score <= t.panic_breadth_max or dq_panic:
             regime = "PANIC"
         elif (
             trend_score >= t.trend_up_trend_min
@@ -1214,6 +1225,7 @@ class MarketBrainService:
             data_quality_score=data_quality_score,
             risk_appetite=risk_appetite,
             prev=prior,
+            is_open_warmup=(phase in ("PREMARKET", "POST_OPEN")),
         )
         sub_regime_v2, structure_state, recovery_state, event_state = self._derive_secondary_states(
             phase=phase,
