@@ -210,6 +210,11 @@ class StrategySettings:
     # + CAPITAL_CORE to turn on. PAPER.
     core_enabled: bool = False                 # master on/off for the CORE channel
     core_notional_cap_pct: float = 1.0         # CORE deploys its full channel capital (equal-weight top-30)
+    # 2026-07-08: size CORE off current NAV (reinvest gains) instead of the FIXED channel_capital,
+    # which left ~30% idle cash. Backtest: ~9.5% -> ~13% CAGR, -35% DD, beats Nifty on all axes,
+    # OOS-robust + survives 3x cost (see memory project_core_channel_grind). Compounds the channel.
+    # Env kill-switch CORE_COMPOUND_SIZING=false reverts to the prior fixed-capital sizing.
+    core_compound_sizing: bool = True
 
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
@@ -468,6 +473,7 @@ class AppSettings:
             gapfade_stop_pct=_env_float("GAPFADE_STOP_PCT", 0.03),
             core_enabled=_env_bool("CORE_ENABLED", False),
             core_notional_cap_pct=_env_float("CORE_NOTIONAL_CAP_PCT", 1.0),
+            core_compound_sizing=_env_bool("CORE_COMPOUND_SIZING", True),
         )
         return AppSettings(
             gcp=GcpSettings(
