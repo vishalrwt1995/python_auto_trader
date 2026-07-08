@@ -64,6 +64,16 @@ class MarketBrainService:
         return "EOD"
 
     @staticmethod
+    def _is_low_data_phase(phase: str) -> bool:
+        """Phases where a low data_quality is EXPECTED — bars absent or still
+        accumulating (PREMARKET/POST_OPEN) or market closed (EOD/weekend) — rather
+        than a broken-pipeline signal. Only during LIVE should low dq trip PANIC.
+        Gates the data-quality PANIC (incident 2026-07-08: premarket/open dq=16
+        false-PANIC → Phase-2 RECOVERY lock; hardened to all non-LIVE phases so a
+        post-close/weekend dip can't re-lock either)."""
+        return str(phase or "").upper() != "LIVE"
+
+    @staticmethod
     def _state_from_dict(payload: dict[str, Any] | None) -> MarketBrainState | None:
         if not isinstance(payload, dict):
             return None
@@ -916,20 +926,22 @@ class MarketBrainService:
         risk_appetite: float,
         prev: MarketBrainState | None,
         tactical_trend_score: float = 50.0,
-        is_open_warmup: bool = False,
+        is_low_data_phase: bool = False,
     ) -> str:
         t = self.thresholds
         regime = "RANGE"
         # PANIC entry — extreme stress, capitulation breadth, or broken data pipeline.
-        # The data-quality ("broken pipeline") trigger is suppressed during the
-        # market-open warmup (PREMARKET/POST_OPEN): a low data_quality there just
-        # means intraday bars haven't accumulated yet, not a real outage. Without
-        # this, a daily false PANIC at ~09:20 fed the Phase-2 force-RECOVERY hold
-        # and locked the regime in RECOVERY indefinitely (incident 2026-07-08).
-        # Genuine stress (vol/breadth) still triggers PANIC in every phase; a real
-        # mid-session pipeline break still trips dq-PANIC once in the LIVE phase.
+        # The data-quality ("broken pipeline") trigger only makes sense during LIVE,
+        # when bars SHOULD be flowing. In every non-LIVE phase (PREMARKET / POST_OPEN
+        # warmup / EOD / weekend) a low data_quality just means bars are absent or
+        # still accumulating — NOT a real outage — so it is suppressed there. Without
+        # this, a daily false PANIC at ~09:20 (and any post-close/weekend dip) fed
+        # the Phase-2 force-RECOVERY hold and locked the regime in RECOVERY
+        # indefinitely (incident 2026-07-08). Genuine stress (vol/breadth) still
+        # triggers PANIC in every phase; a real mid-session pipeline break still
+        # trips dq-PANIC during LIVE.
         dq_panic = data_quality_score <= t.panic_dq_max
-        if is_open_warmup and t.panic_dq_warmup_suppress:
+        if is_low_data_phase and t.panic_dq_warmup_suppress:
             dq_panic = False
         if volatility_stress_score >= t.panic_stress_min or breadth_score <= t.panic_breadth_max or dq_panic:
             regime = "PANIC"
@@ -1225,7 +1237,7 @@ class MarketBrainService:
             data_quality_score=data_quality_score,
             risk_appetite=risk_appetite,
             prev=prior,
-            is_open_warmup=(phase in ("PREMARKET", "POST_OPEN")),
+            is_low_data_phase=self._is_low_data_phase(phase),
         )
         sub_regime_v2, structure_state, recovery_state, event_state = self._derive_secondary_states(
             phase=phase,
