@@ -25,6 +25,7 @@ def plan_core_rebalance(
     channel_capital: float,
     cfg: Any,
     max_weight_mult: float = cs.MAX_WEIGHT_MULT,
+    nav_sizing: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """PURE: rebalance current CORE holdings to the target basket. Returns
     ``{"sells": [...], "buys": [...]}``:
@@ -63,9 +64,17 @@ def plan_core_rebalance(
         if price > 0:
             cand.append((s, c, price))
 
-    # budget for new buys = full capital minus cost-basis already deployed in stayers
-    held_cost = sum(int(p.get("qty") or 0) * float(p.get("entry_price") or 0.0)
-                    for s, p in held.items() if s in target)
+    # budget for new buys = capital minus value already deployed in stayers.
+    # nav_sizing (compounding, 2026-07-08): channel_capital is the CURRENT NAV and stayers are
+    # valued at their CURRENT price (target ref_price) -> budget = NAV - current stayer value =
+    # the cash freed by drops + reinvested gains (deploys the ~30% that fixed sizing left idle).
+    # Fixed sizing (nav_sizing=False, prod pre-2026-07) values stayers at their ENTRY price.
+    if nav_sizing:
+        held_cost = sum(int(p.get("qty") or 0) * float(target[s].get("ref_price") or 0.0)
+                        for s, p in held.items() if s in target)
+    else:
+        held_cost = sum(int(p.get("qty") or 0) * float(p.get("entry_price") or 0.0)
+                        for s, p in held.items() if s in target)
     budget = max(0.0, channel_capital - held_cost)
 
     qty = {s: 0 for s, _, _ in cand}
@@ -130,7 +139,21 @@ def run_core_rebalance_once(*, settings, upstox, state, order_service, bq=None,
         return {"asof": asof, "universe": len(keymap), "basket": 0, "note": "no_basket"}
 
     holdings = [p for p in state.list_open_positions() if str(p.get("channel", "")).strip().lower() == "core"]
-    plan = plan_core_rebalance(basket, holdings, channel_capital, cfg)
+    # Compounding (2026-07-08, gated by core_compound_sizing; env kill-switch): size off the
+    # channel's CURRENT NAV (reinvest gains) instead of the fixed channel_capital, which left
+    # ~30% idle. NAV = sum(held qty x current price) from the freshly-fetched history (fallback
+    # entry_price if a held name has left the universe). Fixed capital bootstraps the first
+    # rebalance (no holdings yet). CORE-only — plan_core_rebalance has no other caller.
+    sizing_capital, nav_sizing = channel_capital, False
+    if bool(getattr(cfg, "core_compound_sizing", False)) and holdings:
+        def _cur_px(hp: dict[str, Any]) -> float:
+            bars = history.get(str(hp.get("symbol") or ""))
+            return float(bars[-1][4]) if bars else float(hp.get("entry_price") or 0.0)
+        nav = sum(int(p.get("qty") or 0) * _cur_px(p) for p in holdings)
+        if nav > 0:
+            sizing_capital, nav_sizing = nav, True
+            logger.info("core_compound_sizing NAV=%.0f fixed_capital=%.0f", nav, channel_capital)
+    plan = plan_core_rebalance(basket, holdings, sizing_capital, cfg, nav_sizing=nav_sizing)
 
     sold = []; bought = []
     for s in plan["sells"]:
