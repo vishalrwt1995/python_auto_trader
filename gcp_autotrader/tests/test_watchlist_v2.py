@@ -263,6 +263,48 @@ def test_watchlist_v2_score_bounds_zero_to_hundred():
         assert 0.0 <= float(r["score"]) <= 100.0
 
 
+def test_watchlist_v2_swing_rows_carry_turnover_med_60d():
+    """Regression (2026-07-09): swing rows MUST carry the raw ₹ 60d-median turnover under the
+    `turnover_med_60d` key. The swing liquidity cap (trading_service, swing_liq_cap_pct) reads
+    exactly this key to size ≤1% of daily turnover, and fail-closes to qty 0 if it's missing —
+    which silently blocked EVERY swing trade (`swing_liq_cap_no_turnover`). turnoverRank60D (a
+    rank) is not a substitute. This asserts the value is plumbed through, non-zero, and matches
+    the candidate's turnoverMed60D."""
+    state = _FakeState()
+    svc = UniverseService(object(), object(), StrategySettings())
+    svc.state = state  # type: ignore[assignment]
+    now_i = now_ist()
+    expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
+
+    turnovers = {"AAA": 5.0e8, "BBB": 8.0e8}   # ₹5cr / ₹8cr daily median turnover
+    candidates = [
+        {
+            "symbol": sym, "exchange": "NSE", "segment": "CASH", "enabled": True,
+            "instrumentKey": f"NSE_EQ|{sym}", "eligibleSwing": True, "eligibleIntraday": True,
+            "turnoverRank60D": rank, "turnoverMed60D": turnovers[sym], "liquidityBucket": "A",
+            "atrPct14D": 0.02, "gapRisk60D": 0.01, "priceLast": 120.0, "bars1D": 260,
+            "last1DDate": expected_lcd, "fresh": True, "disableReason": "",
+        }
+        for sym, rank in (("AAA", 10), ("BBB", 30))
+    ]
+
+    svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
+    svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
+        "regimeDaily": "TREND", "regimeIntraday": "CHOPPY", "source": {},
+    }
+    svc._watchlist_v2_candidates = lambda expected_lcd: list(candidates)  # type: ignore[method-assign]
+    svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
+    svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_today()  # type: ignore[method-assign]
+
+    out = svc.build_watchlist(None, target_size=20, premarket=True, intraday_timeframe="5m")
+    assert out["ready"] is True
+    assert state.swing_rows
+    for r in state.swing_rows:
+        assert "turnover_med_60d" in r, "swing row missing turnover_med_60d (liq cap would fail-close)"
+        assert float(r["turnover_med_60d"]) == turnovers[r["symbol"]], r
+        assert float(r["turnover_med_60d"]) > 0.0
+
+
 def test_watchlist_v2_intraday_run_reports_swing_selected_accurately():
     """When premarket=False, swingSelected must reflect the real count.
 

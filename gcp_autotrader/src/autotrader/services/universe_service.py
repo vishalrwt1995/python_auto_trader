@@ -5638,6 +5638,14 @@ class UniverseService:
                         "vwapBias": str(r.get("vwapBias", "N/A")),
                         "liquidityBucket": str(r.get("liquidityBucket", "")),
                         "turnoverRank60D": r.get("turnoverRank60D"),
+                        # Raw ₹ 60d-median turnover — the swing liquidity cap
+                        # (trading_service, `swing_liq_cap_pct`) reads this exact
+                        # snake_case key to size ≤1% of a name's daily turnover.
+                        # Was missing here → sizing fail-closed to qty 0 →
+                        # `swing_liq_cap_no_turnover` → 0 swing trades (fixed 2026-07-09).
+                        # turnoverRank60D (a rank) is NOT a substitute. Sourced from the
+                        # candidate's turnoverMed60D (universe_service:4263). SWING-ONLY.
+                        "turnover_med_60d": float(r.get("turnoverMed60D") or 0.0),
                         "atrPct14D": float(round(float(r.get("atrPct14D") or 0.0), 6)),
                         "rs_vs_mkt": float(round(float(r.get("rs_vs_mkt") or 0.0), 6)),
                         "breadth_pct": float(round(breadth_pct, 2)),
