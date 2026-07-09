@@ -186,6 +186,10 @@ class StrategySettings:
     # negative (e.g. −1.0 via PEAD_MARKET_DD_GATE) to run the documented NO-GATE
     # variant (higher lifetime total, trades through corrections — PROJECT_KNOWLEDGE §8).
     pead_market_dd_gate: float = -0.05
+    # Run-up FLOOR (2026-07-09 grind): require pre-event run-up >= this. Drops falling-knife
+    # reactions (downtrending names) — validated edge (Calmar 0.18->0.68, maxDD -28%->-11%,
+    # both halves + survivorship-robust). Default 0.0 (floor on); PEAD_MIN_RUNUP=-1.0 disables.
+    pead_min_runup: float = 0.0
     # Corp-action (bonus/split) sub-strategy of the EVENT/PEAD channel (added 2026-06-20).
     # SHARES the PEAD capital pool + 5-slot cap + daily breaker (both tag channel="pead");
     # corp is sub-capped at corp_max_positions concurrent. Own meeting-day exit
@@ -470,6 +474,7 @@ class AppSettings:
             pead_activate_r=_env_float("PEAD_ACTIVATE_R", 1.75),
             pead_trail_r=_env_float("PEAD_TRAIL_R", 1.0),
             pead_market_dd_gate=_env_float("PEAD_MARKET_DD_GATE", -0.05),
+            pead_min_runup=_env_float("PEAD_MIN_RUNUP", 0.0),
             # Corp-action (bonus/split) sub-strategy of the EVENT/PEAD channel (2026-06-20)
             corp_max_positions=_env_int("CORP_MAX_POSITIONS", 0),       # 0 = disabled until enabled
             corp_notional_cap_pct=_env_float("CORP_NOTIONAL_CAP_PCT", 0.20),

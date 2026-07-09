@@ -110,7 +110,8 @@ def nifty_drawdown(nifty_daily: Sequence[tuple[str, float]], asof: str,
 
 def build_candidates(reaction_date: str, result_symbols: Sequence[str],
                      candles: dict[str, list[list]], market_dd: float | None,
-                     market_dd_gate: float = pead_signals.MARKET_DD_GATE) -> list[dict[str, Any]]:
+                     market_dd_gate: float = pead_signals.MARKET_DD_GATE,
+                     min_runup: float = pead_signals.ANTI_KNIFE_MIN_RUNUP) -> list[dict[str, Any]]:
     """Pure Config B candidate selection for one reaction day.
 
     For each just-reported symbol whose reaction is ``reaction_date``: apply the
@@ -139,7 +140,7 @@ def build_candidates(reaction_date: str, result_symbols: Sequence[str],
             continue
         surprise = pead_signals.earnings_surprise(closes, ri)
         runup = pead_signals.pre_event_runup(closes, ri)
-        if not pead_signals.passes_pead_gates(surprise, runup, market_dd, market_dd_gate=market_dd_gate):
+        if not pead_signals.passes_pead_gates(surprise, runup, market_dd, market_dd_gate=market_dd_gate, min_runup=min_runup):
             continue
         atr = _simple_atr(highs, lows, closes, ri)
         if atr is None or atr <= 0:
@@ -233,7 +234,8 @@ def fetch_result_events(asof: str, lookback_days: int = 5) -> list[tuple[str, st
 def scan(reaction_date: str, candles: dict[str, list[list]],
          nifty_daily: Sequence[tuple[str, float]],
          result_symbols: Sequence[str] | None = None,
-         market_dd_gate: float = pead_signals.MARKET_DD_GATE) -> list[dict[str, Any]]:
+         market_dd_gate: float = pead_signals.MARKET_DD_GATE,
+         min_runup: float = pead_signals.ANTI_KNIFE_MIN_RUNUP) -> list[dict[str, Any]]:
     """Top-level: compute the NIFTY-50 market-state drawdown and return PEAD candidates
     for ``reaction_date``.
 
@@ -252,7 +254,7 @@ def scan(reaction_date: str, candles: dict[str, list[list]],
         return []
     if result_symbols is None:
         result_symbols = fetch_result_symbols(reaction_date)
-    cands = build_candidates(reaction_date, result_symbols, candles, market_dd, market_dd_gate=market_dd_gate)
+    cands = build_candidates(reaction_date, result_symbols, candles, market_dd, market_dd_gate=market_dd_gate, min_runup=min_runup)
     logger.info("pead_scan reaction_date=%s nifty_dd=%.3f gate=%.2f candidates=%d",
                 reaction_date, market_dd, market_dd_gate, len(cands))
     return cands

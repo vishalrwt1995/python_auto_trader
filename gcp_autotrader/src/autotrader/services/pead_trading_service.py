@@ -199,7 +199,8 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     eligible = _select_reaction_symbols(events, candles, reaction_target)
     candidates = pead_signal_service.scan(reaction_target, candles, nifty_daily,
                                           result_symbols=eligible,
-                                          market_dd_gate=cfg.pead_market_dd_gate)
+                                          market_dd_gate=cfg.pead_market_dd_gate,
+                                          min_runup=cfg.pead_min_runup)
     for c in candidates:
         c["instrument_key"] = ik_for.get(c["symbol"], "")
 
