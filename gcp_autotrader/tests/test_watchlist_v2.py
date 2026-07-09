@@ -305,6 +305,44 @@ def test_watchlist_v2_swing_rows_carry_turnover_med_60d():
         assert float(r["turnover_med_60d"]) > 0.0
 
 
+def test_watchlist_v2_swing_only_flag_drops_intraday_rows():
+    """Intraday halt (2026-07-09): with watchlist_swing_only=True, the watchlist doc must carry
+    ONLY swing rows so the dashboard stops showing inert intraday names (intraday scan jobs are
+    paused too). Default (flag off) still includes intraday rows — no behavior change."""
+    def _build(swing_only: bool) -> _FakeState:
+        state = _FakeState()
+        svc = UniverseService(object(), object(), StrategySettings(watchlist_swing_only=swing_only))
+        svc.state = state  # type: ignore[assignment]
+        now_i = now_ist()
+        expected_lcd = svc._expected_latest_daily_candle_date(now_i).strftime("%Y-%m-%d")
+        candidates = [
+            {
+                "symbol": sym, "exchange": "NSE", "segment": "CASH", "enabled": True,
+                "instrumentKey": f"NSE_EQ|{sym}", "eligibleSwing": True, "eligibleIntraday": True,
+                "turnoverRank60D": rank, "turnoverMed60D": 5.0e8, "liquidityBucket": "A",
+                "atrPct14D": 0.02, "gapRisk60D": 0.01, "priceLast": 120.0, "bars1D": 260,
+                "last1DDate": expected_lcd, "fresh": True, "disableReason": "",
+            }
+            for sym, rank in (("AAA", 10), ("BBB", 30))
+        ]
+        svc._build_universe_v2_controls = lambda: _controls()  # type: ignore[method-assign]
+        svc._build_watchlist_v2_regime = lambda timeframe, expected_lcd, now_i, premarket=False: {  # type: ignore[method-assign]
+            "regimeDaily": "TREND", "regimeIntraday": "CHOPPY", "source": {},
+        }
+        svc._watchlist_v2_candidates = lambda expected_lcd: list(candidates)  # type: ignore[method-assign]
+        svc._watchlist_daily_candles = lambda row, expected_lcd: _daily_candles()  # type: ignore[method-assign]
+        svc._watchlist_intraday_candles = lambda row, timeframe, now_i: _intraday_5m_today()  # type: ignore[method-assign]
+        svc.build_watchlist(None, target_size=20, premarket=True, intraday_timeframe="5m")
+        return state
+
+    on = _build(True)
+    assert on.swing_rows, "swing rows must survive the swing-only flag"
+    assert not on.intraday_rows, "watchlist_swing_only must drop ALL intraday rows"
+
+    off = _build(False)
+    assert off.intraday_rows, "default (flag off) must still include intraday rows"
+
+
 def test_watchlist_v2_intraday_run_reports_swing_selected_accurately():
     """When premarket=False, swingSelected must reflect the real count.
 

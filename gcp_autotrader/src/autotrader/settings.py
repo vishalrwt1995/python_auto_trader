@@ -216,6 +216,12 @@ class StrategySettings:
     # Env kill-switch CORE_COMPOUND_SIZING=false reverts to the prior fixed-capital sizing.
     core_compound_sizing: bool = True
 
+    # 2026-07-09: when true, build_watchlist writes SWING rows only (no intraday rows) to
+    # watchlist/latest. Used to halt the intraday channel cleanly — the intraday scan jobs
+    # are paused AND the dashboard watchlist stops showing inert intraday names. Default off
+    # (no behavior change). Env WATCHLIST_SWING_ONLY=true. Reversible; swing rows unaffected.
+    watchlist_swing_only: bool = False
+
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
 
@@ -474,6 +480,7 @@ class AppSettings:
             core_enabled=_env_bool("CORE_ENABLED", False),
             core_notional_cap_pct=_env_float("CORE_NOTIONAL_CAP_PCT", 1.0),
             core_compound_sizing=_env_bool("CORE_COMPOUND_SIZING", True),
+            watchlist_swing_only=_env_bool("WATCHLIST_SWING_ONLY", False),
         )
         return AppSettings(
             gcp=GcpSettings(
