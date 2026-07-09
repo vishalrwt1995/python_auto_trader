@@ -38,6 +38,13 @@ from typing import Sequence
 # 14/17 +yrs. See PROJECT_KNOWLEDGE §8.
 SURPRISE_MIN: float = 0.05            # min earnings-day reaction to qualify
 ANTI_PUMP_MAX_RUNUP: float = 0.75     # exclude if pre-event run-up >= this (grind v2: 0.50->0.75)
+# Run-up FLOOR (2026-07-09 grind) — require pre-event run-up >= this. Drops falling-knife
+# reactions (negative run-up = downtrending names reporting), which the anti-pump UPPER cap
+# never caught. Validated selection edge: Calmar 0.18->0.68 (liquid) / 0.46->1.12 (full
+# universe incl. delisted), maxDD -28%->-11%, both halves, 11/12 yrs positive, survivorship-
+# robust; the competing "big-reaction" bucket collapsed in the portfolio walk. env PEAD_MIN_RUNUP;
+# set -1.0 to disable (revert to no-floor). See PROJECT_KNOWLEDGE §8.
+ANTI_KNIFE_MIN_RUNUP: float = 0.0
 ANTI_PUMP_LOOKBACK: int = 60          # trading days for the pre-event run-up window
 MARKET_DD_GATE: float = -0.05         # trade only when broad-market drawdown > this
 MAX_HOLD_DAYS: int = 60               # PEAD drift horizon (grind v2: 40->60; vs swing's 20)
@@ -82,9 +89,11 @@ def passes_pead_gates(
     *,
     surprise_min: float = SURPRISE_MIN,
     max_runup: float = ANTI_PUMP_MAX_RUNUP,
+    min_runup: float = ANTI_KNIFE_MIN_RUNUP,
     market_dd_gate: float = MARKET_DD_GATE,
 ) -> bool:
-    """Config B entry gate: positive surprise AND healthy market AND not-pumped.
+    """Config B entry gate: positive surprise AND healthy market AND run-up in the
+    HEALTHY BAND — ``>= min_runup`` (not a falling knife) AND ``< max_runup`` (not pumped).
 
     ``market_dd`` is the broad-market drawdown from its trailing high (<= 0),
     computed once per day by the caller from the universe and passed in.
@@ -94,6 +103,6 @@ def passes_pead_gates(
         return False
     return (
         surprise >= surprise_min
-        and runup < max_runup
+        and min_runup <= runup < max_runup
         and market_dd > market_dd_gate
     )

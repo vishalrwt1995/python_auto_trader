@@ -10,6 +10,7 @@ from autotrader.domain.pead_signals import (
     passes_pead_gates,
     SURPRISE_MIN,
     ANTI_PUMP_MAX_RUNUP,
+    ANTI_KNIFE_MIN_RUNUP,
     MARKET_DD_GATE,
 )
 
@@ -90,3 +91,33 @@ def test_gate_boundaries():
     assert passes_pead_gates(0.08, ANTI_PUMP_MAX_RUNUP, -0.02) is False
     # market dd exactly at the gate is excluded (strict >)
     assert passes_pead_gates(0.08, 0.20, MARKET_DD_GATE) is False
+
+
+# ── run-up FLOOR (anti-falling-knife, 2026-07-09 grind) ───────────────────────
+def test_gate_falling_knife_excluded():
+    # negative pre-event run-up (downtrending name reporting) is now dropped by the floor,
+    # even with a strong surprise + healthy market — the validated edge.
+    assert passes_pead_gates(0.08, -0.05, -0.02) is False
+
+
+def test_gate_min_runup_boundary():
+    # run-up exactly at the floor (0.0) qualifies (>=); just below is excluded (strict).
+    assert passes_pead_gates(0.08, ANTI_KNIFE_MIN_RUNUP, -0.02) is True
+    assert passes_pead_gates(0.08, ANTI_KNIFE_MIN_RUNUP - 0.001, -0.02) is False
+
+
+def test_gate_min_runup_disabled_reverts_to_no_floor():
+    # kill-switch: PEAD_MIN_RUNUP=-1.0 (min_runup=-1.0) disables the floor -> old behaviour
+    # (falling-knife reactions qualify again).
+    assert passes_pead_gates(0.08, -0.05, -0.02, min_runup=-1.0) is True
+
+
+def test_gate_healthy_band():
+    # the gate now requires run-up in [min_runup, max_runup): not a knife, not pumped.
+    assert passes_pead_gates(0.08, 0.30, -0.02) is True     # healthy 30%
+    assert passes_pead_gates(0.08, -0.01, -0.02) is False   # below floor (knife)
+    assert passes_pead_gates(0.08, 0.90, -0.02) is False    # above cap (pumped)
+
+
+def test_default_floor_is_zero():
+    assert ANTI_KNIFE_MIN_RUNUP == 0.0
