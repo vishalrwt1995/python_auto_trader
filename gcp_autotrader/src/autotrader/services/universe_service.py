@@ -5607,7 +5607,11 @@ class UniverseService:
         try:
             if self.state is not None:
                 fs_rows: list[dict] = []
-                for r in intraday_selected:
+                # Intraday halt (2026-07-09): when watchlist_swing_only, write SWING rows only
+                # so the dashboard stops showing inert intraday names (the intraday scan jobs are
+                # paused too). Swap the iterable to [] — no re-indent, swing block untouched.
+                _swing_only = bool(getattr(self.cfg, "watchlist_swing_only", False))
+                for r in ([] if _swing_only else intraday_selected):
                     fs_rows.append({
                         "symbol": str(r.get("symbol", "")),
                         "exchange": str(r.get("exchange", "NSE")),
@@ -5653,7 +5657,7 @@ class UniverseService:
                         "wlType": "swing",
                         "wl_type": "swing",  # dual-write snake_case for hook compatibility
                     })
-                intraday_syms = [str(r.get("symbol", "")) for r in intraday_selected if r.get("symbol")]
+                intraday_syms = [] if _swing_only else [str(r.get("symbol", "")) for r in intraday_selected if r.get("symbol")]
                 swing_syms = [str(r.get("symbol", "")) for r in swing_selected if r.get("symbol")]
                 all_syms = list(dict.fromkeys(intraday_syms + swing_syms))
                 self.state.save_watchlist({
