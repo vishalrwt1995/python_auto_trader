@@ -1971,6 +1971,37 @@ def run_core_rebalance(
         raise
 
 
+@app.post("/jobs/momentum-rebalance")
+def run_momentum_rebalance(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Momentum x Low-Vol monthly rebalance (PAPER) — own channel, long-only buy-and-HOLD CNC.
+    Top-20 cross-sectional momentum + low-vol blend (>=Rs10cr), buffer x1.5, Nifty-100DMA regime
+    overlay (cash when Nifty<100DMA). No-op unless CAPITAL_MOMENTUM>0 AND MOMENTUM_ENABLED. Runs
+    the 1st of each month; buy-and-hold — ws_monitor treats wl_type="momentum" as overnight (Rule 8).
+    Cloud Scheduler job: autotrader-momentum-rebalance.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("MomentumTradingService", "momentum_rebalance", "START", "", sched_ctx)
+        out = c.run_momentum_rebalance()
+        sink.action("MomentumTradingService", "momentum_rebalance", "DONE", "momentum rebalance complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("MomentumTradingService", "momentum_rebalance", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.post("/jobs/corp-reconcile")
 def run_corp_action_reconcile(
     x_job_token: str | None = Header(default=None),

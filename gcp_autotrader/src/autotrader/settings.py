@@ -45,6 +45,7 @@ class StrategySettings:
     capital_pead: float = 0.0          # EVENT/PEAD channel (Phase C, added 2026-06-19)
     capital_gapfade: float = 0.0       # GAP_FADE channel (Phase C, added 2026-06-21)
     capital_core: float = 0.0          # CORE momentum-hold channel (Phase C, added 2026-06-21)
+    capital_momentum: float = 0.0      # Momentum x Low-Vol channel (monthly rebalance, added 2026-07-10)
     # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
     # of channel capital. Used by the per-channel daily-limit gate in
     # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
@@ -226,6 +227,14 @@ class StrategySettings:
     # (no behavior change). Env WATCHLIST_SWING_ONLY=true. Reversible; swing rows unaffected.
     watchlist_swing_only: bool = False
 
+    # Momentum x Low-Vol channel (2026-07-10): monthly-rebalanced top-20 cross-sectional
+    # momentum + low-vol blend (>=Rs10cr, buffer x1.5, Nifty-100DMA regime overlay), buy-and-HOLD
+    # CNC, own channel (never EOD-squared). Validated ~14% CAGR / -16% DD / Calmar ~0.85, low-corr
+    # to CORE (scripts/redesign/factor_*.py). Set MOMENTUM_ENABLED=true + CAPITAL_MOMENTUM. PAPER,
+    # STOCK-ONLY. Compounds off current NAV (MOMENTUM_COMPOUND_SIZING=false reverts to fixed).
+    momentum_enabled: bool = False
+    momentum_compound_sizing: bool = True
+
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
 
@@ -249,6 +258,8 @@ class StrategySettings:
             return self.capital_gapfade
         if ch == "core" and self.capital_core > 0:
             return self.capital_core
+        if ch == "momentum" and self.capital_momentum > 0:
+            return self.capital_momentum
         return self.capital
 
 
@@ -421,6 +432,7 @@ class AppSettings:
             capital_pead=_env_float("CAPITAL_PEAD", 0.0),
             capital_gapfade=_env_float("CAPITAL_GAPFADE", 0.0),
             capital_core=_env_float("CAPITAL_CORE", 0.0),
+            capital_momentum=_env_float("CAPITAL_MOMENTUM", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
@@ -486,6 +498,8 @@ class AppSettings:
             core_notional_cap_pct=_env_float("CORE_NOTIONAL_CAP_PCT", 1.0),
             core_compound_sizing=_env_bool("CORE_COMPOUND_SIZING", True),
             watchlist_swing_only=_env_bool("WATCHLIST_SWING_ONLY", False),
+            momentum_enabled=_env_bool("MOMENTUM_ENABLED", False),
+            momentum_compound_sizing=_env_bool("MOMENTUM_COMPOUND_SIZING", True),
         )
         return AppSettings(
             gcp=GcpSettings(
