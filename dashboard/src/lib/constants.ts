@@ -57,9 +57,10 @@ export const CHANNEL_META: Record<Channel, { label: string; color: string; blurb
   corp_action: { label: "Corp Action",  color: "#8b5cf6", blurb: "Bonus/split run-up" },
   gap_fade:    { label: "Gap Fade",     color: "#f97316", blurb: "Intraday >5% gap short" },
   core:        { label: "Core",         color: "#22c55e", blurb: "Quarterly buy & hold" },
+  momentum:    { label: "Momentum",     color: "#14b8a6", blurb: "Monthly momentum × low-vol" },
 };
 
-export const CHANNEL_ORDER: Channel[] = ["swing", "intraday", "pead", "gap_fade", "core"];
+export const CHANNEL_ORDER: Channel[] = ["swing", "intraday", "pead", "gap_fade", "core", "momentum"];
 
 export const NAV_ITEMS = [
   { label: "Command Center", href: "/", icon: "LayoutDashboard" },

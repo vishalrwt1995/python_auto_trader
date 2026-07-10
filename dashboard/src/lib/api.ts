@@ -91,6 +91,8 @@ export const api = {
 
   getCoreBasket: () => api.get<import("./types").CoreBasket>("/dashboard/core/basket"),
 
+  getMomentumBasket: () => api.get<import("./types").CoreBasket>("/dashboard/momentum/basket"),
+
   getGapFadeShorts: () => api.get<import("./types").GapFadeShorts>("/dashboard/gap-fade/shorts"),
 
   getUniverseStats: () => api.get<Record<string, unknown>>("/dashboard/universe/stats"),
