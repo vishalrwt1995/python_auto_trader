@@ -114,15 +114,23 @@ def run_momentum_rebalance_once(*, settings, upstox, state, order_service, bq=No
     prev_holds = [str(p.get("symbol") or "").strip().upper() for p in holdings]
 
     regime_ok = mss.fetch_nifty_regime(upstox, getattr(cfg, "nifty50_instrument_key", "NSE_INDEX|Nifty 50"), asof)
-    history = mss.fetch_universe_history(list(keymap), keymap, upstox, asof)
-    basket = mss.build_target_basket(history, prev_holds=prev_holds, regime_ok=regime_ok)
-    for c in basket:
-        c["instrument_key"] = keymap.get(c["symbol"], "")
+    if regime_ok:
+        history = mss.fetch_universe_history(list(keymap), keymap, upstox, asof)
+        basket = mss.build_target_basket(history, prev_holds=prev_holds, regime_ok=True)
+        for c in basket:
+            c["instrument_key"] = keymap.get(c["symbol"], "")
+    else:
+        # Regime overlay = CASH (Nifty < 100DMA): the target basket is empty (go to cash), so
+        # SKIP the expensive universe-history fetch entirely (~1,096 Upstox calls / ~2 min).
+        # Any existing holdings are sold from the holdings list itself (sells need only the
+        # position_tag + instrument_key, not history) — so nothing is lost, just the wasted fetch.
+        history, basket = {}, []
+        logger.info("momentum_regime_cash skip_history_fetch holdings=%d", len(holdings))
 
     # Compounding (mirror CORE, gated by momentum_compound_sizing): size off current NAV so the
     # live channel reinvests gains like the validated backtest. Fixed capital bootstraps run 1.
     sizing_capital, nav_sizing = channel_capital, False
-    if bool(getattr(cfg, "momentum_compound_sizing", True)) and holdings:
+    if basket and bool(getattr(cfg, "momentum_compound_sizing", True)) and holdings:
         def _cur_px(hp: dict[str, Any]) -> float:
             bars = history.get(str(hp.get("symbol") or ""))
             return float(bars[-1][4]) if bars else float(hp.get("entry_price") or 0.0)
