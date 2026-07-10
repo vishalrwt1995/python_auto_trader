@@ -330,7 +330,9 @@ Shipped + ENABLED (§8 ⑰, PR #59, rev `autotrader-00289-ftq` + ws-monitor `000
 
 **E2E live-validated 2026-07-10 (PAPER):** first-rebalance manual trigger ran the full pipeline — `universe=1096 → regime_ok=False (Nifty<100DMA) → basket=0 → bought=0/sold=0`. Correct **cash-regime no-op** (overlay working). 0 momentum positions created; **CORE's 30 held overnight on the new ws-monitor** (`eod_skip_overnight wl_type=core` — exemption change proven safe); env + all schedulers + other channels **unaffected** (verified). Buys its first ~20-name basket on the first rebalance where Nifty > 100DMA.
 
-**Follow-ups (§7-O):** (a) **regime-first fetch optimization** — handler fetches all ~1,096 daily histories *before* the regime gate, wasting them + ~2 min whenever in cash (single-service fix, not a bug); (b) **momentum PAPER forward-validation** (first real basket + fill quality). Memory `project_momentum_channel`.
+**Dashboard UI (PR #61, rev `autotrader-dashboard-00071-wkk`):** momentum is now a first-class channel in the cockpit — `CHANNEL_META`/`CHANNEL_ORDER` (teal), `/channels` basket drill-down (with a cash-regime note), positions buy-hold casing (catastrophe SL / HOLD·monthly / no R:R / days-held, mirroring CORE), `inferTradeChannel` MOM_LOWVOL routing. Additive; tsc + `next build` (17/17) clean; `/channels` HTTP 200 post-deploy. (Local browser preview stayed blocked — spawn env + Firebase gate — verified via build.)
+
+**Follow-ups:** (a) ~~regime-first fetch optimization~~ **SHIPPED PR #60 (rev `00290-bbq`)** — skip the universe-history fetch in cash regime; (b) **momentum PAPER forward-validation** (first real basket + fill quality on the first Nifty>100DMA rebalance) — see §7-O. Memory `project_momentum_channel`.
 
 ### 2026-07-10 — ⑯ CHRONIC MORNING LOCKDOWN ROOT-CAUSED + FIXED (Cloud Scheduler config only — NO code deploy, NO rev change, PAPER)
 
