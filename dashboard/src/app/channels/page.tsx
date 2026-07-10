@@ -118,6 +118,15 @@ function DetailPanel({ channel }: { channel: Channel }) {
         })),
         d.count ? `${d.count} holdings · ${rupee(d.deployed_notional)} deployed` : "no holdings",
       )).catch(fail);
+    } else if (channel === "momentum") {
+      api.getMomentumBasket().then((d) => ok(
+        d.holdings.map((h) => ({
+          Symbol: h.symbol, Qty: h.qty, Entry: rupee(h.entry_price),
+          Notional: rupee(h.notional), Weight: `${h.weight_pct}%`,
+        })),
+        d.count ? `${d.count} holdings · ${rupee(d.deployed_notional)} deployed`
+                : (d.enabled ? "cash (Nifty < 100DMA) · no holdings" : "no holdings"),
+      )).catch(fail);
     } else if (channel === "gap_fade") {
       api.getGapFadeShorts().then((d) => ok(
         d.shorts.map((s) => ({
