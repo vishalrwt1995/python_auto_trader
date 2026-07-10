@@ -406,7 +406,7 @@ def get_pead_summary(
 # (they share the EVENT pool), so they fold into the pead card. These GETs are
 # read-only + additive — no trading-path, schema, or env change.
 
-_CHANNELS: tuple[str, ...] = ("swing", "intraday", "pead", "gap_fade", "core")
+_CHANNELS: tuple[str, ...] = ("swing", "intraday", "pead", "gap_fade", "core", "momentum")
 
 
 def _position_channel(p: dict[str, Any]) -> str:
@@ -573,6 +573,45 @@ def get_core_basket(
         "channel": "core",
         "capital": s.channel_capital("core"),
         "enabled": bool(s.core_enabled),
+        "count": len(holdings),
+        "deployed_notional": round(total, 2),
+        "holdings": holdings,
+    }
+
+
+@router.get("/momentum/basket")
+def get_momentum_basket(
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """Momentum x Low-Vol buy-and-hold basket — current holdings + entry-notional weights."""
+    c = get_container()
+    s = c.settings.strategy
+    try:
+        positions = [p for p in c.state.list_open_positions()
+                     if _position_channel(p) == "momentum"]
+    except Exception as exc:
+        logger.error("momentum/basket failed: %s", exc)
+        return {"channel": "momentum", "holdings": [], "count": 0, "error": str(exc)}
+    holdings: list[dict[str, Any]] = []
+    for p in positions:
+        qty = float(p.get("qty") or 0.0)
+        entry = float(p.get("entry_price") or 0.0)
+        holdings.append({
+            "symbol": p.get("symbol"),
+            "qty": int(qty),
+            "entry_price": entry,
+            "sl_price": p.get("sl_price"),
+            "entry_ts": str(p.get("entry_ts", ""))[:19],
+            "notional": round(qty * entry, 2),
+        })
+    total = sum(h["notional"] for h in holdings) or 0.0
+    for h in holdings:
+        h["weight_pct"] = round(100.0 * h["notional"] / total, 2) if total else 0.0
+    holdings.sort(key=lambda h: -h["notional"])
+    return {
+        "channel": "momentum",
+        "capital": s.channel_capital("momentum"),
+        "enabled": bool(s.momentum_enabled),
         "count": len(holdings),
         "deployed_notional": round(total, 2),
         "holdings": holdings,

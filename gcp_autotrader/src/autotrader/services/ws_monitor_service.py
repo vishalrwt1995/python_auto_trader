@@ -62,7 +62,9 @@ def _now_ist_str() -> str:
 # multi-day hold). No live pead/corp position existed yet, so swing/intraday are unaffected.
 # 2026-06-21: added "core" — the CORE momentum-hold channel is a pure quarterly buy-and-HOLD
 # (no stops, no intraday/EOD square-off); it must never be touched by ws_monitor.
-_OVERNIGHT_SL_ONLY_WL = frozenset({"swing", "pead", "corp_action", "core"})
+# 2026-07-10: added "momentum" — the Momentum x Low-Vol channel is a monthly buy-and-HOLD basket
+# (same overnight-hold treatment as core). No live momentum position exists yet -> nothing changes.
+_OVERNIGHT_SL_ONLY_WL = frozenset({"swing", "pead", "corp_action", "core", "momentum"})
 
 
 def _is_overnight_sl_only(pos: dict) -> bool:

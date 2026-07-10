@@ -240,6 +240,21 @@ class AppContainer:
             asof=asof,
         )
 
+    def run_momentum_rebalance(self, asof: str | None = None) -> dict:
+        """Run the monthly Momentum x Low-Vol rebalance — own channel, long-only buy-and-HOLD
+        CNC (PAPER). Top-20 momentum+low-vol blend (>=Rs10cr), buffer x1.5, Nifty-100DMA regime
+        overlay. No-op unless CAPITAL_MOMENTUM>0 AND MOMENTUM_ENABLED. Buy-and-hold — no stops;
+        ws_monitor treats wl_type="momentum" as an overnight hold (Rule 8)."""
+        from autotrader.services import momentum_trading_service
+        return momentum_trading_service.run_momentum_rebalance_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            asof=asof,
+        )
+
 
 @lru_cache(maxsize=1)
 def get_container() -> AppContainer:

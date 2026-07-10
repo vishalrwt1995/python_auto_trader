@@ -102,6 +102,6 @@ def test_eod_recon_mixed_book():
 def test_exemption_set_matches_ws_monitor():
     """Drift guard: the EOD-recon exemption must stay in sync with ws_monitor's set."""
     src = inspect.getsource(os_mod)
-    assert 'in ("swing", "pead", "corp_action", "core")' in src, (
+    assert 'in ("swing", "pead", "corp_action", "core", "momentum")' in src, (
         "reconcile_open_positions overnight-skip set drifted from ws_monitor._OVERNIGHT_SL_ONLY_WL"
     )
