@@ -55,3 +55,64 @@ def test_per_name_cap_excludes_unaffordable():
     plan = plan_momentum_rebalance(tb, [], 200000.0, _Cfg())   # slice=10k, cap=15k < 40k
     bought = {b["symbol"] for b in plan["buys"]}
     assert "CHEAP" in bought and "PRICEY" not in bought
+
+
+# ── run_momentum_rebalance_once: regime-first fetch optimization ──────────────
+class _RunCfg:
+    momentum_enabled = True
+    momentum_compound_sizing = True
+    nifty50_instrument_key = "NSE_INDEX|Nifty 50"
+    def channel_capital(self, ch):
+        return 200000.0
+
+
+class _RunSettings:
+    strategy = _RunCfg()
+
+
+class _RunState:
+    def list_open_positions(self):
+        return []
+
+
+class _RunOrder:
+    def place_exit_order(self, **k):
+        return {}
+    def place_entry_order(self, **k):
+        return {}
+
+
+def test_run_once_cash_regime_skips_history_fetch(monkeypatch):
+    """Optimization: when Nifty < 100DMA (regime cash), do NOT fetch the ~1,096-name history."""
+    from autotrader.services import momentum_trading_service as mts
+    from autotrader.services import momentum_signal_service as mss
+    calls = {"history": 0}
+    monkeypatch.setattr(mss, "fetch_universe", lambda state, **k: {"AAA": "K|AAA"})
+    monkeypatch.setattr(mss, "fetch_nifty_regime", lambda *a, **k: False)      # CASH
+    def _fetch(*a, **k):
+        calls["history"] += 1
+        return {}
+    monkeypatch.setattr(mss, "fetch_universe_history", _fetch)
+    out = mts.run_momentum_rebalance_once(settings=_RunSettings(), upstox=None, state=_RunState(),
+                                          order_service=_RunOrder(), asof="2026-07-10")
+    assert calls["history"] == 0                       # <-- fetch skipped in cash regime
+    assert out["regime_ok"] is False
+    assert out["bought"] == 0 and out["sold"] == 0 and out["basket"] == 0
+
+
+def test_run_once_hold_regime_does_fetch(monkeypatch):
+    """When Nifty > 100DMA (regime hold), the universe history IS fetched to build the basket."""
+    from autotrader.services import momentum_trading_service as mts
+    from autotrader.services import momentum_signal_service as mss
+    calls = {"history": 0}
+    monkeypatch.setattr(mss, "fetch_universe", lambda state, **k: {"AAA": "K|AAA"})
+    monkeypatch.setattr(mss, "fetch_nifty_regime", lambda *a, **k: True)       # HOLD
+    def _fetch(*a, **k):
+        calls["history"] += 1
+        return {}
+    monkeypatch.setattr(mss, "fetch_universe_history", _fetch)
+    monkeypatch.setattr(mss, "build_target_basket", lambda *a, **k: [])        # empty -> no orders
+    out = mts.run_momentum_rebalance_once(settings=_RunSettings(), upstox=None, state=_RunState(),
+                                          order_service=_RunOrder(), asof="2026-07-10")
+    assert calls["history"] == 1                       # <-- fetch happens in hold regime
+    assert out["regime_ok"] is True
