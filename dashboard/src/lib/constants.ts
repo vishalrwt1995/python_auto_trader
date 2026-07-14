@@ -60,7 +60,9 @@ export const CHANNEL_META: Record<Channel, { label: string; color: string; blurb
   momentum:    { label: "Momentum",     color: "#14b8a6", blurb: "Monthly momentum × low-vol" },
 };
 
-export const CHANNEL_ORDER: Channel[] = ["swing", "intraday", "pead", "gap_fade", "core", "momentum"];
+// gap_fade retired 2026-07-14 (no OOS edge — un-executable; killed in prod). Removed from
+// the cockpit; type/CHANNEL_META kept so any historical gap_fade trades still render.
+export const CHANNEL_ORDER: Channel[] = ["swing", "intraday", "pead", "core", "momentum"];
 
 export const NAV_ITEMS = [
   { label: "Command Center", href: "/", icon: "LayoutDashboard" },
