@@ -18,6 +18,7 @@ from autotrader.services.market_brain_service import MarketBrainService
 from autotrader.services.order_service import OrderService
 from autotrader.services.regime_service import MarketRegimeService
 from autotrader.services.pead_reconciliation_service import PeadReconciliationService
+from autotrader.services.delivery_reconciliation_service import DeliveryReconciliationService
 from autotrader.services.corp_action_reconciliation_service import CorpActionReconciliationService
 from autotrader.services.swing_reconciliation_service import SwingReconciliationService
 from autotrader.services.trading_service import TradingService
@@ -100,6 +101,7 @@ class AppContainer:
         self._trading_service: TradingService | None = None
         self._swing_reconciliation_service: SwingReconciliationService | None = None
         self._pead_reconciliation_service: PeadReconciliationService | None = None
+        self._delivery_reconciliation_service: DeliveryReconciliationService | None = None
         self._corp_action_reconciliation_service: CorpActionReconciliationService | None = None
 
     def log_sink(self) -> LogSink:
@@ -187,6 +189,36 @@ class AppContainer:
             bq=self.bq,
             reaction_date=reaction_date,
         )
+
+    def delivery_reconciliation_service(self) -> DeliveryReconciliationService:
+        if self._delivery_reconciliation_service is None:
+            self._delivery_reconciliation_service = DeliveryReconciliationService(
+                settings=self.settings,
+                state=self.state,
+                upstox=self.upstox,
+                order_service=self.order_service(),
+            )
+        return self._delivery_reconciliation_service
+
+    def run_delivery_scan(self, reaction_date: str | None = None) -> dict:
+        """Run the daily delivery-accumulation entry scan (PAPER). Reads deliv-% from BQ
+        nse_delivery_daily, fetches dailies, applies the stock-only 25-50cr gate, places
+        CNC entries. No-op unless CAPITAL_DELIVERY>0."""
+        from autotrader.services import delivery_trading_service
+        return delivery_trading_service.run_delivery_scan_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            reaction_date=reaction_date,
+        )
+
+    def run_delivery_ingest(self, asof: str | None = None) -> dict:
+        """Fetch NSE sec_bhavdata_full for the latest session → load delivery-% to BQ
+        nse_delivery_daily (the delivery channel's daily data feed). Fail-closed."""
+        from autotrader.services.delivery_ingest_service import DeliveryIngestService
+        return DeliveryIngestService(bq=self.bq).run(asof=asof)
 
     def corp_action_reconciliation_service(self) -> CorpActionReconciliationService:
         if self._corp_action_reconciliation_service is None:

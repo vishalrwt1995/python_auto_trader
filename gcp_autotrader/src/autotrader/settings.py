@@ -46,6 +46,7 @@ class StrategySettings:
     capital_gapfade: float = 0.0       # GAP_FADE channel (Phase C, added 2026-06-21)
     capital_core: float = 0.0          # CORE momentum-hold channel (Phase C, added 2026-06-21)
     capital_momentum: float = 0.0      # Momentum x Low-Vol channel (monthly rebalance, added 2026-07-10)
+    capital_delivery: float = 0.0      # Delivery-accumulation channel (daily CNC mid-caps, added 2026-07-14)
     # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
     # of channel capital. Used by the per-channel daily-limit gate in
     # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
@@ -235,6 +236,24 @@ class StrategySettings:
     momentum_enabled: bool = False
     momentum_compound_sizing: bool = True
 
+    # Delivery-accumulation channel (2026-07-14): daily CNC buy-hold of 25-50cr mid-cap STOCKS
+    # (ETFs excluded) showing NSE delivery-% >= 75 (real accumulation), hold ~20d. Own channel
+    # (capital_delivery), separate 3%/6% breaker; tagged channel/wl_type="delivery" (held overnight,
+    # never EOD-squared — ws_monitor _OVERNIGHT_SL_ONLY_WL). Signal from a daily sec_bhavdata_full
+    # ingest -> BQ nse_delivery_daily. Reuses swing_exit trail + a daily reconciliation (no tick path).
+    # Validated ~11.8% CAGR / Calmar 0.86 / 6-of-7 yrs, beats a pure-beta control (real stock alpha,
+    # not ETF-beta). Set CAPITAL_DELIVERY>0 to enable. PAPER, STOCK-ONLY. (docs/DELIVERY_CHANNEL_PROPOSAL.md)
+    delivery_risk_per_trade: float = 0.0        # Rs/trade (DELIVERY_RISK_PER_TRADE; 1.5% of cap)
+    delivery_max_positions: int = 5             # delivery-%-ranked 5-slot book
+    delivery_max_hold_days: int = 20            # hold horizon (validated plateau 15-22)
+    delivery_atr_sl_mult: float = 2.5           # stop = ATR14 × this
+    delivery_notional_cap_pct: float = 0.20     # per-position notional cap (× capital_delivery)
+    delivery_activate_r: float = 1.75           # arm the 1R trail at +1.75R (matches swing/pead)
+    delivery_trail_r: float = 1.0               # trail distance in R once armed
+    delivery_deliv_min: float = 75.0            # delivery-% floor (validated plateau 70-75)
+    delivery_turnover_min_cr: float = 25.0      # 20d-mean turnover band low (crore)
+    delivery_turnover_max_cr: float = 50.0      # 20d-mean turnover band high (crore)
+
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
 
@@ -260,6 +279,8 @@ class StrategySettings:
             return self.capital_core
         if ch == "momentum" and self.capital_momentum > 0:
             return self.capital_momentum
+        if ch == "delivery" and self.capital_delivery > 0:
+            return self.capital_delivery
         return self.capital
 
 
@@ -433,6 +454,7 @@ class AppSettings:
             capital_gapfade=_env_float("CAPITAL_GAPFADE", 0.0),
             capital_core=_env_float("CAPITAL_CORE", 0.0),
             capital_momentum=_env_float("CAPITAL_MOMENTUM", 0.0),
+            capital_delivery=_env_float("CAPITAL_DELIVERY", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
@@ -500,6 +522,17 @@ class AppSettings:
             watchlist_swing_only=_env_bool("WATCHLIST_SWING_ONLY", False),
             momentum_enabled=_env_bool("MOMENTUM_ENABLED", False),
             momentum_compound_sizing=_env_bool("MOMENTUM_COMPOUND_SIZING", True),
+            # Delivery-accumulation channel (2026-07-14)
+            delivery_risk_per_trade=_env_float("DELIVERY_RISK_PER_TRADE", 0.0),
+            delivery_max_positions=_env_int("DELIVERY_MAX_POSITIONS", 5),
+            delivery_max_hold_days=_env_int("DELIVERY_MAX_HOLD_DAYS", 20),
+            delivery_atr_sl_mult=_env_float("DELIVERY_ATR_SL_MULT", 2.5),
+            delivery_notional_cap_pct=_env_float("DELIVERY_NOTIONAL_CAP_PCT", 0.20),
+            delivery_activate_r=_env_float("DELIVERY_ACTIVATE_R", 1.75),
+            delivery_trail_r=_env_float("DELIVERY_TRAIL_R", 1.0),
+            delivery_deliv_min=_env_float("DELIVERY_DELIV_MIN", 75.0),
+            delivery_turnover_min_cr=_env_float("DELIVERY_TURNOVER_MIN_CR", 25.0),
+            delivery_turnover_max_cr=_env_float("DELIVERY_TURNOVER_MAX_CR", 50.0),
         )
         return AppSettings(
             gcp=GcpSettings(
