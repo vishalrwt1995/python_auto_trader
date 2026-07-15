@@ -1881,6 +1881,93 @@ def run_pead_reconcile(
         raise
 
 
+@app.post("/jobs/delivery-ingest")
+def run_delivery_ingest(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Delivery channel daily data feed (PAPER): fetch NSE sec_bhavdata_full → load
+    delivery-% to BQ nse_delivery_daily. Runs after close. Job: autotrader-delivery-ingest-1900.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("DeliveryIngestService", "delivery_ingest", "START", "", sched_ctx)
+        out = c.run_delivery_ingest()
+        sink.action("DeliveryIngestService", "delivery_ingest", "DONE", "delivery ingest complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("DeliveryIngestService", "delivery_ingest", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
+@app.post("/jobs/delivery-reconcile")
+def run_delivery_reconcile(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Delivery channel daily exit reconciliation (PAPER): ratchet the 1R-trail (arm 1.75R),
+    force the 20-day max-hold exit, daily SL-breach backstop. Runs premarket BEFORE the scan.
+    Job: autotrader-delivery-recon-0900.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("DeliveryReconciliationService", "delivery_reconcile", "START", "", sched_ctx)
+        result = c.delivery_reconciliation_service().run()
+        out = result.to_dict()
+        sink.action("DeliveryReconciliationService", "delivery_reconcile", "DONE", "delivery reconcile complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("DeliveryReconciliationService", "delivery_reconcile", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
+@app.post("/jobs/delivery-scan")
+def run_delivery_scan(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Delivery channel daily entry scan (PAPER): BQ delivery-% → fresh dailies →
+    stock-only 25-50cr deliv>=75 gate → deliv-ranked 5-slot book → CNC entries.
+    Called premarket (~09:12 IST). Job: autotrader-delivery-scan-0912.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("DeliveryTradingService", "delivery_scan", "START", "", sched_ctx)
+        out = c.run_delivery_scan()
+        sink.action("DeliveryTradingService", "delivery_scan", "DONE", "delivery scan complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("DeliveryTradingService", "delivery_scan", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.post("/jobs/corp-scan")
 def run_corp_action_scan(
     x_job_token: str | None = Header(default=None),

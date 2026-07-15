@@ -137,7 +137,7 @@ def test_eod_inner_branch_matches_replica():
         "pattern changed. Update both `_run_one_eod_iteration` AND the smoke tests."
     )
     assert 'logger.info("eod_skip_overnight tag=%s wl_type=%s", tag, pos.get("wl_type"))' in src
-    assert "_OVERNIGHT_SL_ONLY_WL = frozenset({\"swing\", \"pead\", \"corp_action\", \"core\", \"momentum\"})" in src
+    assert "_OVERNIGHT_SL_ONLY_WL = frozenset({\"swing\", \"pead\", \"corp_action\", \"core\", \"momentum\", \"delivery\"})" in src
     assert "_EOD_CLOSE_MINUTE" in src
     assert _EOD_CLOSE_MINUTE == 15 * 60 + 25
     assert _HARD_STOP_MINUTE == 15 * 60 + 30
