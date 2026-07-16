@@ -106,12 +106,12 @@ export default function PositionsPage() {
             <span
               className={cn(
                 "text-[9px] font-semibold px-1 py-0.5 rounded",
-                r.wl_type === "swing" || posChannel(r) === "core" || posChannel(r) === "momentum"
+                r.wl_type === "swing" || posChannel(r) === "core" || posChannel(r) === "momentum" || posChannel(r) === "delivery"
                   ? "bg-indigo-500/15 text-indigo-400"
                   : "bg-cyan-500/15 text-cyan-400",
               )}
             >
-              {r.wl_type === "swing" || posChannel(r) === "core" || posChannel(r) === "momentum" ? "CNC" : "MIS"}
+              {r.wl_type === "swing" || posChannel(r) === "core" || posChannel(r) === "momentum" || posChannel(r) === "delivery" ? "CNC" : "MIS"}
             </span>
             {r.status === "PENDING_AMO_EXIT" && (
               <span className="text-[9px] font-semibold px-1 py-0.5 rounded bg-neutral/20 text-neutral">
@@ -248,6 +248,9 @@ export default function PositionsPage() {
           if (posChannel(r) === "momentum") {
             return <span className="text-[10px] text-text-secondary font-sans">HOLD · monthly</span>;
           }
+          if (posChannel(r) === "delivery") {
+            return <span className="text-[10px] text-text-secondary font-sans">HOLD · ~20d</span>;
+          }
           return <span>{r.target != null ? r.target.toFixed(2) : "—"}</span>;
         },
       },
@@ -255,7 +258,7 @@ export default function PositionsPage() {
         key: "rr",
         label: "R:R",
         render: (r) => {
-          if (posChannel(r) === "core" || posChannel(r) === "momentum") return <span className="text-text-secondary/40">—</span>;
+          if (posChannel(r) === "core" || posChannel(r) === "momentum" || posChannel(r) === "delivery") return <span className="text-text-secondary/40">—</span>;
           const ltp = ltpCache[r.symbol] ?? r.entry_price;
           if (r.target == null || r.sl_price == null) return <span>—</span>;
           const totalRange = Math.abs(r.target - r.sl_price);
