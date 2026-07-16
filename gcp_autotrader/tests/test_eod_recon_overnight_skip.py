@@ -1,11 +1,22 @@
-"""EOD position-reconcile must exempt overnight SL-only channels (2026-06-22 fix).
+"""EOD position-reconcile must exempt overnight SL-only channels (2026-06-22 fix;
+delivery added 2026-07-16).
 
 Background: `OrderService.reconcile_open_positions` (the /jobs/eod-position-reconcile
 path, 15:25/27/29 IST) used to skip ONLY `wl_type == "swing"`. That EOD-squared the
 CORE buy-and-hold book on 2026-06-22 (30 positions closed EOD_CLOSE at 15:25) — and
 would have squared PEAD/corp_action too. The fix broadens the exemption to mirror
-ws_monitor._OVERNIGHT_SL_ONLY_WL = {swing, pead, corp_action, core}. gap_fade is
-intentionally NOT exempt — it's an intraday MIS short covered at the EOD squareoff.
+ws_monitor._OVERNIGHT_SL_ONLY_WL = {swing, pead, corp_action, core, momentum, delivery}.
+gap_fade is intentionally NOT exempt — it's an intraday MIS short covered at the EOD
+squareoff (channel now retired/CAPITAL_GAPFADE=0, but the exemption logic is unchanged).
+
+2026-07-16 incident: the delivery channel's ws_monitor frozenset was updated when the
+channel shipped, but THIS separate exemption tuple was missed — the two lists are
+independent code paths (ws_monitor tick loop vs. this EOD-recon job) that must both be
+kept in sync manually. Result: all 4 first-day delivery positions were EOD-squared same-day
+(entered 14:30, closed 15:25 EOD_CLOSE) instead of holding ~20 days as designed. Fixed by
+adding "delivery" here; `test_exemption_set_matches_ws_monitor` below is the drift guard —
+but note it only catches drift AWAY from a hardcoded snapshot, not a channel that was never
+added to either list, so a new channel must still be added to BOTH lists by hand.
 
 These tests drive the REAL `reconcile_open_positions` with a fake OrderService (paper
 mode, LTP available) and assert which channels close vs persist.
@@ -81,9 +92,17 @@ def test_eod_recon_skips_core():
 def test_eod_recon_skips_all_overnight_channels():
     svc = _make_order_service([
         _pos("S", "swing"), _pos("P", "pead"), _pos("C", "corp_action"), _pos("CO", "core"),
+        _pos("M", "momentum"), _pos("D", "delivery"),
     ])
     OrderService.reconcile_open_positions(svc, force_close=True)
     assert _closed_tags(svc) == set()           # none of the overnight channels close at EOD
+
+
+def test_eod_recon_skips_delivery():
+    svc = _make_order_service([_pos("D1", "delivery")])
+    out = OrderService.reconcile_open_positions(svc, force_close=True)
+    assert _closed_tags(svc) == set()           # delivery is a 20-day CNC hold, not EOD-squared
+    assert out["closed"] == 0 and out["remaining"] == 1
 
 
 def test_eod_recon_closes_intraday_and_gap_fade():
@@ -102,6 +121,6 @@ def test_eod_recon_mixed_book():
 def test_exemption_set_matches_ws_monitor():
     """Drift guard: the EOD-recon exemption must stay in sync with ws_monitor's set."""
     src = inspect.getsource(os_mod)
-    assert 'in ("swing", "pead", "corp_action", "core", "momentum")' in src, (
+    assert 'in ("swing", "pead", "corp_action", "core", "momentum", "delivery")' in src, (
         "reconcile_open_positions overnight-skip set drifted from ws_monitor._OVERNIGHT_SL_ONLY_WL"
     )
