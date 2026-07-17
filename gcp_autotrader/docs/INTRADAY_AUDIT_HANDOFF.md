@@ -3,8 +3,37 @@
 > **Mission:** apply the SWING audit playbook to the INTRADAY channel (₹1L, ₹250
 > risk/trade). Replicate prod 100% e2e for backtesting, run the multi-year
 > baseline, review every (setup × regime) cell, fix or remove, fidelity-gate,
-> ship to PAPER. Started 2026-06-13; status: **data inventory done, everything
-> else pending.**
+> ship to PAPER. Started 2026-06-13.
+>
+> ## ⏸ RESUME POINT (2026-07-17) — BASELINE DONE; current setups = NO EDGE (paused, resume here)
+>
+> **Executed the pending baseline.** Pulled the COMPLETE-universe 5m (165.6M rows / all 2,638 syms)
+> via the BQ Storage Read API → `~/.autotrader_grind_cache/intraday_5m/` (50 hash shards, 16GB,
+> UTC→IST) → adapted to top-500-turnover `~/.autotrader_backtest_cache/intraday_audit/bars5_{2022..2026}.pkl`
+> → ran the certified harness `backtest_v2/intraday_baseline.py run 2022..2026` → `baseline_entries_{year}.json`
+> (44,240 entries) → `intraday_baseline.py report` + `scripts/redesign/intraday_account_grind.py` (slice grind).
+>
+> **VERDICT — current prod intraday setups have NO EDGE (decisive):**
+> - Realistic 3-slot portfolio **≈ −20%/yr, EVERY year 2022-2026** (K=3/day = −₹98k/5yr @₹1L; K=6 = −₹179k).
+> - **0 positive-gross pockets** across ~20 slices (every setup × session-window × direction); grossR
+>   −0.12…−0.42 everywhere. NOT a tuning gap — nothing to tune toward.
+> - Mechanism: **43% SL_HIT @ −1.33R vs 23% TARGET @ +1.14R** (entries not predictive) + **cost 84-96%
+>   of gross** — structural: tiny ₹250 positions; cost% is a RATIO, NOT fixable by capital
+>   (NET@₹2L/3L/5L ≈ NET@₹1L, positions cap out). Confirms why intraday was halted 2026-07-09.
+>
+> **OPEN FORK — decide on resume:** (a) **ACCEPT THE KILL** — intraday stays halted, correctly; or
+> (b) **from-scratch NEW-signal search** on the cached 5m (opening-range-breakout, momentum-ignition,
+> VWAP-reversion-with-tighter-filters, gap-fill…). Data's cached → free local grinding, BUT **low-odds**
+> given the structural cost ceiling + ~7 signal families already killed this session (5 swing-RANGE +
+> the whole intraday suite). Current recommendation: (a), unless funding a speculative hunt.
+>
+> **Cost spent this thread:** ~₹8 (₹5.7 first scan + ₹0 cache-hit re-pull + ~₹2 Storage read). Read-only
+> grind — ZERO prod change; prod stable (`autotrader-00295-6ng` / `dashboard-00074-qfv` / `ws-00046-npl`).
+> **Scripts:** `scripts/redesign/intraday_pull_5m_fast.py` (Storage-API pull), `intraday_shards_to_bars5.py`
+> (adapter), `intraday_account_grind.py` (slice grind); harness `backtest_v2/intraday_baseline.py` (certified).
+> Note: `bigquery-storage` + `pyarrow` were installed in the grind `.venv` for the fast pull.
+>
+> _Original 2026-06-13 status ("data inventory done, rest pending") — superseded; baseline now complete._
 
 ## Why this audit
 
