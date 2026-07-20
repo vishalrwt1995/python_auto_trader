@@ -47,6 +47,7 @@ class StrategySettings:
     capital_core: float = 0.0          # CORE momentum-hold channel (Phase C, added 2026-06-21)
     capital_momentum: float = 0.0      # Momentum x Low-Vol channel (monthly rebalance, added 2026-07-10)
     capital_delivery: float = 0.0      # Delivery-accumulation channel (daily CNC mid-caps, added 2026-07-14)
+    capital_insider: float = 0.0       # Insider cluster-buy channel (daily CNC, added 2026-07-20)
     # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
     # of channel capital. Used by the per-channel daily-limit gate in
     # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
@@ -254,6 +255,20 @@ class StrategySettings:
     delivery_turnover_min_cr: float = 25.0      # 20d-mean turnover band low (crore)
     delivery_turnover_max_cr: float = 50.0      # 20d-mean turnover band high (crore)
 
+    # Insider cluster-buy channel (2026-07-20, GOD-MODE validated: +23% CAGR / -12.5% DD /
+    # Calmar 1.84, IS 2.85 / OOS 1.75). Signal: >=2 informed open-market buys (promoter/director/
+    # KMP/relative), each >=Rs5L, same symbol+day; DOUBLE MACRO GATE b200>50 AND Nifty>100DMA;
+    # fixed 90d hold (NO trail). Set CAPITAL_INSIDER>0 to enable. PAPER, STOCK-ONLY.
+    insider_risk_per_trade: float = 0.0         # Rs/trade (INSIDER_RISK_PER_TRADE; 1.5% of cap)
+    insider_max_positions: int = 10             # cluster-strength-ranked 10-slot book
+    insider_max_hold_days: int = 90             # FIXED hold horizon (validated plateau 60-90)
+    insider_atr_sl_mult: float = 2.5            # protective disaster stop = ATR14 × this (no trail)
+    insider_notional_cap_pct: float = 0.10      # per-position notional cap (× capital_insider; =1/slots)
+    insider_min_buyers: int = 2                 # cluster threshold (>=2 informed buy legs/day)
+    insider_min_leg_value: float = 500000.0     # each disclosure leg >= Rs 5 lakh
+    insider_turnover_min_cr: float = 10.0       # 20d-mean turnover floor (crore; no upper cap)
+    insider_b200_min: float = 50.0              # breadth macro-gate floor (brain breadth_ema200_pct)
+
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
 
@@ -281,6 +296,8 @@ class StrategySettings:
             return self.capital_momentum
         if ch == "delivery" and self.capital_delivery > 0:
             return self.capital_delivery
+        if ch == "insider" and self.capital_insider > 0:
+            return self.capital_insider
         return self.capital
 
 
@@ -455,6 +472,7 @@ class AppSettings:
             capital_core=_env_float("CAPITAL_CORE", 0.0),
             capital_momentum=_env_float("CAPITAL_MOMENTUM", 0.0),
             capital_delivery=_env_float("CAPITAL_DELIVERY", 0.0),
+            capital_insider=_env_float("CAPITAL_INSIDER", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
@@ -533,6 +551,16 @@ class AppSettings:
             delivery_deliv_min=_env_float("DELIVERY_DELIV_MIN", 75.0),
             delivery_turnover_min_cr=_env_float("DELIVERY_TURNOVER_MIN_CR", 25.0),
             delivery_turnover_max_cr=_env_float("DELIVERY_TURNOVER_MAX_CR", 50.0),
+            # Insider cluster-buy channel (2026-07-20)
+            insider_risk_per_trade=_env_float("INSIDER_RISK_PER_TRADE", 0.0),
+            insider_max_positions=_env_int("INSIDER_MAX_POSITIONS", 10),
+            insider_max_hold_days=_env_int("INSIDER_MAX_HOLD_DAYS", 90),
+            insider_atr_sl_mult=_env_float("INSIDER_ATR_SL_MULT", 2.5),
+            insider_notional_cap_pct=_env_float("INSIDER_NOTIONAL_CAP_PCT", 0.10),
+            insider_min_buyers=_env_int("INSIDER_MIN_BUYERS", 2),
+            insider_min_leg_value=_env_float("INSIDER_MIN_LEG_VALUE", 500000.0),
+            insider_turnover_min_cr=_env_float("INSIDER_TURNOVER_MIN_CR", 10.0),
+            insider_b200_min=_env_float("INSIDER_B200_MIN", 50.0),
         )
         return AppSettings(
             gcp=GcpSettings(

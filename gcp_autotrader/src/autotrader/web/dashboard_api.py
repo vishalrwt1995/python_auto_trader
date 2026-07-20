@@ -406,7 +406,7 @@ def get_pead_summary(
 # (they share the EVENT pool), so they fold into the pead card. These GETs are
 # read-only + additive — no trading-path, schema, or env change.
 
-_CHANNELS: tuple[str, ...] = ("swing", "intraday", "pead", "gap_fade", "core", "momentum", "delivery")
+_CHANNELS: tuple[str, ...] = ("swing", "intraday", "pead", "gap_fade", "core", "momentum", "delivery", "insider")
 
 
 def _position_channel(p: dict[str, Any]) -> str:
@@ -501,7 +501,8 @@ def get_channels_overview(
         risk_by = {}
     max_pos = {"swing": s.swing_max_positions, "intraday": s.max_positions,
                "pead": s.pead_max_positions, "gap_fade": s.gapfade_max_positions,
-               "core": None, "delivery": s.delivery_max_positions}
+               "core": None, "delivery": s.delivery_max_positions,
+               "insider": s.insider_max_positions}
     out = build_channel_overview(
         _CHANNELS, positions, pnl_by, risk_by,
         capital_of=s.channel_capital,

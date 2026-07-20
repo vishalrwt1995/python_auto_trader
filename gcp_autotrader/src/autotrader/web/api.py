@@ -1968,6 +1968,92 @@ def run_delivery_scan(
         raise
 
 
+@app.post("/jobs/insider-ingest")
+def run_insider_ingest(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Insider channel daily data feed (PAPER): fetch the recent NSE SEBI-PIT disclosure window →
+    upsert to BQ nse_insider_daily. Runs after close. Job: autotrader-insider-ingest-1930.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("InsiderIngestService", "insider_ingest", "START", "", sched_ctx)
+        out = c.run_insider_ingest()
+        sink.action("InsiderIngestService", "insider_ingest", "DONE", "insider ingest complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("InsiderIngestService", "insider_ingest", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
+@app.post("/jobs/insider-reconcile")
+def run_insider_reconcile(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Insider channel daily exit reconciliation (PAPER): FIXED 90-day max-hold exit + daily
+    SL-breach backstop (NO trail). Runs premarket BEFORE the scan. Job: autotrader-insider-recon-0905.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("InsiderReconciliationService", "insider_reconcile", "START", "", sched_ctx)
+        result = c.insider_reconciliation_service().run()
+        out = result.to_dict()
+        sink.action("InsiderReconciliationService", "insider_reconcile", "DONE", "insider reconcile complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("InsiderReconciliationService", "insider_reconcile", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
+@app.post("/jobs/insider-scan")
+def run_insider_scan(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Insider channel daily entry scan (PAPER): double macro gate (b200>50 AND Nifty>100DMA) →
+    cluster BQ nse_insider_daily (>=2 informed open-market buys) → fresh dailies → turnover>=10cr
+    gate → cluster-ranked 10-slot book → CNC entries. Premarket (~09:10 IST). Job: autotrader-insider-scan-0910.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("InsiderTradingService", "insider_scan", "START", "", sched_ctx)
+        out = c.run_insider_scan()
+        sink.action("InsiderTradingService", "insider_scan", "DONE", "insider scan complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("InsiderTradingService", "insider_scan", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.post("/jobs/corp-scan")
 def run_corp_action_scan(
     x_job_token: str | None = Header(default=None),
