@@ -19,6 +19,7 @@ from autotrader.services.order_service import OrderService
 from autotrader.services.regime_service import MarketRegimeService
 from autotrader.services.pead_reconciliation_service import PeadReconciliationService
 from autotrader.services.delivery_reconciliation_service import DeliveryReconciliationService
+from autotrader.services.insider_reconciliation_service import InsiderReconciliationService
 from autotrader.services.corp_action_reconciliation_service import CorpActionReconciliationService
 from autotrader.services.swing_reconciliation_service import SwingReconciliationService
 from autotrader.services.trading_service import TradingService
@@ -102,6 +103,7 @@ class AppContainer:
         self._swing_reconciliation_service: SwingReconciliationService | None = None
         self._pead_reconciliation_service: PeadReconciliationService | None = None
         self._delivery_reconciliation_service: DeliveryReconciliationService | None = None
+        self._insider_reconciliation_service: InsiderReconciliationService | None = None
         self._corp_action_reconciliation_service: CorpActionReconciliationService | None = None
 
     def log_sink(self) -> LogSink:
@@ -219,6 +221,36 @@ class AppContainer:
         nse_delivery_daily (the delivery channel's daily data feed). Fail-closed."""
         from autotrader.services.delivery_ingest_service import DeliveryIngestService
         return DeliveryIngestService(bq=self.bq).run(asof=asof)
+
+    def insider_reconciliation_service(self) -> InsiderReconciliationService:
+        if self._insider_reconciliation_service is None:
+            self._insider_reconciliation_service = InsiderReconciliationService(
+                settings=self.settings,
+                state=self.state,
+                upstox=self.upstox,
+                order_service=self.order_service(),
+            )
+        return self._insider_reconciliation_service
+
+    def run_insider_scan(self, reaction_date: str | None = None) -> dict:
+        """Run the daily insider cluster-buy entry scan (PAPER). Applies the double macro gate
+        (b200>50 AND Nifty>100DMA), clusters BQ nse_insider_daily disclosures, fetches dailies,
+        places CNC entries. No-op unless CAPITAL_INSIDER>0."""
+        from autotrader.services import insider_trading_service
+        return insider_trading_service.run_insider_scan_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            reaction_date=reaction_date,
+        )
+
+    def run_insider_ingest(self, asof: str | None = None) -> dict:
+        """Fetch the recent NSE SEBI-PIT disclosure window → upsert to BQ nse_insider_daily
+        (the insider channel's daily data feed). Fail-closed."""
+        from autotrader.services.insider_ingest_service import InsiderIngestService
+        return InsiderIngestService(bq=self.bq).run(asof=asof)
 
     def corp_action_reconciliation_service(self) -> CorpActionReconciliationService:
         if self._corp_action_reconciliation_service is None:

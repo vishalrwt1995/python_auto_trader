@@ -92,7 +92,7 @@ def test_eod_recon_skips_core():
 def test_eod_recon_skips_all_overnight_channels():
     svc = _make_order_service([
         _pos("S", "swing"), _pos("P", "pead"), _pos("C", "corp_action"), _pos("CO", "core"),
-        _pos("M", "momentum"), _pos("D", "delivery"),
+        _pos("M", "momentum"), _pos("D", "delivery"), _pos("IN", "insider"),
     ])
     OrderService.reconcile_open_positions(svc, force_close=True)
     assert _closed_tags(svc) == set()           # none of the overnight channels close at EOD
@@ -102,6 +102,13 @@ def test_eod_recon_skips_delivery():
     svc = _make_order_service([_pos("D1", "delivery")])
     out = OrderService.reconcile_open_positions(svc, force_close=True)
     assert _closed_tags(svc) == set()           # delivery is a 20-day CNC hold, not EOD-squared
+    assert out["closed"] == 0 and out["remaining"] == 1
+
+
+def test_eod_recon_skips_insider():
+    svc = _make_order_service([_pos("IN1", "insider")])
+    out = OrderService.reconcile_open_positions(svc, force_close=True)
+    assert _closed_tags(svc) == set()           # insider is a 90-day CNC hold, not EOD-squared
     assert out["closed"] == 0 and out["remaining"] == 1
 
 
@@ -121,6 +128,6 @@ def test_eod_recon_mixed_book():
 def test_exemption_set_matches_ws_monitor():
     """Drift guard: the EOD-recon exemption must stay in sync with ws_monitor's set."""
     src = inspect.getsource(os_mod)
-    assert 'in ("swing", "pead", "corp_action", "core", "momentum", "delivery")' in src, (
+    assert 'in ("swing", "pead", "corp_action", "core", "momentum", "delivery", "insider")' in src, (
         "reconcile_open_positions overnight-skip set drifted from ws_monitor._OVERNIGHT_SL_ONLY_WL"
     )
