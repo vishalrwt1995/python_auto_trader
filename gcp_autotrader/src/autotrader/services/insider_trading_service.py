@@ -236,18 +236,18 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
     if not reaction_target:
         return {"skipped": "no_insider_data", "asof": asof, "macro": macro_ctx}
 
+    # Pass 1 (pre-price): informed open-market buy legs -> candidate symbols with >=2 legs.
     raw_rows = insider_signal_service.fetch_disclosure_rows(bq, reaction_target)
-    clusters = insider_signals.aggregate_clusters(
-        raw_rows, min_buyers=cfg.insider_min_buyers, min_leg_value=cfg.insider_min_leg_value)
-    if not clusters:
+    legs = insider_signals.aggregate_legs(raw_rows, min_buyers=cfg.insider_min_buyers)
+    if not legs:
         return {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
                 "clusters": 0, "candidates": 0, "entered": 0}
 
-    # resolve instrument keys + fresh dailies for the clustered names
-    key_map = _resolve_instrument_keys(sorted(clusters.keys()), bq)
+    # resolve instrument keys + fresh dailies for the candidate names
+    key_map = _resolve_instrument_keys(sorted(legs.keys()), bq)
     candles: dict[str, list[list]] = {}
     ik_for: dict[str, str] = {}
-    for sym in sorted(clusters.keys()):
+    for sym in sorted(legs.keys()):
         ik = key_map.get(sym)
         if not ik:
             continue
@@ -255,6 +255,21 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
         if len(bars) >= insider_signals.MIN_BARS:
             candles[sym] = bars
             ik_for[sym] = ik
+
+    # Pass 2 (post-price): value each leg = shares × reaction-close, re-apply the >=Rs5L per-leg
+    # gate + re-count >=2 (the filer sec_val is unreliable -> never trusted). See domain docstring.
+    from bisect import bisect_left as _bl
+    price_map: dict[str, float] = {}
+    for sym, bars in candles.items():
+        dts = [b[0] for b in bars]
+        ri = _bl(dts, reaction_target)
+        if ri < len(bars) and dts[ri] == reaction_target:
+            price_map[sym] = float(bars[ri][4])
+    clusters = insider_signals.finalize_clusters(
+        legs, price_map, min_buyers=cfg.insider_min_buyers, min_leg_value=cfg.insider_min_leg_value)
+    if not clusters:
+        return {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
+                "clusters": 0, "candidates": 0, "entered": 0}
 
     candidates = insider_signal_service.scan(
         reaction_target, clusters, candles,

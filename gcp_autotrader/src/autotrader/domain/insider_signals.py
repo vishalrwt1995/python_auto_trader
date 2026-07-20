@@ -77,14 +77,18 @@ def _fnum(x: Any) -> float | None:
         return None
 
 
-def qualifies_leg(row: dict[str, Any], min_leg_value: float = MIN_LEG_VALUE) -> bool:
-    """True if one raw PIT disclosure row is a qualifying informed open-market buy >= min value."""
+def qualifies_leg(row: dict[str, Any]) -> bool:
+    """True if one raw PIT disclosure leg is an informed OPEN-MARKET BUY with shares > 0.
+
+    The per-leg VALUE gate (>= Rs 5L) is NOT applied here — the NSE feed's filer-entered value
+    is unreliable (the ``corporates-pit-gg`` XBRL showed Rs 1 for a 10M-share buy), so value is
+    computed as shares × reaction-close in ``finalize_clusters`` once a price is available.
+    """
     if not is_informed(row.get("person_category")):
         return False
     if not is_open_market_buy(row.get("transaction_type"), row.get("acq_mode")):
         return False
-    val = _fnum(row.get("sec_val")) or _fnum(row.get("buy_value")) or 0.0
-    return val >= min_leg_value
+    return (_fnum(row.get("shares")) or 0.0) > 0.0
 
 
 def _best_category(cats: set[str]) -> str:
@@ -96,38 +100,58 @@ def _best_category(cats: set[str]) -> str:
     return "kmp/rel"
 
 
-def aggregate_clusters(
+def aggregate_legs(
     rows: Sequence[dict[str, Any]],
     min_buyers: int = MIN_BUYERS,
-    min_leg_value: float = MIN_LEG_VALUE,
-) -> dict[str, dict[str, Any]]:
-    """PURE: aggregate one day's raw PIT disclosure rows into per-symbol CLUSTERS.
+) -> dict[str, list[dict[str, Any]]]:
+    """PURE pass 1 (pre-price): group qualifying informed open-market buy legs by symbol.
 
-    Keeps only qualifying informed open-market buy legs (``qualifies_leg``), groups by symbol,
-    counts qualifying legs (``n_buyers`` — matches the validated backtest which counted legs,
-    not distinct names, so live cannot drift), sums leg value, keeps the max holding-% delta,
-    and returns only symbols with ``n_buyers >= min_buyers`` (the cluster gate).
-
-    Returns ``{symbol: {n_buyers, total_val, dpct, category}}``.
+    Returns ``{symbol: [leg, ...]}`` for symbols with ``>= min_buyers`` legs (leg =
+    ``{shares, category, dpct}``). NO value gate yet — that needs a price (``finalize_clusters``).
+    Counts legs (not distinct names), matching the validated backtest so live cannot drift.
     """
-    agg: dict[str, dict[str, Any]] = {}
+    by: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        if not qualifies_leg(r, min_leg_value):
+        if not qualifies_leg(r):
             continue
         sym = str(r.get("symbol") or "").strip().upper()
         if not sym or is_etf(sym):
             continue
-        a = agg.setdefault(sym, {"n_buyers": 0, "total_val": 0.0, "dpct": 0.0, "cats": set()})
-        a["n_buyers"] += 1
-        a["total_val"] += (_fnum(r.get("sec_val")) or _fnum(r.get("buy_value")) or 0.0)
-        db = (_fnum(r.get("after_pct")) or 0.0) - (_fnum(r.get("bef_pct")) or 0.0)
-        a["dpct"] = max(a["dpct"], db)
-        a["cats"].add(str(r.get("person_category") or ""))
+        by.setdefault(sym, []).append({
+            "shares": _fnum(r.get("shares")) or 0.0,
+            "category": str(r.get("person_category") or ""),
+            "dpct": (_fnum(r.get("after_pct")) or 0.0) - (_fnum(r.get("bef_pct")) or 0.0),
+        })
+    return {s: legs for s, legs in by.items() if len(legs) >= min_buyers}
+
+
+def finalize_clusters(
+    legs_by_symbol: dict[str, list[dict[str, Any]]],
+    price_by_symbol: dict[str, float],
+    min_buyers: int = MIN_BUYERS,
+    min_leg_value: float = MIN_LEG_VALUE,
+) -> dict[str, dict[str, Any]]:
+    """PURE pass 2 (post-price): apply the per-leg value gate as value = shares × reaction-close,
+    then keep symbols still holding ``>= min_buyers`` qualifying legs (the cluster gate).
+
+    This preserves the validated backtest semantics (old ``secVal`` ~= shares × transaction price)
+    while ignoring the unreliable filer value. Returns ``{symbol: {n_buyers, total_val, dpct,
+    category}}`` — the exact shape ``insider_signal_service.build_candidates`` consumes.
+    """
     out: dict[str, dict[str, Any]] = {}
-    for sym, a in agg.items():
-        if a["n_buyers"] >= min_buyers:
-            out[sym] = {"n_buyers": a["n_buyers"], "total_val": round(a["total_val"], 2),
-                        "dpct": round(a["dpct"], 4), "category": _best_category(a["cats"])}
+    for sym, legs in legs_by_symbol.items():
+        px = price_by_symbol.get(sym)
+        if not px or px <= 0:
+            continue
+        kept = [lg for lg in legs if lg["shares"] * px >= min_leg_value]
+        if len(kept) < min_buyers:
+            continue
+        out[sym] = {
+            "n_buyers": len(kept),
+            "total_val": round(sum(lg["shares"] * px for lg in kept), 2),
+            "dpct": round(max(lg["dpct"] for lg in kept), 4),
+            "category": _best_category({lg["category"] for lg in kept}),
+        }
     return out
 
 

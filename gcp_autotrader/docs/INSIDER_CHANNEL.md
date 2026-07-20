@@ -72,15 +72,51 @@ Nifty>100DMA = **reuses** `momentum_signal_service.fetch_nifty_regime`.
 **Tests:** `test_insider_{signals,trading,reconcile,ingest}.py` (51 tests) + sync-guard tests
 updated. **Full suite: 1065 passed / 5 skipped, no regressions.**
 
-## 4. Data feed
+## 4. Data feed  ⚠️ ENDPOINT CHANGED — live ingest needs an XBRL rewrite (2026-07-20 finding)
 
-- **Backfill (one-time):** the cached pull `~/.autotrader_backtest_cache/insider_pit/*.json`
-  (341,175 rows, 2015-11 → 2026-05) loads into BQ `nse_insider_daily`.
-- **Daily (prod):** `insider-ingest` (evening) refetches a rolling 7-day corporates-pit window
-  (absorbs SEBI's ≤2-day disclosure lag + late filings), idempotent upsert.
-- **Known caveat:** the corporates-pit API returned 0 rows for the *very recent* Jun–Jul 2026
-  window during recon (2025 + through-May-2026 pulled clean). Must be re-checked at deploy so the
-  live daily feed is confirmed non-empty before funding.
+**Backfill (one-time, DONE):** cached pull `~/.autotrader_backtest_cache/insider_pit/*.json`
+(341,175 rows, 2015-11 → 2026-05) → BQ `nse_insider_daily`. The *edge* is validated on this;
+unaffected by the endpoint change below.
+
+**The blocker we found + resolved (diagnosis):**
+- The old rich-JSON endpoint `/api/corporates-pit?index=equities` (used by the backtest pull AND
+  the current `insider_ingest_service.py`) went **dead after ~02-May-2026** (2057 Mar → 392 Apr →
+  3 May → 0). NSE deprecated it.
+- The data is NOT gone: NSE **renamed/restructured** it. The current live endpoint is
+  **`/api/corporates-pit-gg?index=equities`** (verified server-side with our handshake: returns
+  ~1,437 current records incl. 20-Jul-2026). BUT it is now a **filing INDEX only** — fields:
+  `appId, broadcastDateTime, companyName, symbol, regulation, typeOfSubmission, xmlFileName, ixbrl`.
+  The **transaction detail (acquirer, category, buy/sell, mode, shares, holding%) is gone from the
+  JSON** — it now lives in the per-filing **XBRL** doc linked by `xmlFileName` (BSE `in-bse-co`
+  taxonomy). Confirmed the XBRL contains: `CategoryOfPerson`, `NameOfThePerson`,
+  `SecuritiesAcquiredOrDisposedTransactionType` (Buy/Sell), `ModeOfAcquisitionOrDisposal`,
+  `SecuritiesAcquiredOrDisposedNumberOfSecurity` (shares), `...ValueOfSecurity` (filer-entered,
+  UNRELIABLE — SHAH showed ₹1 for 10M shares), `...PercentageOfShareholding` before/after, dates.
+
+**Required live ingest (REBUILD `insider_ingest_service.py`):**
+  1. fetch `corporates-pit-gg` index (rolling recent window) → new filings since last run
+  2. for each filing: GET `xmlFileName` XBRL (tolerate transient 404 on just-filed docs; try `ixbrl`
+     fallback), parse `in-bse-co:*` tags, handle **multi-transaction filings** (`Disclosure1/2/...`)
+  3. **recompute value = shares × reaction-day close** (don't trust the filer value field), then
+     emit rows matching the `nse_insider_daily` schema → aggregate as before
+  4. parity note: the backtest's `sec_val` came from old-corporates-pit; live value will be
+     shares×price — re-confirm the ≥₹5L gate behaves equivalently before funding.
+
+**Status (2026-07-20): REBUILT + E2E-VERIFIED LIVE + PARITY-CONFIRMED.** `insider_ingest_service`
+now does index(corporates-pit-gg) → per-filing XBRL fetch (404-tolerant, ixbrl fallback) →
+`parse_insider_xbrl` (one row/Disclosure leg) → BQ; the signal is two-pass (`aggregate_legs`
+pre-price → `finalize_clusters` with value = shares × reaction-close). 47 insider unit tests +
+1061-test suite green.
+- **E2E live proof** (`scripts/redesign/insider_live_smoke.py`, real 2026-07-08→20 data): 42
+  filings → 107 legs parsed (0 XBRL missing), modes correctly classified, **1 live cluster found
+  (TURTLEMINT, 6 legs)** → finalize → ₹17.5M cluster. Full chain functional on current data.
+- **Parity** (`scripts/redesign/insider_parity_check.py`): locked config with value=shares×close →
+  **+20.8% CAGR / −10.1% DD / Calmar 2.05 (IS 2.22 / OOS 1.99)** — matches/beats the original
+  (+23% / Calmar 1.84); the ≥₹5L gate is equivalent. Live numbers to expect: ~+21% / Calmar ~2.0.
+
+Remaining before funding = the GATED deploy steps in §5 (BQ table now needs the `shares` column;
+skip the historical backfill's stale-schema concern — backfill from the cached corporates-pit rows
+still has secVal/secAcq, load secAcq→shares).
 
 ## 5. DEPLOY PLAN — GATED (needs explicit cost + deploy confirmation, per the GCP-cost rule)
 

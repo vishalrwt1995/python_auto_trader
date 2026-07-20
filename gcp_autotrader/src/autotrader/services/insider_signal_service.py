@@ -105,7 +105,7 @@ def fetch_disclosure_rows(bq, reaction_date: str) -> list[dict[str, Any]]:
     """Read one dissemination day's raw PIT rows from BQ ``nse_insider_daily`` (for
     ``domain.aggregate_clusters``). Fail-closed: ``[]`` on any error."""
     try:
-        q = (f"SELECT symbol, person_category, transaction_type, acq_mode, sec_val, "
+        q = (f"SELECT symbol, person_category, transaction_type, acq_mode, shares, sec_val, "
              f"bef_pct, after_pct FROM `grow-profit-machine.autotrader.nse_insider_daily` "
              f"WHERE date = '{reaction_date}'")
         rows = [dict(r) for r in bq.query(q)]
