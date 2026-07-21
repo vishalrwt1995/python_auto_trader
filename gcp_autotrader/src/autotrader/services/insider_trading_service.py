@@ -263,16 +263,21 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
 
     reaction_target = reaction_date or insider_signal_service.latest_reaction_date(bq)
     if not reaction_target:
+        summary = {"asof": asof, "reaction_date": "", "macro_gate_ok": macro_ok, "macro": macro_ctx,
+                   "clusters": 0, "candidates": 0, "entered": 0, "skipped": "no_insider_data"}
         _persist_insider_status(state, asof, "", macro_ok, macro_ctx, 0)
-        return {"skipped": "no_insider_data", "asof": asof, "macro_gate_ok": macro_ok, "macro": macro_ctx}
+        logger.info("insider_scan_summary %s", summary)
+        return summary
 
     # Pass 1 (pre-price): informed open-market buy legs -> candidate symbols with >=2 legs.
     raw_rows = insider_signal_service.fetch_disclosure_rows(bq, reaction_target)
     legs = insider_signals.aggregate_legs(raw_rows, min_buyers=cfg.insider_min_buyers)
     if not legs:
+        summary = {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
+                   "macro": macro_ctx, "clusters": 0, "candidates": 0, "entered": 0}
         _persist_insider_status(state, asof, reaction_target, macro_ok, macro_ctx, 0)
-        return {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
-                "macro": macro_ctx, "clusters": 0, "candidates": 0, "entered": 0}
+        logger.info("insider_scan_summary %s", summary)
+        return summary
 
     # resolve instrument keys + fresh dailies for the candidate names
     key_map = _resolve_instrument_keys(sorted(legs.keys()), bq)
@@ -299,9 +304,11 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
     clusters = insider_signals.finalize_clusters(
         legs, price_map, min_buyers=cfg.insider_min_buyers, min_leg_value=cfg.insider_min_leg_value)
     if not clusters:
+        summary = {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
+                   "macro": macro_ctx, "clusters": 0, "candidates": 0, "entered": 0}
         _persist_insider_status(state, asof, reaction_target, macro_ok, macro_ctx, 0)
-        return {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
-                "macro": macro_ctx, "clusters": 0, "candidates": 0, "entered": 0}
+        logger.info("insider_scan_summary %s", summary)
+        return summary
 
     candidates = insider_signal_service.scan(
         reaction_target, clusters, candles,
