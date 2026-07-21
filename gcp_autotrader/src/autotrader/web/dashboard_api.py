@@ -352,6 +352,31 @@ def get_pead_watchlist(
         return {"asof": "", "rows": [], "candidates": 0, "entered": 0, "error": str(exc)}
 
 
+@router.get("/insider/watchlist")
+def get_insider_watchlist(
+    date: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """INSIDER daily gate + candidate-cluster watchlist — the double macro-gate state
+    (macro_gate_ok + b200 + nifty>100DMA) and cluster rows (symbol, n_buyers, category, status),
+    written by the insider-scan job on EVERY run incl. gated-off days. `date` defaults to latest.
+    Read-only; mirrors /pead/watchlist."""
+    c = get_container()
+    try:
+        key = _safe_date(date, "latest") if date else "latest"
+        doc = c.state.get_json("insider_watchlist", key)
+        if not doc:
+            return {"asof": "", "rows": [], "clusters": 0, "candidates": 0,
+                    "macro_gate_ok": None, "macro": {}}
+        v = doc.get("updated_at")
+        if v is not None and hasattr(v, "isoformat"):
+            doc["updated_at"] = v.isoformat()
+        return doc
+    except Exception as exc:
+        logger.error("insider/watchlist query failed: %s", exc)
+        return {"asof": "", "rows": [], "clusters": 0, "candidates": 0, "error": str(exc)}
+
+
 @router.get("/pead/summary")
 def get_pead_summary(
     user: dict[str, Any] = Depends(verify_firebase_token),

@@ -135,6 +135,19 @@ function DetailPanel({ channel }: { channel: Channel }) {
         })),
         d.count ? `${d.count} open · cover ${d.squareoff_ist} IST` : "no open shorts today",
       )).catch(fail);
+    } else if (channel === "insider") {
+      api.getInsiderWatchlist().then((d) => ok(
+        (d.rows || []).map((r) => ({
+          Symbol: r.symbol, Buyers: r.n_buyers ?? "", Category: r.category ?? "",
+          "Val(cr)": r.total_val_cr != null ? r.total_val_cr.toFixed(2) : "—",
+          "Turnover(cr)": r.turnover_cr != null ? r.turnover_cr.toFixed(1) : "—",
+          Status: r.status ?? "",
+        })),
+        (d.macro_gate_ok
+          ? `GATE OPEN · b200 ${d.macro?.b200 ?? "?"} · Nifty > 100DMA`
+          : `GATE OFF · b200 ${d.macro?.b200 ?? "?"} · Nifty ${d.macro?.nifty_above_100dma ? ">" : "<"} 100DMA`)
+          + ` · ${d.clusters ?? 0} cluster${(d.clusters ?? 0) === 1 ? "" : "s"} today`,
+      )).catch(fail);
     } else {
       api.getPositionsByChannel().then((d) => {
         const list = (d.channels?.[channel] as Record<string, unknown>[]) || [];

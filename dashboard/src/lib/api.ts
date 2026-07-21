@@ -95,6 +95,15 @@ export const api = {
 
   getGapFadeShorts: () => api.get<import("./types").GapFadeShorts>("/dashboard/gap-fade/shorts"),
 
+  getInsiderWatchlist: () =>
+    api.get<{
+      asof?: string; reaction_date?: string; macro_gate_ok?: boolean | null;
+      macro?: { b200?: number | null; b200_ok?: boolean; nifty_above_100dma?: boolean };
+      clusters?: number; candidates?: number; entered?: number;
+      rows?: Array<{ symbol: string; n_buyers?: number; total_val_cr?: number; category?: string;
+                     turnover_cr?: number; reaction_close?: number; status?: string }>;
+    }>("/dashboard/insider/watchlist"),
+
   getUniverseStats: () => api.get<Record<string, unknown>>("/dashboard/universe/stats"),
 
   getUniverseList: (params?: Record<string, string>) => {

@@ -216,6 +216,30 @@ def _persist_insider_watchlist(state, asof, channel_capital, realized_today, can
         logger.warning("insider_watchlist_persist_failed asof=%s — non-critical", asof, exc_info=True)
 
 
+def _persist_insider_status(state, asof, reaction_date, macro_ok, macro_ctx, clusters,
+                            candidates=None):
+    """Persist a compact insider gate/status doc to Firestore ``insider_watchlist/latest`` on
+    EVERY scan — including gated-off / 0-cluster days — so the dashboard drill-down always shows
+    the current macro-gate state (why it is/isn't trading). Best-effort, read-only downstream."""
+    try:
+        rows = [{
+            "symbol": c["symbol"], "n_buyers": int(c.get("n_buyers", 0)),
+            "total_val_cr": round(float(c.get("total_val") or 0.0) / 1e7, 3),
+            "category": c.get("category", ""),
+            "turnover_cr": round(float(c.get("turnover_cr") or 0.0), 2),
+            "reaction_close": round(float(c.get("reaction_close") or 0.0), 2),
+            "reaction_date": c.get("reaction_date", reaction_date),
+            "status": "MACRO_GATE_OFF" if not macro_ok else "NOT_SELECTED",
+        } for c in (candidates or [])]
+        payload = {"asof": asof, "reaction_date": reaction_date, "channel": "insider",
+                   "macro_gate_ok": bool(macro_ok), "macro": macro_ctx or {},
+                   "clusters": int(clusters), "candidates": len(rows), "entered": 0, "rows": rows}
+        state.set_json("insider_watchlist", reaction_date or asof or "latest", payload, merge=False)
+        state.set_json("insider_watchlist", "latest", payload, merge=False)
+    except Exception:
+        logger.warning("insider_status_persist_failed asof=%s — non-critical", asof, exc_info=True)
+
+
 def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
                           reaction_date: str | None = None) -> dict[str, Any]:
     """Live INSIDER daily scan + entry (PAPER). Fail-closed at every step. Reuses the existing
@@ -234,14 +258,16 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
 
     reaction_target = reaction_date or insider_signal_service.latest_reaction_date(bq)
     if not reaction_target:
-        return {"skipped": "no_insider_data", "asof": asof, "macro": macro_ctx}
+        _persist_insider_status(state, asof, "", macro_ok, macro_ctx, 0)
+        return {"skipped": "no_insider_data", "asof": asof, "macro_gate_ok": macro_ok, "macro": macro_ctx}
 
     # Pass 1 (pre-price): informed open-market buy legs -> candidate symbols with >=2 legs.
     raw_rows = insider_signal_service.fetch_disclosure_rows(bq, reaction_target)
     legs = insider_signals.aggregate_legs(raw_rows, min_buyers=cfg.insider_min_buyers)
     if not legs:
+        _persist_insider_status(state, asof, reaction_target, macro_ok, macro_ctx, 0)
         return {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
-                "clusters": 0, "candidates": 0, "entered": 0}
+                "macro": macro_ctx, "clusters": 0, "candidates": 0, "entered": 0}
 
     # resolve instrument keys + fresh dailies for the candidate names
     key_map = _resolve_instrument_keys(sorted(legs.keys()), bq)
@@ -268,8 +294,9 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
     clusters = insider_signals.finalize_clusters(
         legs, price_map, min_buyers=cfg.insider_min_buyers, min_leg_value=cfg.insider_min_leg_value)
     if not clusters:
+        _persist_insider_status(state, asof, reaction_target, macro_ok, macro_ctx, 0)
         return {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
-                "clusters": 0, "candidates": 0, "entered": 0}
+                "macro": macro_ctx, "clusters": 0, "candidates": 0, "entered": 0}
 
     candidates = insider_signal_service.scan(
         reaction_target, clusters, candles,
