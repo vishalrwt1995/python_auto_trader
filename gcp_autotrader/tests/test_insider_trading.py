@@ -117,3 +117,20 @@ def test_status_breaker_halt():
 
 def test_status_not_selected():
     assert _candidate_status("E", set(), set(), set(), False, macro_ok=True) == "NOT_SELECTED"
+
+
+# ── _read_b200 (breadth read from the nested brain Firestore doc) ───────────────
+def test_read_b200_nested_and_fallback():
+    from autotrader.services.insider_trading_service import _read_b200
+
+    class _State:
+        def __init__(self, doc): self._doc = doc
+        def get_market_brain(self): return self._doc
+
+    # real brain doc shape: context.breadthSnapshot.aboveEma200Pct
+    assert _read_b200(_State({"context": {"breadthSnapshot": {"aboveEma200Pct": 63.03}}})) == 63.03
+    # flat fallback
+    assert _read_b200(_State({"breadth_ema200_pct": 55.0})) == 55.0
+    # missing -> None (fail-closed so the macro gate stays shut, never silently opens)
+    assert _read_b200(_State({"context": {}})) is None
+    assert _read_b200(_State({})) is None

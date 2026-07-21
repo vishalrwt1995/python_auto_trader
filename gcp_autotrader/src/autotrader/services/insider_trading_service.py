@@ -105,10 +105,15 @@ def plan_insider_entries(
 
 # ── live I/O wrapper (validated in PAPER, not unit-tested — fail-closed) ───────
 def _read_b200(state) -> float | None:
-    """Live breadth (% of universe above EMA200) from the brain Firestore doc. None on error."""
+    """Live breadth (% of universe above EMA200) from the brain Firestore doc. The raw doc nests
+    it at ``context.breadthSnapshot.aboveEma200Pct`` (the source of MarketBrainState.breadth_ema200_pct);
+    falls back to a flat/parsed key. None on error/missing -> fail-closed gate."""
     try:
         brain = state.get_market_brain() or {}
-        v = brain.get("breadth_ema200_pct")
+        snap = (brain.get("context") or {}).get("breadthSnapshot") or {}
+        v = snap.get("aboveEma200Pct")
+        if v is None:
+            v = brain.get("breadth_ema200_pct")   # fallback (parsed/flat shape)
         return float(v) if v is not None else None
     except Exception as exc:
         logger.error("insider_read_b200_failed err=%s", exc)
