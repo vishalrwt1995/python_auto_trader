@@ -66,7 +66,7 @@ export function isMarketOpen(): boolean {
  * Once the BQ writer persists `wl_type`, branches 2-4 become dead code; until
  * then they keep historic rows usable in the channel filters.
  */
-const _KNOWN_CHANNELS: Channel[] = ["swing", "intraday", "pead", "corp_action", "gap_fade", "core", "momentum", "delivery", "insider"];
+const _KNOWN_CHANNELS: Channel[] = ["swing", "intraday", "pead", "corp_action", "gap_fade", "core", "momentum", "delivery", "insider", "pledge"];
 
 export function inferTradeChannel(t: {
   wl_type?: string;
@@ -90,6 +90,7 @@ export function inferTradeChannel(t: {
   if (strat === "MOM_LOWVOL") return "momentum";
   if (strat === "DELIVERY") return "delivery";
   if (strat === "INSIDER") return "insider";
+  if (strat === "PLEDGE") return "pledge";
   if (strat.startsWith("CORP")) return "corp_action";
 
   // 3. Legacy swing/intraday heuristic (rows with no channel tag): the regular

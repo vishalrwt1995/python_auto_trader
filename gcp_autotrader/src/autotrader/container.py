@@ -20,6 +20,7 @@ from autotrader.services.regime_service import MarketRegimeService
 from autotrader.services.pead_reconciliation_service import PeadReconciliationService
 from autotrader.services.delivery_reconciliation_service import DeliveryReconciliationService
 from autotrader.services.insider_reconciliation_service import InsiderReconciliationService
+from autotrader.services.pledge_reconciliation_service import PledgeReconciliationService
 from autotrader.services.corp_action_reconciliation_service import CorpActionReconciliationService
 from autotrader.services.swing_reconciliation_service import SwingReconciliationService
 from autotrader.services.trading_service import TradingService
@@ -104,6 +105,7 @@ class AppContainer:
         self._pead_reconciliation_service: PeadReconciliationService | None = None
         self._delivery_reconciliation_service: DeliveryReconciliationService | None = None
         self._insider_reconciliation_service: InsiderReconciliationService | None = None
+        self._pledge_reconciliation_service: PledgeReconciliationService | None = None
         self._corp_action_reconciliation_service: CorpActionReconciliationService | None = None
 
     def log_sink(self) -> LogSink:
@@ -251,6 +253,31 @@ class AppContainer:
         (the insider channel's daily data feed). Fail-closed."""
         from autotrader.services.insider_ingest_service import InsiderIngestService
         return InsiderIngestService(bq=self.bq).run(asof=asof)
+
+    def pledge_reconciliation_service(self) -> PledgeReconciliationService:
+        if self._pledge_reconciliation_service is None:
+            self._pledge_reconciliation_service = PledgeReconciliationService(
+                settings=self.settings,
+                state=self.state,
+                upstox=self.upstox,
+                order_service=self.order_service(),
+            )
+        return self._pledge_reconciliation_service
+
+    def run_pledge_scan(self, reaction_date: str | None = None) -> dict:
+        """Run the daily promoter pledge-release entry scan (PAPER). Applies the double macro gate
+        (b200>50 AND Nifty>100DMA), reads pledge-revoke rows from BQ nse_insider_daily (SAME feed as
+        insider — no separate ingest), fetches dailies, applies px>200DMA + turnover>=25cr, places
+        CNC entries. No-op unless CAPITAL_PLEDGE>0."""
+        from autotrader.services import pledge_trading_service
+        return pledge_trading_service.run_pledge_scan_once(
+            settings=self.settings,
+            upstox=self.upstox,
+            state=self.state,
+            order_service=self.order_service(),
+            bq=self.bq,
+            reaction_date=reaction_date,
+        )
 
     def corp_action_reconciliation_service(self) -> CorpActionReconciliationService:
         if self._corp_action_reconciliation_service is None:

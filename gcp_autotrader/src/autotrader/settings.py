@@ -48,6 +48,7 @@ class StrategySettings:
     capital_momentum: float = 0.0      # Momentum x Low-Vol channel (monthly rebalance, added 2026-07-10)
     capital_delivery: float = 0.0      # Delivery-accumulation channel (daily CNC mid-caps, added 2026-07-14)
     capital_insider: float = 0.0       # Insider cluster-buy channel (daily CNC, added 2026-07-20)
+    capital_pledge: float = 0.0        # Promoter pledge-release channel (daily CNC, added 2026-07-21)
     # Phase C (2026-05-28): per-channel daily loss/profit limits as a fraction
     # of channel capital. Used by the per-channel daily-limit gate in
     # trading_service. Default 3% loss / 6% profit (= 2x swing risk / 4x).
@@ -268,6 +269,16 @@ class StrategySettings:
     insider_min_leg_value: float = 500000.0     # each disclosure leg >= Rs 5 lakh
     insider_turnover_min_cr: float = 10.0       # 20d-mean turnover floor (crore; no upper cap)
     insider_b200_min: float = 50.0              # breadth macro-gate floor (brain breadth_ema200_pct)
+    # PLEDGE (2026-07-21): promoter pledge-REVOKE (deleveraging = bullish) reusing nse_insider_daily;
+    # px>200DMA (falling-knife filter) + DOUBLE MACRO GATE b200>50 AND Nifty>100DMA; fixed 60d hold
+    # (NO trail). Set CAPITAL_PLEDGE>0 to enable. PAPER, STOCK-ONLY. See domain/pledge_signals.
+    pledge_risk_per_trade: float = 0.0          # Rs/trade (PLEDGE_RISK_PER_TRADE; 1.5% of cap)
+    pledge_max_positions: int = 10              # liquidity-ranked 10-slot book (cap10% => no-leverage)
+    pledge_max_hold_days: int = 60              # FIXED hold horizon (validated robust-central)
+    pledge_atr_sl_mult: float = 2.0             # protective disaster stop = ATR14 × this (tighter; no trail)
+    pledge_notional_cap_pct: float = 0.10       # per-position notional cap (× capital_pledge; diversified)
+    pledge_turnover_min_cr: float = 25.0        # 20d-mean turnover floor (crore; liquid/fillable)
+    pledge_b200_min: float = 50.0               # breadth macro-gate floor (brain breadth_ema200_pct)
 
     def channel_capital(self, channel: str) -> float:
         """Return capital allocated to a channel (Phase C 2026-05-28).
@@ -298,6 +309,8 @@ class StrategySettings:
             return self.capital_delivery
         if ch == "insider" and self.capital_insider > 0:
             return self.capital_insider
+        if ch == "pledge" and self.capital_pledge > 0:
+            return self.capital_pledge
         return self.capital
 
 
@@ -473,6 +486,7 @@ class AppSettings:
             capital_momentum=_env_float("CAPITAL_MOMENTUM", 0.0),
             capital_delivery=_env_float("CAPITAL_DELIVERY", 0.0),
             capital_insider=_env_float("CAPITAL_INSIDER", 0.0),
+            capital_pledge=_env_float("CAPITAL_PLEDGE", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
@@ -561,6 +575,13 @@ class AppSettings:
             insider_min_leg_value=_env_float("INSIDER_MIN_LEG_VALUE", 500000.0),
             insider_turnover_min_cr=_env_float("INSIDER_TURNOVER_MIN_CR", 10.0),
             insider_b200_min=_env_float("INSIDER_B200_MIN", 50.0),
+            pledge_risk_per_trade=_env_float("PLEDGE_RISK_PER_TRADE", 0.0),
+            pledge_max_positions=_env_int("PLEDGE_MAX_POSITIONS", 10),
+            pledge_max_hold_days=_env_int("PLEDGE_MAX_HOLD_DAYS", 60),
+            pledge_atr_sl_mult=_env_float("PLEDGE_ATR_SL_MULT", 2.0),
+            pledge_notional_cap_pct=_env_float("PLEDGE_NOTIONAL_CAP_PCT", 0.10),
+            pledge_turnover_min_cr=_env_float("PLEDGE_TURNOVER_MIN_CR", 25.0),
+            pledge_b200_min=_env_float("PLEDGE_B200_MIN", 50.0),
         )
         return AppSettings(
             gcp=GcpSettings(

@@ -104,6 +104,15 @@ export const api = {
                      turnover_cr?: number; reaction_close?: number; status?: string }>;
     }>("/dashboard/insider/watchlist"),
 
+  getPledgeWatchlist: () =>
+    api.get<{
+      asof?: string; reaction_date?: string; macro_gate_ok?: boolean | null;
+      macro?: { b200?: number | null; b200_ok?: boolean; nifty_above_100dma?: boolean };
+      revoke_symbols?: number; candidates?: number; entered?: number;
+      rows?: Array<{ symbol: string; n_revokes?: number; category?: string;
+                     turnover_cr?: number; reaction_close?: number; status?: string }>;
+    }>("/dashboard/pledge/watchlist"),
+
   getUniverseStats: () => api.get<Record<string, unknown>>("/dashboard/universe/stats"),
 
   getUniverseList: (params?: Record<string, string>) => {

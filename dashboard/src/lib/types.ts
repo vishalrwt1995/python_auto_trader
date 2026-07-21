@@ -8,7 +8,7 @@ export type MarketPhase = "PREMARKET" | "POST_OPEN" | "LIVE" | "EOD";
 
 // Channels (Phase 0/1, 2026-06-22) — the system's funded logical books.
 // corp_action shares the pead capital pool but is its own trade lineage.
-export type Channel = "swing" | "intraday" | "pead" | "corp_action" | "gap_fade" | "core" | "momentum" | "delivery" | "insider";
+export type Channel = "swing" | "intraday" | "pead" | "corp_action" | "gap_fade" | "core" | "momentum" | "delivery" | "insider" | "pledge";
 
 export interface ChannelOverviewRow {
   channel: Channel;

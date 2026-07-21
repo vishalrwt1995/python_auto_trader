@@ -2054,6 +2054,65 @@ def run_insider_scan(
         raise
 
 
+@app.post("/jobs/pledge-reconcile")
+def run_pledge_reconcile(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Pledge channel daily exit reconciliation (PAPER): FIXED 60-day max-hold exit + daily
+    SL-breach backstop (NO trail). Runs premarket BEFORE the scan. Job: autotrader-pledge-recon-0907.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("PledgeReconciliationService", "pledge_reconcile", "START", "", sched_ctx)
+        result = c.pledge_reconciliation_service().run()
+        out = result.to_dict()
+        sink.action("PledgeReconciliationService", "pledge_reconcile", "DONE", "pledge reconcile complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("PledgeReconciliationService", "pledge_reconcile", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
+@app.post("/jobs/pledge-scan")
+def run_pledge_scan(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Pledge channel daily entry scan (PAPER): double macro gate (b200>50 AND Nifty>100DMA) →
+    read promoter pledge-REVOKE rows from BQ nse_insider_daily (SAME feed as insider, no separate
+    ingest) → fresh dailies → px>200DMA + turnover>=25cr gate → liquidity-ranked 10-slot book →
+    CNC entries. Premarket (~09:12 IST). Job: autotrader-pledge-scan-0912.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("PledgeTradingService", "pledge_scan", "START", "", sched_ctx)
+        out = c.run_pledge_scan()
+        sink.action("PledgeTradingService", "pledge_scan", "DONE", "pledge scan complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("PledgeTradingService", "pledge_scan", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.post("/jobs/corp-scan")
 def run_corp_action_scan(
     x_job_token: str | None = Header(default=None),

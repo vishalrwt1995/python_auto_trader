@@ -377,6 +377,31 @@ def get_insider_watchlist(
         return {"asof": "", "rows": [], "clusters": 0, "candidates": 0, "error": str(exc)}
 
 
+@router.get("/pledge/watchlist")
+def get_pledge_watchlist(
+    date: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(verify_firebase_token),
+) -> dict[str, Any]:
+    """PLEDGE daily gate + candidate watchlist — the double macro-gate state (macro_gate_ok +
+    b200 + nifty>100DMA) and promoter pledge-revoke rows (symbol, n_revokes, category, turnover,
+    status), written by the pledge-scan job on EVERY run incl. gated-off days. `date` defaults to
+    latest. Read-only; mirrors /insider/watchlist."""
+    c = get_container()
+    try:
+        key = _safe_date(date, "latest") if date else "latest"
+        doc = c.state.get_json("pledge_watchlist", key)
+        if not doc:
+            return {"asof": "", "rows": [], "revoke_symbols": 0, "candidates": 0,
+                    "macro_gate_ok": None, "macro": {}}
+        v = doc.get("updated_at")
+        if v is not None and hasattr(v, "isoformat"):
+            doc["updated_at"] = v.isoformat()
+        return doc
+    except Exception as exc:
+        logger.error("pledge/watchlist query failed: %s", exc)
+        return {"asof": "", "rows": [], "revoke_symbols": 0, "candidates": 0, "error": str(exc)}
+
+
 @router.get("/pead/summary")
 def get_pead_summary(
     user: dict[str, Any] = Depends(verify_firebase_token),
@@ -431,7 +456,7 @@ def get_pead_summary(
 # (they share the EVENT pool), so they fold into the pead card. These GETs are
 # read-only + additive — no trading-path, schema, or env change.
 
-_CHANNELS: tuple[str, ...] = ("swing", "intraday", "pead", "gap_fade", "core", "momentum", "delivery", "insider")
+_CHANNELS: tuple[str, ...] = ("swing", "intraday", "pead", "gap_fade", "core", "momentum", "delivery", "insider", "pledge")
 
 
 def _position_channel(p: dict[str, Any]) -> str:
@@ -527,7 +552,7 @@ def get_channels_overview(
     max_pos = {"swing": s.swing_max_positions, "intraday": s.max_positions,
                "pead": s.pead_max_positions, "gap_fade": s.gapfade_max_positions,
                "core": None, "delivery": s.delivery_max_positions,
-               "insider": s.insider_max_positions}
+               "insider": s.insider_max_positions, "pledge": s.pledge_max_positions}
     out = build_channel_overview(
         _CHANNELS, positions, pnl_by, risk_by,
         capital_of=s.channel_capital,

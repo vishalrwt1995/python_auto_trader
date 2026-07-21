@@ -1266,7 +1266,7 @@ class OrderService:
             # 2026-06-22 because only "swing" was exempt. Mirror
             # ws_monitor_service._OVERNIGHT_SL_ONLY_WL exactly.
             _pos_wl_type = str(pos.get("wl_type") or "intraday").strip().lower()
-            if _pos_wl_type in ("swing", "pead", "corp_action", "core", "momentum", "delivery", "insider"):
+            if _pos_wl_type in ("swing", "pead", "corp_action", "core", "momentum", "delivery", "insider", "pledge"):
                 remaining += 1
                 logger.info("eod_skip_overnight tag=%s wl_type=%s symbol=%s", tag, _pos_wl_type, pos.get("symbol", ""))
                 continue
