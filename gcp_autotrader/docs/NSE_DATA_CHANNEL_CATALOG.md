@@ -52,7 +52,7 @@
 
 ## C. Build queue (grind → build → deploy, one at a time)
 
-1. **Promoter-Pledge** — data in hand, survivorship-safe, distinct from insider-buy, best pattern-fit. ← **START HERE**
+1. **Promoter-Pledge** — ✅ **VALIDATED + BUILT 2026-07-21** (Calmar 2.18 / +25% CAGR bull-inflated → ~15-20% honest; reuses insider feed; 1100 tests green). Deploy GATED. See `docs/PLEDGE_CHANNEL.md`.
 2. **Buyback** — adjacent to validated corp-action; backtestable now.
 3. **FII/DII flow** — as a regime overlay first (could lift existing channels) then maybe standalone.
 4. **Fundamental Growth/Quality** — only if 1-3 thin; survivorship + arbitrage headwinds; do survivorship-honest.

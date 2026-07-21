@@ -148,6 +148,19 @@ function DetailPanel({ channel }: { channel: Channel }) {
           : `GATE OFF · b200 ${d.macro?.b200 ?? "?"} · Nifty ${d.macro?.nifty_above_100dma ? ">" : "<"} 100DMA`)
           + ` · ${d.clusters ?? 0} cluster${(d.clusters ?? 0) === 1 ? "" : "s"} today`,
       )).catch(fail);
+    } else if (channel === "pledge") {
+      api.getPledgeWatchlist().then((d) => ok(
+        (d.rows || []).map((r) => ({
+          Symbol: r.symbol, Revokes: r.n_revokes ?? "", Category: r.category ?? "",
+          "Turnover(cr)": r.turnover_cr != null ? r.turnover_cr.toFixed(1) : "—",
+          "Close": r.reaction_close != null ? rupee(r.reaction_close) : "—",
+          Status: r.status ?? "",
+        })),
+        (d.macro_gate_ok
+          ? `GATE OPEN · b200 ${d.macro?.b200 ?? "?"} · Nifty > 100DMA`
+          : `GATE OFF · b200 ${d.macro?.b200 ?? "?"} · Nifty ${d.macro?.nifty_above_100dma ? ">" : "<"} 100DMA`)
+          + ` · ${d.revoke_symbols ?? 0} revoke${(d.revoke_symbols ?? 0) === 1 ? "" : "s"} today`,
+      )).catch(fail);
     } else {
       api.getPositionsByChannel().then((d) => {
         const list = (d.channels?.[channel] as Record<string, unknown>[]) || [];
