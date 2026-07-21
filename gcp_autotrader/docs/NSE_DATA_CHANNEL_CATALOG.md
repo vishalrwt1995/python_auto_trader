@@ -22,7 +22,7 @@
 | `nse_delivery_daily` | delivery-% per stock, daily, current | **Delivery-accumulation** | **LIVE** |
 | insider PIT (cached 341k + `nse_insider_daily`) — **BUYS** | informed open-market buys, 2015→now | **Insider Cluster-Buy** | **LIVE** |
 | insider PIT — **PLEDGE** events (create/release/invoke, ~38k rows in cache) | promoter share-pledging, 2015→now, survivorship-safe | **Promoter-Pledge** (release=deleverage/bullish; creation=stress/bearish/avoid) | **BACKTEST-NOW · ★★★** |
-| `nse_corp_actions.subject` — **buyback** | buyback announcements, ex/broadcast dates | **Buyback** (undervaluation signal; adjacent to validated corp-action +2.5%/event) | **BACKTEST-NOW · ★★** |
+| `nse_corp_actions.subject` — buyback | ex-date only (`broadcast_date` NULL for ALL); ~100 rows, ~53 fillable | ~~Buyback~~ | **KILLED 2026-07-21** (full-set BQ test, ~₹0) |
 | `nse_corp_actions` — dividend / rights | special-dividend; rights (dilutive) | dividend-signal (thin); rights = avoid-filter | BACKTEST-NOW · ★ |
 | `nse_fii_deriv` | FII F&O buy/sell/OI daily (→06-22) | **FII-flow regime overlay** (smarter gate than Nifty>100DMA → lifts ALL channels) or directional | BACKTEST-NOW · ★★ |
 | `nse_participant_oi` | FII/DII/Pro/Client long-short OI daily (→06-22) | **Smart-money positioning** (Pro/FII net bias) — timing/long-bias | BACKTEST-NOW · ★★ |
@@ -53,8 +53,8 @@
 ## C. Build queue (grind → build → deploy, one at a time)
 
 1. **Promoter-Pledge** — ✅ **VALIDATED + BUILT 2026-07-21** (Calmar 2.18 / +25% CAGR bull-inflated → ~15-20% honest; reuses insider feed; 1100 tests green). Deploy GATED. See `docs/PLEDGE_CHANNEL.md`.
-2. **Buyback** — adjacent to validated corp-action; backtestable now.
-3. **FII/DII flow** — as a regime overlay first (could lift existing channels) then maybe standalone.
+2. ~~Buyback~~ — **KILLED 2026-07-21** (full-set BQ test, ~₹0): `nse_corp_actions` has NO announcement date (`broadcast_date` NULL for all buybacks) — only ex-dates (already-priced tender-eligibility); ex-date fwd-return at/below baseline OOS, f60 median −3.9%/WR 44% = outlier noise; tender premium is captured on announcement not ex-date. Un-testable + un-tradeable with our data. Scripts: `scripts/redesign/buyback_diag.py`.
+3. **FII/DII flow** ← **NEXT** — as a regime overlay first (could lift existing channels) then maybe standalone.
 4. **Fundamental Growth/Quality** — only if 1-3 thin; survivorship + arbitrage headwinds; do survivorship-honest.
 5. *(Phase 2)* **SAST-accumulation** — needs a new NSE feed; highest-odds of the not-yet-ingested set.
 
