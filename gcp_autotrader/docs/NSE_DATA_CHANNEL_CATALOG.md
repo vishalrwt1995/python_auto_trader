@@ -33,19 +33,36 @@
 | candles 5m/1m/1d, bhavcopy | OHLCV | breakout / overnight / gap-fade / intraday / MR | **KILLED** (arbitraged/cost; re-confirmed 2026-07-21 sweep: overnight drift real but cost-killed, gap-ups fade, MR regime-reverses, breakout=beta) |
 | bulk/block deals | large trades | deal-follow | **KILLED** (no OOS edge; re-confirmed 2026-07-21: bulk buys=distribution neg-IS, block net-buy structurally untestable) |
 
-## B. NSE publishes but we DON'T ingest yet (Phase 2 — needs a new feed like insider) → candidate channels
+## B. Phase 2 — NSE Corporate Filings FETCHED (2026-07-23) → grind queue
 
-| Data (NSE page) | Candidate channel | odds |
-|---|---|---|
-| **SAST disclosures** (Reg 29 — >5% acquisitions, open offers, creeping acquisition) | **SAST-accumulation** (strategic/PE/promoter large-stake buying — bigger-conviction cousin of insider) | ★★★ |
-| Credit-rating changes (upgrades/downgrades) | rating-momentum event | ★★ |
-| Index reconstitution (Nifty 50/100/500 inclusion-exclusion) | index-inclusion front-run (F&O-inclusion was thin; Nifty-inclusion untested) | ★★ |
-| Board-meeting outcomes / order wins / capex / fund-raising announcements | announcement-event channels | ★ |
-| ASM/GSM surveillance lists | avoid-filter / post-exit mean-reversion | ★ |
-| New listings / IPO | post-listing drift | ★ |
-| MF monthly portfolio disclosures | MF-accumulation (monthly) | ★★ |
+All 42 Corporate-Filings (Equity) menu items were inventoried against the user's copied sidebar. Real
+API endpoints were **read from the pages' compiled JS bundles** (not guessed) — the reusable pattern is
+`/api/<name>?index=equities&from_date=DD-MM-YYYY&to_date=DD-MM-YYYY` via the insider NSE handshake
+(session warmup → browser UA + Referer). Each feed below was fetched to `scratchpad/*.json` and profiled
+for real multi-year history (row count alone ≠ history — SAST Reg30 taught that). GRIND all 7, top-down.
 
-*(Phase 2 confirmed via user's NSE screenshots → verify each feed's server-side reachability + backtest data before building.)*
+| # | Data (endpoint) | Rows | Span | Candidate channel | odds |
+|---|---|---|---|---|---|
+| 1 | **SAST Reg 29 Promoter** (`corporate-shareholding-disclosure?type=reg29`) | 15,531 | 2017–26 | promoter large-stake open-mkt buys — insider's bigger-conviction cousin | ★★★ |
+| 2 | **Shareholding Patterns** (`corporate-share-holdings-master`) | 89,073 | 2015–26 | promoter/FII/DII stake-change accumulation — **revives killed ownership idea, now REAL history** | ★★★ |
+| 3 | **SAST Reg 31 pledge** (`corporate-shareholding-disclosure?type=reg31`) | 88,622 | 2016–26 | richer pledge feed (lender+reason+before/after%) — overlap-check vs live pledge | ★★ |
+| 4 | **Board Meetings** (`corporate-board-meetings`) | 135,569 | 2015–26 | purpose-tagged intimations (fundraise/buyback/bonus) | ★★ |
+| 5 | **Financial Results** (`corporates-financial-results` + `integrated-filing-results`) | 116,629 | 2015–26 | earnings-surprise / fundamental-momentum (numbers behind per-row XBRL) | ★★ |
+| 6 | **Related Party Txns** (`related-party-transactions-master`) | 11,308 | 2022–26 | governance red-flag (IS-thin, 2022+ only) | ★ |
+| 7 | **Voting Results** (`corporate-voting-results`) | 28,798 | ~2015–26 | shareholder dissent (metadata-nested, needs parse) | ★ |
+
+**Phase-2 DEAD (fetched, data-limited, skip):** SAST Reg 7 (`type=reg7`, 2017–2020 only — feed
+discontinued) · SAST Reg 30 (`type=reg30`, 2017+2022 sparse annual snapshot, `typeOfEvent`/`regulations`
+null on every row — not an event stream) · Insider Trading-Plan (`TradingPlandata` — returns [] in bulk,
+per-symbol only). **Could not self-discover endpoint (stopped guessing per no-hallucination rule):** SAST
+Reg 29 Non-Promoter (`type=reg29np` → confirmed-invalid error shape), base SDD Credit-Rating.
+
+**Still menu-listed but SKIP (admin / wrong-asset-class):** Annual Reports, BRSR, Company Directory,
+Corporate Governance, all Debt Centralised DB items, Debt Liquidity Window, Debt Reg 50, Event Calendar,
+Investor Complaints, Issuer Offer Docs, Loss/Dup Certificate, all 6 Mutual Fund PIT items, MF Updates,
+Secretarial Compliance, Share Transfers, Statement of Deviation, Statement on Audit Qualification,
+Trading Window Disclosure, Unitholding Patterns (REIT/InvIT), + Further-Issues sub-items (ADR/GDR/FCCB;
+QIP/Preferential deferred as ★ leads if queue dries up).
 
 ---
 
@@ -55,7 +72,7 @@
 2. ~~Buyback~~ — **KILLED 2026-07-21** (full-set BQ test, ~₹0): `nse_corp_actions` has NO announcement date (`broadcast_date` NULL for all buybacks) — only ex-dates (already-priced tender-eligibility); ex-date fwd-return at/below baseline OOS, f60 median −3.9%/WR 44% = outlier noise; tender premium is captured on announcement not ex-date. Un-testable + un-tradeable with our data. Scripts: `scripts/redesign/buyback_diag.py`.
 3. ~~FII/DII flow~~ — **KILLED 2026-07-21** (diag: IS→OOS sign-reversal, regime-unstable; worsens the price gate OOS; no cash flow / per-stock data). See §A.
 4. ~~Fundamental Growth/Quality~~ + ~~short-interest~~ + ~~OI-buildup~~ + ~~dividend/rights~~ — **ALL KILLED 2026-07-21** (exhaustive multi-agent sweep). See §A.
-5. *(Phase 2)* **SAST-accumulation** ← **highest remaining odds** — the informed-accumulation cousin (★★★), needs a new NSE feed (user screenshots).
+5. *(Phase 2 — ALL FETCHED 2026-07-23, see §B)* grind top-down: **① SAST Reg 29 Promoter (★★★, diag done — messy, needs proper grind)** → **② Shareholding Patterns (★★★, revives ownership w/ real history)** → ③ SAST Reg 31 pledge → ④ Board Meetings → ⑤ Financial Results → ⑥ Related-Party → ⑦ Voting Results. Every grind READ-ONLY + isolated; per-item bar in §D.
 
 **State (2026-07-21) — CACHED DATA EXHAUSTIVELY SWEPT.** An exhaustive multi-agent workflow (13 dataset-hypotheses × dozens of configs, adversarially verified, ~646k tokens) rule-in/out'd EVERY remaining cached NSE dataset → **ZERO tradeable long edges** beyond the 3 live channels. The sweep found genuine market phenomena (overnight drift, gap-fade, informed shorting, high-yield value drift) but NONE survives long-only + full 0.7% cost + both-halves-OOS. Data-limited sets (fundamentals — single 2026-06-28 snapshot, no IS history) are un-backtestable. **Conclusion: the 3 live channels (delivery, insider, pledge) captured everything monetizable in the cached data. The only remaining frontier is Phase 2 — NSE data we do NOT ingest yet (SAST etc.), via user screenshots.** Sweep scripts: `scripts/redesign/{fii_diag,fii_grind,fii_grind2,fii_grind3,buyback_diag,fund_grind}.py` + the workflow-agent grinds.
 
