@@ -64,6 +64,43 @@ Secretarial Compliance, Share Transfers, Statement of Deviation, Statement on Au
 Trading Window Disclosure, Unitholding Patterns (REIT/InvIT), + Further-Issues sub-items (ADR/GDR/FCCB;
 QIP/Preferential deferred as ★ leads if queue dries up).
 
+## B2. Phase 2b — MARKET-DATA section swept (2026-07-24) → 2 new historical feeds
+
+Systematic sweep of all 49 `/market-data/` pages → 95 unique `/api/` endpoints + 20 NextApi
+`functionName`s discovered from the pages' JS. Classification:
+
+| Result | Endpoints | Verdict |
+|---|---|---|
+| ✅ **NEW historical, FETCHED** | `public-past-issues` (IPO, 1385 rows 2003–26, dense 2016+; incl SME—filter to mainboard) · `live-ofs-past-issues` (OFS, 459 rows 2012–26 w/ offerDate + allocation px) | **grind queue #8 IPO-drift, #9 OFS-overhang** — `scratchpad/ipo_public_past.json`, `ofs_past.json` |
+| 🧱 current-snapshot only (un-backtestable — 1 fetch = today) | all `live-analysis-*` (52wk-hi, advance, most-active, oi-spurts, price-band-hitter, volume-gainers, variations, slb), `market-data-pre-open`, `quote`, index charts | can't backfill; the price-derived ones (52wk/gainers/band) are anyway derivable from candles we HAVE |
+| ✅ already have / killed | block+large deals (`snapshot-capital-market-largedeal`, `getBlockDealsData` — killed), delivery, FII, candles | — |
+| ⏭️ non-equity (out of stock-only scope) | `commodity-futures`, `currency-derivatives`, `irf-derivatives`, `*-derivatives`, `mfss-*`, `lwf-*`, `zczp-*`, `corp-bond-details`, invits/reits-past (tiny) | — |
+| 🧱 SLB (securities lending = short proxy) | `price-watch-slb`, `live-analysis-slb` | current/per-symbol only (bulk empty; needs series+symbol) → not bulk-historical; short-side anyway (stock-only-long) |
+
+**Historical/reports/indices sections** (`/reports-indices-*`, `/historical-data`, `/all-reports`) = the
+daily **report-file archive** (`/api/reports?archives=[...]`, `daily-reports`, `monthly-reports`) — bhavcopy /
+MTO-delivery / FII-DII / index-close as downloadable files. **All equity-relevant files ALREADY ingested**
+(candles_5m/1d, delivery, FII). No new alt-data. **Regulation / Invest / Learn / Research / Trade** = circulars +
+info pages, non-data.
+
+**Primary Markets + event feeds additionally fetched (2026-07-24, exhaustive pass):**
+- `corporate-sast-reg29` (SDD-SAST) → **SAST Reg29 DEEP: 50,822 rows 2000–26** w/ `acqSaleType` (Acq 30k/Sale 17k/Both/Disposal) + `promoterType` Y/N + `acquisitionMode` + %-diluted — **SUPERSEDES the 15.5k `type=reg29` set** (deeper + promoter/non-promoter in one). `scratchpad/sast_reg29_sdd_deep.json`
+- `corporate-credit-rating` → **SDD Credit Rating: 37,045 rows 2014–26** (rating up/downgrade events) `sdd_credit_rating.json`
+- `corporates/offerdocs/arrangementscheme` → **Scheme of Arrangements (M&A/demerger): 1,483 rows 2013–26** `scheme_arrangements.json`
+- `corporate-further-issues-pref/qip/ri` → **Preferential 1,987 / QIP 261 / Rights 170** (all 2023–26, XBRL-era) `pref_/qip_/rights_issues.json`
+- `liveTenderPast-issues` → **Tender Offer (open-offer/takeover/delisting): 218 rows 2015–26** `tender_past.json`
+- `corporate-announcements` → **Announcements firehose: ~175k/yr** (2025 full year saved, 175,567 rows; full 2015–26 ≈2M rows deferred) `announcements_2025.json`
+- `event-calendar` → 6,411 forthcoming event dates · `stmt-on-impact` → Audit-Qual 234 (2024–25) · `credit-rating-sdd-esg` → ESG 3,757 (2024–26) · `shareholding-patterns-sdd` → 10,212 (2024–26, SDD dup) · FCCB 74 (foreign, tiny)
+- **Empty/dead confirmed:** IPP (17, ended 2017) · Reverse Book Building (empty) · Integrated-Governance (empty) · Announcements-XBRL (empty) · ADR/GDR (empty) · Corp-Governance + Statement-of-Deviation (per-record only, no bulk) · Trading-Window (404) · SAST Reg7 (2017–20) · SAST Reg30 (sparse)
+
+**★ DATA-COLLECTION PROVABLY COMPLETE (2026-07-24):** EVERY item on both NSE menus (Market Data 5 columns +
+Corporate Filings 42 sidebar items) individually hit. **Total NEW backtestable feeds collected = 18** — deep SAST
+Reg29 (2000–26), Shareholding Patterns, SAST Reg31, Board Meetings, Financial Results, SDD Credit Rating, Voting
+Results, Related-Party, Preferential, Scheme/M&A, IPO, OFS, QIP, Audit-Qual, Tender-Offer, Rights, Event-Calendar,
+Announcements. Everything else = already-have (candles/delivery/insider/pledge/corp/FII/bulk-block/OI) · current-only
+snapshot · non-equity (derivatives/debt/MF/REIT/gold) · admin/text · per-record-only · tried-dead. **No further fetching
+warranted.** All files in `scratchpad/*.json`. → proceed to grind (§C queue).
+
 ---
 
 ## C. Build queue (grind → build → deploy, one at a time)
