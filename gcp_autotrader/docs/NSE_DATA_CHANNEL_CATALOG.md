@@ -115,6 +115,19 @@ WORSE; **(booster/filter on insider)** hurts every cell (1.84→1.05-1.50, both 
 channel already fully captures this edge; SAST adds nothing. Scripts: `scripts/redesign/sast_deep_{grind,godmode,
 maxedge}.py` + `insider_sast_{booster,combined}.py`. Data `scratchpad/sast_reg29_sdd_deep.json` (50,822 rows 2000-26).
 
+**GRIND #2 — Shareholding Patterns (promoter stake-change) — ❌ KILLED 2026-07-24 (no alpha).** Raw promoter
+Q-o-Q increase noisy (IS f20 −2.5%/WR35%, medians negative, doesn't beat flat control). Salvage w/ px>200DMA
+trend filter: INC beats trend-MATCHED flat control by only +0.24pp OOS f60 (noise) — momentum does the work,
+not the promoter signal. Portfolio Calmar 0.15-0.28 << bar. Falling-knife subset IS-only (OOS-negative).
+Quarterly %-change = mechanical (dilution/buyback/repricing) noise; clean buying already in insider. FII/DII
+angle needs XBRL (deferred). Scripts `scripts/redesign/shp_{grind,salvage}.py`.
+
+**GRIND #3 — SDD Credit Rating — ❌ KILLED 2026-07-24 (data-limited + backwards signal).** (a) SDD framework
+only 2022+ (BroadcastDateTime: 2022:1.6k / 2023:169k bulk-backfill / 2024-26:~12k/yr) → NO IS period,
+un-validatable to IS/OOS bar. (b) even in clean 2024-26 window, UPGRADES → NEGATIVE forward returns (f60
+−5.85%, WR 29%) = the textbook "rating changes lag price / already priced" effect. Reaffirm flat, downgrades
+n=4. Two independent kills. Mapped debt→equity via ISIN issuer-prefix[:8]. Script `credit_grind.py`.
+
 1. **Promoter-Pledge** — ✅ **VALIDATED + BUILT 2026-07-21** (Calmar 2.18 / +25% CAGR bull-inflated → ~15-20% honest; reuses insider feed; 1100 tests green). Deploy GATED. See `docs/PLEDGE_CHANNEL.md`.
 2. ~~Buyback~~ — **KILLED 2026-07-21** (full-set BQ test, ~₹0): `nse_corp_actions` has NO announcement date (`broadcast_date` NULL for all buybacks) — only ex-dates (already-priced tender-eligibility); ex-date fwd-return at/below baseline OOS, f60 median −3.9%/WR 44% = outlier noise; tender premium is captured on announcement not ex-date. Un-testable + un-tradeable with our data. Scripts: `scripts/redesign/buyback_diag.py`.
 3. ~~FII/DII flow~~ — **KILLED 2026-07-21** (diag: IS→OOS sign-reversal, regime-unstable; worsens the price gate OOS; no cash flow / per-stock data). See §A.
