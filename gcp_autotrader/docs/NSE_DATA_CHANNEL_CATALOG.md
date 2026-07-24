@@ -161,10 +161,14 @@ checks vs live channels. **Result: no new robust, additive, all-weather channel.
 | 11 | Related-Party / Voting / Announcements | ❌ Related-Party data-limited (2022-24); Announcements order-wins negative next-day (instantly priced, worse than control); Voting no-edge governance. `announce_grind` |
 
 **★ CONCLUSION:** the 4 live alt-data channels (insider, delivery, pledge, corp/PEAD) already capture the
-monetizable **informed-accumulation** + **event-drift** edges. Phase-2 data adds nothing robust. **Keep
-(logged, not built):** SAST-cluster / SAST-Reg31 as *sourcing feed-enhancements* for insider/pledge;
-Scheme-merger & OFS as *real-but-sub-bar/bull-only* diversifiers-in-waiting if the bar/capital changes.
-**Next needle-mover is NOT more data — it's live forward-validation of the 8 shipped channels.**
+monetizable **informed-accumulation** + **event-drift** edges. Phase-2 data adds nothing robust. **Both
+feed-enhancement leads TESTED and REJECTED (2026-07-24):** (1) SAST-cluster as insider conviction-booster →
+hurt insider every cell (`insider_sast_booster`); (2) SAST-Reg31 releases into the pledge channel → DILUTES
+it (baseline IS Calmar 1.40 → combined 0.69; SAST31-release standalone IS 0.15 = bull-only, same failure as
+OFS) (`pledge_sast31_combined`). **Lesson: the selective insider-PIT/delivery feeds our channels use beat the
+broader SAST/results feeds — voluminous ≠ better.** Only *real-but-sub-bar* leftovers (Scheme-merger Calmar
+0.43, OFS bull-only) remain as diversifiers-in-waiting if the bar/capital ever changes. **NOTHING from Phase-2
+is implementable. Next needle-mover is NOT more data — it's live forward-validation of the 8 shipped channels.**
 
 ## D. Per-item bar (every candidate must clear before build)
 Survivorship-safe (incl. delisted) · IS + OOS both positive · not one-year-carried · additive/low-overlap with the 7 live channels · full Upstox cost · plateau not peak · realistic fills. Kill honestly if it doesn't. Thin-but-real event channels (pead/corp tier) are acceptable as diversifiers; needle-movers are rare.
