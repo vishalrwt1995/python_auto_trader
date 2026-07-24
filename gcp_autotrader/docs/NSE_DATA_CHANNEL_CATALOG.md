@@ -105,6 +105,16 @@ warranted.** All files in `scratchpad/*.json`. → proceed to grind (§C queue).
 
 ## C. Build queue (grind → build → deploy, one at a time)
 
+**GRIND #1 — SAST Reg 29 deep — ❌ KILLED 2026-07-24 (fully evidenced, not premature).** Promoter open-market
+ACQUISITION is a REAL informed-accumulation edge (pass-1: f20 +2.76% both-halves; max-edge standalone Calmar
+0.64 CAGR 10% w/ repeat-buy cluster + px>200DMA). BUT **62% overlap with the live insider channel** (a promoter
+open-mkt buy files BOTH an insider PIT disclosure AND a SAST Reg29). Tested all 3 uses on the canonical
+`insider_engine.walk`: **(separate channel)** COMBINED book Calmar 1.84→**1.65**, worst-year −104k→**−254k** =
+WORSE; **(booster/filter on insider)** hurts every cell (1.84→1.05-1.50, both halves both hold-points);
+**(distinct-only diversifier)** the 38% non-insider slice is Calmar **0.08-0.43** = dead. Conclusion: the insider
+channel already fully captures this edge; SAST adds nothing. Scripts: `scripts/redesign/sast_deep_{grind,godmode,
+maxedge}.py` + `insider_sast_{booster,combined}.py`. Data `scratchpad/sast_reg29_sdd_deep.json` (50,822 rows 2000-26).
+
 1. **Promoter-Pledge** — ✅ **VALIDATED + BUILT 2026-07-21** (Calmar 2.18 / +25% CAGR bull-inflated → ~15-20% honest; reuses insider feed; 1100 tests green). Deploy GATED. See `docs/PLEDGE_CHANNEL.md`.
 2. ~~Buyback~~ — **KILLED 2026-07-21** (full-set BQ test, ~₹0): `nse_corp_actions` has NO announcement date (`broadcast_date` NULL for all buybacks) — only ex-dates (already-priced tender-eligibility); ex-date fwd-return at/below baseline OOS, f60 median −3.9%/WR 44% = outlier noise; tender premium is captured on announcement not ex-date. Un-testable + un-tradeable with our data. Scripts: `scripts/redesign/buyback_diag.py`.
 3. ~~FII/DII flow~~ — **KILLED 2026-07-21** (diag: IS→OOS sign-reversal, regime-unstable; worsens the price gate OOS; no cash flow / per-stock data). See §A.
