@@ -140,5 +140,31 @@ n=4. Two independent kills. Mapped debt→equity via ISIN issuer-prefix[:8]. Scr
 
 Deferred (data-limited): ownership-holdings (6mo history), ratios-value (snapshot). Revisit once we accumulate live history or find a longer source.
 
+## C2. Phase-2 GRIND COMPLETE (2026-07-24) — 11 datasets ground 1-by-1, ZERO new viable channels
+
+Every fetched Phase-2 feed was ground (diagnostic → god-mode → salvage/faithful where warranted), READ-ONLY
++ isolated, full 0.7% cost, IS(≤2020)/OOS(≥2021), both-halves bar, beta/momentum-matched controls, overlap
+checks vs live channels. **Result: no new robust, additive, all-weather channel.**
+
+| # | Dataset | Verdict (scripts in scripts/redesign/) |
+|---|---|---|
+| 1 | SAST Reg 29 (deep, 50k, 2000-26) | ❌ real promoter-accumulation edge but **62% redundant w/ insider**; combined book 1.84→1.65, booster hurts all cells, distinct-slice Calmar 0.08. `sast_deep_{grind,godmode,maxedge}`, `insider_sast_{booster,combined}` |
+| 2 | Shareholding Patterns | ❌ no alpha — promoter Δ%-stake noisy; px>200DMA beats trend-matched control by only +0.24pp OOS (momentum, not the signal). `shp_{grind,salvage}` |
+| 3 | SDD Credit Rating | ❌ data-limited (SDD 2022+, no IS) + upgrades → NEGATIVE fwd (rating-lags-price). `credit_grind` |
+| 4 | SAST Reg 31 (pledge) | ❌ real release edge (f60 OOS +8.4%) but = **live pledge channel** (same event, parallel feed). Flag: broader feed-enhancement. `sast_reg31_check` |
+| 5 | Scheme of Arrangements | ❌ merger real short-lived f20 pop beats momentum +2-3pp but fades; Calmar 0.43 sub-bar. `scheme_{grind,salvage}` |
+| 6 | Financial Results | ❌ = **live PEAD channel** (positive-reaction earnings drift, confirmed). `pead_feed_check` |
+| 7 | Board Meetings | ❌ fund-raising intimation ambiguous (IS-negative, OOS-beta). `board_grind` |
+| 8 | Tender Offer | ❌ thin + negative OOS (offerDate post-announcement, priced; takeover f20 OOS -6.8%). `tender_grind` |
+| 9 | Preferential/QIP/Rights | ❌ data-limited (2023+ XBRL, no IS) + weak symbol mapping. |
+| 10 | IPO / OFS | ❌ IPO untestable (new-listing bars absent); **OFS = closest call** — genuine orthogonal alpha (beats turnover control both halves, 2% insider overlap) but **FAILED faithful harness**: IS Calmar ≈0/neg across the whole px>200DMA plateau (close-only walk's IS 0.83 was a no-stop artifact) → bull-regime-only, not both-halves. `ipo_ofs_grind`, `ofs_{godmode,maxedge,faithful}` |
+| 11 | Related-Party / Voting / Announcements | ❌ Related-Party data-limited (2022-24); Announcements order-wins negative next-day (instantly priced, worse than control); Voting no-edge governance. `announce_grind` |
+
+**★ CONCLUSION:** the 4 live alt-data channels (insider, delivery, pledge, corp/PEAD) already capture the
+monetizable **informed-accumulation** + **event-drift** edges. Phase-2 data adds nothing robust. **Keep
+(logged, not built):** SAST-cluster / SAST-Reg31 as *sourcing feed-enhancements* for insider/pledge;
+Scheme-merger & OFS as *real-but-sub-bar/bull-only* diversifiers-in-waiting if the bar/capital changes.
+**Next needle-mover is NOT more data — it's live forward-validation of the 8 shipped channels.**
+
 ## D. Per-item bar (every candidate must clear before build)
 Survivorship-safe (incl. delisted) · IS + OOS both positive · not one-year-carried · additive/low-overlap with the 7 live channels · full Upstox cost · plateau not peak · realistic fills. Kill honestly if it doesn't. Thin-but-real event channels (pead/corp tier) are acceptable as diversifiers; needle-movers are rare.

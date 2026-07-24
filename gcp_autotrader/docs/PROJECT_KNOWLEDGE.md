@@ -325,6 +325,25 @@ Shipped + ENABLED (§8 ⑰, PR #59, rev `autotrader-00289-ftq` + ws-monitor `000
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
 
+### 2026-07-24 · Phase-2 NSE-data grind COMPLETE — 11 datasets, ZERO new viable channels (docs-only, no prod change)
+Ground every fetched Phase-2 NSE feed 1-by-1 (READ-ONLY, isolated `scripts/redesign/*`, full 0.7% cost,
+IS/OOS both-halves bar, beta/momentum-matched controls, overlap checks, faithful-harness where warranted).
+**Verdict: no new robust, additive, all-weather channel.** Full scorecard in `docs/NSE_DATA_CHANNEL_CATALOG.md`
+§C2. Highlights: SAST Reg 29 (real promoter-accumulation edge but 62% redundant w/ insider — combined book
+Calmar 1.84→1.65, booster hurts); Shareholding Patterns (no alpha, momentum does the work); Credit Rating
+(data-limited 2022+ & upgrade signal backwards); SAST Reg 31 = live pledge channel; Financial Results = live
+PEAD channel; Scheme-merger (real f20 pop, sub-bar Calmar 0.43); **OFS = closest call** (genuine orthogonal
+alpha, beats beta control both halves, 2% insider overlap — but FAILED the faithful harness: IS Calmar ≈0/neg
+across the whole px>200DMA plateau, the close-only walk's IS 0.83 was a no-stop artifact → bull-regime-only).
+Tender/Board/Preferential/Related-Party/Announcements all data-limited or priced/negative. **Conclusion: the
+4 live alt-data channels (insider/delivery/pledge/corp-PEAD) already capture the monetizable informed-
+accumulation + event-drift edges; more NSE data is not the needle-mover — live forward-validation of the 8
+shipped channels is.** Kept (logged, not built): SAST-cluster/Reg31 as insider/pledge *sourcing* feed-
+enhancements; Scheme-merger & OFS as real-but-sub-bar diversifiers-in-waiting. Data-collection also proven
+complete (18 backtestable feeds fetched, entire NSE surface swept). Grind scripts committed to main.
+**Also open:** the delivery ETF-fetch fix (PSUBANK) remains committed-locally-only / not deployed (from an
+earlier session) — single-service `autotrader` redeploy when convenient; zero trading risk.
+
 ### 2026-07-21 (latest) — ㉓ PROMOTER PLEDGE-RELEASE CHANNEL SHIPPED + LIVE (PR #69, revs `autotrader-00302-62t` + `ws-monitor-00048-b9g` + `dashboard-00077-6d8`, PAPER, ENABLED)
 
 **What:** NEW **8th channel** — buy promoter **pledge REVOKES** (un-pledging shares = deleveraging = a bullish informed action). Config: px>200DMA (falling-knife filter) + DOUBLE MACRO GATE (b200>50 AND Nifty>100DMA) + turnover≥25cr + price≥30 + **fixed 60d CNC hold** (NO trail) + 10 slots (cap10% no-leverage) + ATR14×2.0 stop + 1.5% risk. `CAPITAL_PLEDGE=200000` (roster ₹17L→₹19L).
