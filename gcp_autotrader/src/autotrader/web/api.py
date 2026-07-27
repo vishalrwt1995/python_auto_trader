@@ -2318,8 +2318,8 @@ def run_refresh_earnings_calendar(
     try:
         from autotrader.services.earnings_calendar_service import refresh_earnings_blackout
         result = refresh_earnings_blackout(
-            project_id=c.settings.runtime.gcp_project_id,
-            database=c.settings.runtime.firestore_database,
+            project_id=c.settings.gcp.project_id,
+            database=c.settings.gcp.firestore_database,
         )
         logger.info("earnings_calendar_refresh_done result=%s ctx=%s", result, sched_ctx)
         return {"ok": True, **result}
