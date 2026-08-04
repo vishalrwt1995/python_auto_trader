@@ -14,6 +14,7 @@ import logging
 from typing import Any, Sequence
 
 from autotrader.domain import momentum_signals as ms
+from autotrader.domain.delivery_signals import is_etf  # shared stock-only NSE-ETF classifier
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ def build_target_basket(history: dict[str, list[list]], prev_holds: Sequence[str
     cand: list[dict[str, Any]] = []
     ref: dict[str, float] = {}
     for sym, bars in history.items():
+        if is_etf(str(sym)):          # stock-only: exclude ETFs (MON100 / *BEES / *ETF) — same classifier as delivery
+            continue
         if not bars or len(bars) <= ms.MOM_LOOKBACK:
             continue
         closes = [b[4] for b in bars]

@@ -3,10 +3,23 @@ Pure plan logic only (the live run_* wrapper is PAPER-validated, not unit-tested
 from __future__ import annotations
 
 from autotrader.services.momentum_trading_service import plan_momentum_rebalance
+from autotrader.services.momentum_signal_service import build_target_basket
 
 
 class _Cfg:
     pass
+
+
+def _daily_bars(mom_target, n=280, price0=100.0, vol_shares=3_000_000):
+    """Synthetic daily bars [date,o,h,l,c,v] that pass every momentum universe gate:
+    a smooth geometric ramp (controls 12-1 momentum via ``mom_target``) + a small
+    alternating oscillation so realized-vol > 0. price ~Rs100-200, turnover ~Rs5cr+/day."""
+    bars = []
+    for k in range(n):
+        base = price0 * (1.0 + mom_target) ** (k / float(n))
+        c = base * (1.005 if k % 2 == 0 else 0.995)              # +/-0.5% -> vol>0
+        bars.append([f"2025-{1 + k // 31:02d}-{1 + k % 31:02d}", c, c * 1.001, c * 0.999, c, vol_shares])
+    return bars
 
 
 def _basket(syms, price=100.0):
@@ -116,3 +129,15 @@ def test_run_once_hold_regime_does_fetch(monkeypatch):
                                           order_service=_RunOrder(), asof="2026-07-10")
     assert calls["history"] == 1                       # <-- fetch happens in hold regime
     assert out["regime_ok"] is True
+
+
+def test_build_target_basket_excludes_etf_even_when_top_ranked():
+    """Stock-only: an ETF is dropped from the basket even with the STRONGEST momentum +
+    lowest vol (it would otherwise rank #1). 20 plain stocks fill exactly the top-20; MON100
+    (curated ETF) passes every universe gate yet must not appear. Regression for the MON100
+    leak — proves the filter, not a gate failure, keeps it out."""
+    history = {f"STK{i}": _daily_bars(0.30) for i in range(20)}   # 20 qualifying stocks
+    history["MON100"] = _daily_bars(1.20)                         # ETF: steepest ramp -> top momentum
+    picks = [p["symbol"] for p in build_target_basket(history, regime_ok=True)]
+    assert "MON100" not in picks                                  # excluded despite ranking #1
+    assert len(picks) == 20 and set(picks) == {f"STK{i}" for i in range(20)}
