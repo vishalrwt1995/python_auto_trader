@@ -325,6 +325,22 @@ Shipped + ENABLED (§8 ⑰, PR #59, rev `autotrader-00289-ftq` + ws-monitor `000
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
 
+### 2026-08-04 · Dashboard per-channel P&L + earnings & delivery-ETF fixes SHIPPED (PAPER) — autotrader `00303-snw` + dashboard `00078-7v4`
+Two-service deploy (ws-monitor untouched, Rule 8 respected). **(1) Dashboard cockpit P&L:** each `/channels`
+card + the totals header now show **Overall P&L (realized all-time + unrealized)**, Today P&L, closed-trade
+count + win-rate, and deployed value. Backend: `build_channel_overview` extended (new args optional →
+back-compat, 5 tests green), `get_realized_stats_by_channel` one-pass Firestore helper, `_unrealized_by_channel`
+marks open positions to latest `candles_1d` close via a **cached (~10min) query, dry-run-verified 162 bytes**.
+Fixes core/momentum previously showing ₹0 (all-unrealized). Frontend: tsc clean + `next build` ✓. **(2) Earnings-
+calendar fix** (`api.py:2321` `c.settings.runtime.gcp_project_id`→`c.settings.gcp.project_id`) — the weekly Sunday
+refresh had AttributeError-crashed every run; now correct. **(3) Delivery ETF pre-cut** (`is_etf` drop before the
+Upstox fetch — kills the recurring wasted PSUBANK fetch; zero trading-behaviour change). **Live-verified:**
+both revisions 100% traffic, 0 errors, `/dashboard/channels/overview` → 200 (mark query runs clean). PAPER + all
+env preserved. Commits `2f8f40c` (dashboard) + `c8a7d51` (earnings) + `9d71b54` (delivery). **Still open:** momentum
+`is_etf` filter (MON100 slipped the stock-only basket — not yet coded) + Upstox token re-auth (WS feed 401'ing).
+
+### 2026-07-24 · Phase-2 NSE-data grind COMPLETE — 11 datasets, ZERO new viable channels (docs-only, no prod change)
+
 ### 2026-07-24 · Phase-2 NSE-data grind COMPLETE — 11 datasets, ZERO new viable channels (docs-only, no prod change)
 Ground every fetched Phase-2 NSE feed 1-by-1 (READ-ONLY, isolated `scripts/redesign/*`, full 0.7% cost,
 IS/OOS both-halves bar, beta/momentum-matched controls, overlap checks, faithful-harness where warranted).
