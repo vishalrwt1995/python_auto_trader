@@ -387,6 +387,34 @@ class FirestoreStateStore:
             total += float(row.get("net_pnl", 0) or 0)
         return round(total, 2)
 
+    def get_realized_stats_by_channel(self) -> dict[str, dict[str, float]]:
+        """All-time realized stats per channel in ONE pass — for the dashboard cockpit.
+
+        Returns {channel: {"realized": net₹, "closed": n, "wins": n}}. `realized`
+        sums ``net_pnl`` (after full cost; falls back to gross ``pnl`` for legacy rows
+        that predate net_pnl). Channel routing mirrors the other per-channel helpers
+        (explicit ``channel`` → ``wl_type`` → "intraday"). Best-effort: a Firestore
+        outage returns {} (dashboard degrades to realized=0, never raises)."""
+        out: dict[str, dict[str, float]] = {}
+        try:
+            for d in self._db().collection("positions").stream():
+                row = d.to_dict() or {}
+                if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                ch = str(row.get("channel") or "").strip().lower()
+                if not ch:
+                    wlt = str(row.get("wl_type") or "").strip().lower()
+                    ch = "swing" if wlt == "swing" else "intraday"
+                net = float(row.get("net_pnl", row.get("pnl", 0)) or 0)
+                s = out.setdefault(ch, {"realized": 0.0, "closed": 0, "wins": 0})
+                s["realized"] += net
+                s["closed"] += 1
+                s["wins"] += 1 if net > 0 else 0
+        except Exception:
+            return {}
+        return {k: {"realized": round(v["realized"], 2), "closed": int(v["closed"]),
+                    "wins": int(v["wins"])} for k, v in out.items()}
+
     def get_open_risk_by_channel(self) -> dict[str, float]:
         """M4 — aggregate open R-at-risk per channel (intraday/swing/positional/hedge).
 

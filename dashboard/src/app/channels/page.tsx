@@ -28,11 +28,12 @@ function signedRupee(v: number): string {
   return `${s}${rupee(v)}`;
 }
 
-function StatTile({ label, value, color }: { label: string; value: string; color?: string }) {
+function StatTile({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
   return (
     <div style={{ flex: 1, minWidth: 110 }}>
       <div style={{ fontSize: 11, color: TXT3, marginBottom: 4 }}>{label}</div>
       <div style={{ fontSize: 19, fontWeight: 700, color: color ?? TXT, fontFamily: MONO }}>{value}</div>
+      {sub ? <div style={{ fontSize: 10, color: TXT3, marginTop: 3, fontFamily: MONO }}>{sub}</div> : null}
     </div>
   );
 }
@@ -53,6 +54,7 @@ function ChannelCard({ row, expanded, onClick }: {
   const meta = CHANNEL_META[row.channel] ?? { label: row.channel, color: "#6b7280", blurb: "" };
   const status = channelStatus(row);
   const slot = row.max_positions != null ? `${row.open_positions} / ${row.max_positions}` : `${row.open_positions}`;
+  const hasActivity = row.closed_trades > 0 || row.open_positions > 0;
   return (
     <div onClick={onClick} role="button" tabIndex={0}
       style={{
@@ -79,12 +81,21 @@ function ChannelCard({ row, expanded, onClick }: {
         </div>
       </div>
       <div style={{ display: "flex", gap: 14 }}>
-        <StatTile label="Capital" value={row.capital > 0 ? rupee(row.capital) : "—"} />
+        <StatTile label="Overall P&L"
+          value={hasActivity ? signedRupee(row.overall_pnl) : "—"}
+          color={hasActivity ? pnlColor(row.overall_pnl) : TXT3}
+          sub={hasActivity ? `realized ${signedRupee(row.realized_pnl)} · unreal ${signedRupee(row.unrealized_pnl)}` : undefined} />
         <StatTile label="Today P&L" value={row.enabled ? signedRupee(row.today_pnl) : "—"}
           color={row.enabled ? pnlColor(row.today_pnl) : TXT3} />
       </div>
       <div style={{ display: "flex", gap: 14 }}>
-        <StatTile label="Positions" value={slot} />
+        <StatTile label="Capital" value={row.capital > 0 ? rupee(row.capital) : "—"} />
+        <StatTile label="Positions" value={slot}
+          sub={row.open_value > 0 ? `${rupee(row.open_value)} deployed` : undefined} />
+      </div>
+      <div style={{ display: "flex", gap: 14 }}>
+        <StatTile label="Trades" value={row.closed_trades > 0 ? String(row.closed_trades) : "—"}
+          sub={row.win_rate != null ? `${row.win_rate}% win` : undefined} />
         <StatTile label="Risk at stake" value={row.open_risk > 0 ? rupee(row.open_risk) : "—"} />
       </div>
       {row.enabled && row.daily_loss_limit < 0 && (
@@ -255,8 +266,11 @@ export default function ChannelsPage() {
           padding: 16, display: "flex", gap: 24, flexWrap: "wrap",
         }}>
           <StatTile label="Total Capital" value={rupee(totals.capital)} />
+          <StatTile label="Overall P&L" value={signedRupee(totals.overall_pnl)} color={pnlColor(totals.overall_pnl)}
+            sub={`realized ${signedRupee(totals.realized_pnl)} · unreal ${signedRupee(totals.unrealized_pnl)}`} />
           <StatTile label="Today P&L" value={signedRupee(totals.today_pnl)} color={pnlColor(totals.today_pnl)} />
-          <StatTile label="Open Positions" value={String(totals.open_positions)} />
+          <StatTile label="Open Positions" value={String(totals.open_positions)}
+            sub={totals.open_value > 0 ? `${rupee(totals.open_value)} deployed` : undefined} />
           <StatTile label="Risk at stake" value={rupee(totals.open_risk)} />
         </div>
       )}

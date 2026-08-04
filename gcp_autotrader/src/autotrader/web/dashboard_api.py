@@ -474,22 +474,37 @@ def build_channel_overview(
     max_positions_of: Any,
     daily_loss_pct: float,
     daily_profit_pct: float,
+    realized_by_channel: Any = None,
+    unrealized_by_channel: Any = None,
 ) -> dict[str, Any]:
     """PURE per-channel rollup (no I/O — unit-tested). For each channel: capital,
     enabled, open-position count + symbols, today's realized P&L, open R-at-risk,
-    slot cap, and the daily-breaker limits + whether it has tripped. Unfunded
-    channels (capital 0) are `enabled=False` and never trip the breaker."""
+    slot cap, daily-breaker state, AND (2026-08) all-time realized P&L + trade count +
+    win-rate, open cost basis, unrealized P&L (open marked to last close), and overall
+    P&L (realized + unrealized). `realized_by_channel` maps ch -> {realized, closed, wins};
+    `unrealized_by_channel` maps ch -> ₹ (both optional — omitted → 0). Unfunded channels
+    (capital 0) are `enabled=False` and never trip the breaker."""
     grouped: dict[str, list] = {}
     for p in positions or []:
         grouped.setdefault(_position_channel(p), []).append(p)
+    realized_by_channel = realized_by_channel or {}
+    unrealized_by_channel = unrealized_by_channel or {}
     rows: list[dict[str, Any]] = []
-    tot_cap = tot_pnl = tot_risk = 0.0
+    tot_cap = tot_pnl = tot_risk = tot_real = tot_unreal = tot_openval = 0.0
     tot_open = 0
     for ch in channels:
         cap = float(capital_of(ch) or 0.0)
         pnl = round(float((pnl_by_channel or {}).get(ch, 0.0)), 2)
         risk = round(float((risk_by_channel or {}).get(ch, 0.0)), 2)
         poss = grouped.get(ch, [])
+        rstat = realized_by_channel.get(ch, {}) or {}
+        realized = round(float(rstat.get("realized", 0.0)), 2)
+        closed = int(rstat.get("closed", 0) or 0)
+        wins = int(rstat.get("wins", 0) or 0)
+        win_rate = round(100.0 * wins / closed, 1) if closed else None
+        unreal = round(float(unrealized_by_channel.get(ch, 0.0)), 2)
+        open_value = round(sum(float(p.get("entry_price") or 0) * float(p.get("qty") or 0) for p in poss), 2)
+        overall = round(realized + unreal, 2)
         loss_limit = round(-abs(daily_loss_pct) * cap, 2)
         profit_limit = round(abs(daily_profit_pct) * cap, 2)
         hit_loss = cap > 0 and pnl <= loss_limit
@@ -501,6 +516,12 @@ def build_channel_overview(
             "open_positions": len(poss),
             "open_symbols": [str(p.get("symbol") or "") for p in poss],
             "today_pnl": pnl,
+            "realized_pnl": realized,
+            "unrealized_pnl": unreal,
+            "overall_pnl": overall,
+            "closed_trades": closed,
+            "win_rate": win_rate,
+            "open_value": open_value,
             "open_risk": risk,
             "max_positions": max_positions_of(ch),
             "daily_loss_limit": loss_limit,
@@ -513,16 +534,72 @@ def build_channel_overview(
             tot_cap += cap
         tot_pnl += pnl
         tot_risk += risk
+        tot_real += realized
+        tot_unreal += unreal
+        tot_openval += open_value
         tot_open += len(poss)
     return {
         "channels": rows,
         "totals": {
             "capital": round(tot_cap, 2),
             "today_pnl": round(tot_pnl, 2),
+            "realized_pnl": round(tot_real, 2),
+            "unrealized_pnl": round(tot_unreal, 2),
+            "overall_pnl": round(tot_real + tot_unreal, 2),
+            "open_value": round(tot_openval, 2),
             "open_positions": tot_open,
             "open_risk": round(tot_risk, 2),
         },
     }
+
+
+_MARK_CACHE: dict[str, Any] = {"ts": 0.0, "prices": {}}
+
+
+def _latest_closes(c: Any, symbols: list[str]) -> dict[str, float]:
+    """Latest daily close per symbol from candles_1d, cached ~10 min in-process so the
+    cockpit never hits BQ on every page load. Dry-run-verified tiny (~hundreds of bytes —
+    partition+cluster pruned by the trade_date/symbol filter). Best-effort: a BQ failure
+    returns the last good cache (or {}) rather than raising."""
+    import time
+    syms = sorted({str(s).strip().upper() for s in symbols if s})
+    now = time.time()
+    cached = _MARK_CACHE["prices"]
+    if now - float(_MARK_CACHE["ts"]) < 600 and cached and all(x in cached for x in syms):
+        return cached
+    if not syms:
+        return cached or {}
+    frm = (date.fromisoformat(now_ist().strftime("%Y-%m-%d")) - timedelta(days=10)).isoformat()
+    inlist = ",".join("'" + s.replace("'", "") + "'" for s in syms)
+    q = (f"SELECT symbol, close FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.candles_1d` "
+         f"WHERE symbol IN ({inlist}) AND trade_date >= '{frm}' "
+         f"QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) = 1")
+    try:
+        prices = {str(r["symbol"]).strip().upper(): float(r["close"])
+                  for r in c.bq.query(q) if r.get("close") is not None}
+        _MARK_CACHE["ts"] = now
+        _MARK_CACHE["prices"] = prices
+        return prices
+    except Exception as exc:
+        logger.error("channel unrealized mark query failed: %s", exc)
+        return cached or {}
+
+
+def _unrealized_by_channel(c: Any, positions: list[dict[str, Any]]) -> dict[str, float]:
+    """Unrealized P&L per channel = Σ (last_close − entry) × qty over open positions,
+    marked to the latest candles_1d close. Symbols absent from candles (e.g. some ETFs)
+    contribute 0. Channel routing reuses `_position_channel`."""
+    px = _latest_closes(c, [str(p.get("symbol") or "") for p in positions or []])
+    out: dict[str, float] = {}
+    for p in positions or []:
+        last = px.get(str(p.get("symbol") or "").strip().upper())
+        if last is None:
+            continue
+        entry = float(p.get("entry_price") or 0)
+        qty = float(p.get("qty") or 0)
+        ch = _position_channel(p)
+        out[ch] = out.get(ch, 0.0) + (last - entry) * qty
+    return {k: round(v, 2) for k, v in out.items()}
 
 
 @router.get("/channels/overview")
@@ -549,6 +626,16 @@ def get_channels_overview(
     except Exception as exc:
         logger.error("channels/overview risk failed: %s", exc)
         risk_by = {}
+    try:
+        realized_by = c.state.get_realized_stats_by_channel()
+    except Exception as exc:
+        logger.error("channels/overview realized failed: %s", exc)
+        realized_by = {}
+    try:
+        unrealized_by = _unrealized_by_channel(c, positions)
+    except Exception as exc:
+        logger.error("channels/overview unrealized failed: %s", exc)
+        unrealized_by = {}
     max_pos = {"swing": s.swing_max_positions, "intraday": s.max_positions,
                "pead": s.pead_max_positions, "gap_fade": s.gapfade_max_positions,
                "core": None, "delivery": s.delivery_max_positions,
@@ -558,6 +645,7 @@ def get_channels_overview(
         capital_of=s.channel_capital,
         max_positions_of=lambda ch: max_pos.get(ch),
         daily_loss_pct=s.daily_loss_pct, daily_profit_pct=s.daily_profit_pct,
+        realized_by_channel=realized_by, unrealized_by_channel=unrealized_by,
     )
     out["asof"] = today
     return out

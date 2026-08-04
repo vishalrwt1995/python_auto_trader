@@ -68,3 +68,26 @@ def test_unfunded_channel_disabled_and_never_trips():
     assert out["enabled"] is False
     assert out["breaker_tripped"] is False         # capital 0 -> no breaker
     assert out["daily_loss_limit"] == 0.0
+
+
+def test_overall_pnl_realized_plus_unrealized():
+    # delivery: 3 closed (realized net -2657 over 3 trades, 2 wins) + 2 open marked +1898 unrealized
+    positions = [{"channel": "delivery", "symbol": "KIMS", "entry_price": 800.0, "qty": 50},
+                 {"channel": "delivery", "symbol": "TIMKEN", "entry_price": 3000.0, "qty": 12}]
+    realized = {"delivery": {"realized": -2657.0, "closed": 5, "wins": 3},
+                "core": {"realized": 0.0, "closed": 0, "wins": 0}}
+    unreal = {"delivery": 1898.0}
+    out = build_channel_overview(["delivery", "core"], positions, {}, {}, _cap, _maxp, 0.03, 0.06,
+                                 realized_by_channel=realized, unrealized_by_channel=unreal)
+    d = {r["channel"]: r for r in out["channels"]}["delivery"]
+    assert d["realized_pnl"] == -2657.0
+    assert d["unrealized_pnl"] == 1898.0
+    assert d["overall_pnl"] == -759.0                     # realized + unrealized
+    assert d["closed_trades"] == 5 and d["win_rate"] == 60.0
+    assert d["open_value"] == 800.0 * 50 + 3000.0 * 12    # cost basis of the 2 open
+    # core: no closed trades -> win_rate None, overall == unrealized (0 here)
+    core = {r["channel"]: r for r in out["channels"]}["core"]
+    assert core["win_rate"] is None and core["closed_trades"] == 0
+    # totals carry the new aggregates
+    assert out["totals"]["overall_pnl"] == -759.0
+    assert out["totals"]["realized_pnl"] == -2657.0 and out["totals"]["unrealized_pnl"] == 1898.0

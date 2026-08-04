@@ -17,6 +17,12 @@ export interface ChannelOverviewRow {
   open_positions: number;
   open_symbols: string[];
   today_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  overall_pnl: number;
+  closed_trades: number;
+  win_rate: number | null;
+  open_value: number;
   open_risk: number;
   max_positions: number | null;
   daily_loss_limit: number;
@@ -27,7 +33,10 @@ export interface ChannelOverviewRow {
 
 export interface ChannelOverview {
   channels: ChannelOverviewRow[];
-  totals: { capital: number; today_pnl: number; open_positions: number; open_risk: number };
+  totals: {
+    capital: number; today_pnl: number; realized_pnl: number; unrealized_pnl: number;
+    overall_pnl: number; open_value: number; open_positions: number; open_risk: number;
+  };
   asof?: string;
 }
 
