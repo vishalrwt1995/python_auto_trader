@@ -60,6 +60,9 @@ def test_is_etf_bees_suffix():
 
 def test_is_etf_curated():
     assert is_etf("MON100") is True
+    # 2026-07-22: PSUBANK recurred daily in nse_delivery_daily and wasted an Upstox fetch
+    # (invalid instrument_key for its INF-prefixed ISIN) before being excluded downstream.
+    assert is_etf("PSUBANK") is True
 
 
 def test_is_etf_substring():

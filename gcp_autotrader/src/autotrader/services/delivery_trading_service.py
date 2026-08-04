@@ -225,6 +225,10 @@ def run_delivery_scan_once(*, settings, upstox, state, order_service, bq=None,
     # cheap turnover pre-cut around the 25-50cr band (loose bounds; the exact 20d-mean
     # band gate is applied in build_candidates on real bars). Skips large-caps/penny early.
     rows = {s: v for s, v in rows.items() if 10.0 <= float(v.get("turnover_cr") or 0.0) <= 120.0}
+    # ETFs are excluded by build_candidates anyway (delivery_signals.is_etf), but dropping them
+    # here too (free, string-only check) avoids a wasted Upstox fetch + noisy error log for known
+    # ETF names that recur daily in nse_delivery_daily (e.g. PSUBANK -> invalid instrument_key).
+    rows = {s: v for s, v in rows.items() if not delivery_signals.is_etf(s)}
     if not rows:
         return {"asof": asof, "reaction_date": reaction_target, "delivery_rows": 0,
                 "candidates": 0, "entered": 0}
