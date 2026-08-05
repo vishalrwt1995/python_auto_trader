@@ -85,8 +85,11 @@ function ChannelCard({ row, expanded, onClick }: {
           value={hasActivity ? signedRupee(row.overall_pnl) : "—"}
           color={hasActivity ? pnlColor(row.overall_pnl) : TXT3}
           sub={hasActivity ? `realized ${signedRupee(row.realized_pnl)} · unreal ${signedRupee(row.unrealized_pnl)}` : undefined} />
-        <StatTile label="Today P&L" value={row.enabled ? signedRupee(row.today_pnl) : "—"}
-          color={row.enabled ? pnlColor(row.today_pnl) : TXT3} />
+        <StatTile label="Today P&L"
+          value={row.enabled && row.open_positions > 0 ? signedRupee(row.today_move) : "—"}
+          color={row.enabled && row.open_positions > 0 ? pnlColor(row.today_move) : TXT3}
+          sub={row.today_pnl !== 0 ? `${signedRupee(row.today_pnl)} realized today`
+               : (row.enabled && row.open_positions > 0 ? "mark-to-market" : undefined)} />
       </div>
       <div style={{ display: "flex", gap: 14 }}>
         <StatTile label="Capital" value={row.capital > 0 ? rupee(row.capital) : "—"} />
@@ -268,7 +271,8 @@ export default function ChannelsPage() {
           <StatTile label="Total Capital" value={rupee(totals.capital)} />
           <StatTile label="Overall P&L" value={signedRupee(totals.overall_pnl)} color={pnlColor(totals.overall_pnl)}
             sub={`realized ${signedRupee(totals.realized_pnl)} · unreal ${signedRupee(totals.unrealized_pnl)}`} />
-          <StatTile label="Today P&L" value={signedRupee(totals.today_pnl)} color={pnlColor(totals.today_pnl)} />
+          <StatTile label="Today P&L" value={signedRupee(totals.today_move)} color={pnlColor(totals.today_move)}
+            sub={totals.today_pnl !== 0 ? `${signedRupee(totals.today_pnl)} realized today` : "mark-to-market"} />
           <StatTile label="Open Positions" value={String(totals.open_positions)}
             sub={totals.open_value > 0 ? `${rupee(totals.open_value)} deployed` : undefined} />
           <StatTile label="Risk at stake" value={rupee(totals.open_risk)} />

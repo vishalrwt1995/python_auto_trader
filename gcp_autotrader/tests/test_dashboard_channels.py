@@ -91,3 +91,26 @@ def test_overall_pnl_realized_plus_unrealized():
     # totals carry the new aggregates
     assert out["totals"]["overall_pnl"] == -759.0
     assert out["totals"]["realized_pnl"] == -2657.0 and out["totals"]["unrealized_pnl"] == 1898.0
+
+
+def test_today_move_mtm_by_channel():
+    # today's MTM move (open book marked last vs prev close): delivery +500, momentum -200;
+    # realized-from-exits stays 0 (hold book, nothing closed today) -> today_move is the real daily P&L
+    positions = [{"channel": "delivery", "symbol": "KIMS", "entry_price": 800.0, "qty": 50},
+                 {"channel": "momentum", "symbol": "LUPIN", "entry_price": 2000.0, "qty": 10}]
+    move = {"delivery": 500.0, "momentum": -200.0}
+    out = build_channel_overview(["delivery", "momentum"], positions, {}, {}, _cap, _maxp, 0.03, 0.06,
+                                 daily_move_by_channel=move)
+    d = {r["channel"]: r for r in out["channels"]}
+    assert d["delivery"]["today_move"] == 500.0
+    assert d["momentum"]["today_move"] == -200.0
+    assert out["totals"]["today_move"] == 300.0                    # summed across channels
+
+
+def test_today_move_defaults_zero_when_omitted():
+    # back-compat: no daily_move_by_channel -> today_move is 0 everywhere (never KeyError)
+    out = build_channel_overview(["delivery"],
+                                 [{"channel": "delivery", "symbol": "KIMS", "entry_price": 800.0, "qty": 50}],
+                                 {}, {}, _cap, _maxp, 0.03, 0.06)
+    assert out["channels"][0]["today_move"] == 0.0
+    assert out["totals"]["today_move"] == 0.0

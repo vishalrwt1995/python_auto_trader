@@ -476,21 +476,25 @@ def build_channel_overview(
     daily_profit_pct: float,
     realized_by_channel: Any = None,
     unrealized_by_channel: Any = None,
+    daily_move_by_channel: Any = None,
 ) -> dict[str, Any]:
     """PURE per-channel rollup (no I/O — unit-tested). For each channel: capital,
     enabled, open-position count + symbols, today's realized P&L, open R-at-risk,
     slot cap, daily-breaker state, AND (2026-08) all-time realized P&L + trade count +
-    win-rate, open cost basis, unrealized P&L (open marked to last close), and overall
-    P&L (realized + unrealized). `realized_by_channel` maps ch -> {realized, closed, wins};
-    `unrealized_by_channel` maps ch -> ₹ (both optional — omitted → 0). Unfunded channels
-    (capital 0) are `enabled=False` and never trip the breaker."""
+    win-rate, open cost basis, unrealized P&L (open marked to last close), overall
+    P&L (realized + unrealized), and today's MTM move (open book marked last vs prev
+    close — the meaningful daily P&L for a hold book where realized-from-exits is ~0 on
+    non-exit days). `realized_by_channel` maps ch -> {realized, closed, wins};
+    `unrealized_by_channel` / `daily_move_by_channel` map ch -> ₹ (all optional — omitted
+    → 0). Unfunded channels (capital 0) are `enabled=False` and never trip the breaker."""
     grouped: dict[str, list] = {}
     for p in positions or []:
         grouped.setdefault(_position_channel(p), []).append(p)
     realized_by_channel = realized_by_channel or {}
     unrealized_by_channel = unrealized_by_channel or {}
+    daily_move_by_channel = daily_move_by_channel or {}
     rows: list[dict[str, Any]] = []
-    tot_cap = tot_pnl = tot_risk = tot_real = tot_unreal = tot_openval = 0.0
+    tot_cap = tot_pnl = tot_risk = tot_real = tot_unreal = tot_openval = tot_move = 0.0
     tot_open = 0
     for ch in channels:
         cap = float(capital_of(ch) or 0.0)
@@ -503,6 +507,7 @@ def build_channel_overview(
         wins = int(rstat.get("wins", 0) or 0)
         win_rate = round(100.0 * wins / closed, 1) if closed else None
         unreal = round(float(unrealized_by_channel.get(ch, 0.0)), 2)
+        today_move = round(float(daily_move_by_channel.get(ch, 0.0)), 2)
         open_value = round(sum(float(p.get("entry_price") or 0) * float(p.get("qty") or 0) for p in poss), 2)
         overall = round(realized + unreal, 2)
         loss_limit = round(-abs(daily_loss_pct) * cap, 2)
@@ -516,6 +521,7 @@ def build_channel_overview(
             "open_positions": len(poss),
             "open_symbols": [str(p.get("symbol") or "") for p in poss],
             "today_pnl": pnl,
+            "today_move": today_move,
             "realized_pnl": realized,
             "unrealized_pnl": unreal,
             "overall_pnl": overall,
@@ -537,12 +543,14 @@ def build_channel_overview(
         tot_real += realized
         tot_unreal += unreal
         tot_openval += open_value
+        tot_move += today_move
         tot_open += len(poss)
     return {
         "channels": rows,
         "totals": {
             "capital": round(tot_cap, 2),
             "today_pnl": round(tot_pnl, 2),
+            "today_move": round(tot_move, 2),
             "realized_pnl": round(tot_real, 2),
             "unrealized_pnl": round(tot_unreal, 2),
             "overall_pnl": round(tot_real + tot_unreal, 2),
@@ -553,35 +561,44 @@ def build_channel_overview(
     }
 
 
-_MARK_CACHE: dict[str, Any] = {"ts": 0.0, "prices": {}}
+# Cache: {symbol: [latest_close, prev_close]} newest-first (up to 2). ONE BQ query feeds
+# BOTH the unrealized mark (latest close vs entry) and today's MTM move (latest − prev).
+_MARK_CACHE: dict[str, Any] = {"ts": 0.0, "recent": {}}
 
 
-def _latest_closes(c: Any, symbols: list[str]) -> dict[str, float]:
-    """Latest daily close per symbol from candles_1d, cached ~10 min in-process so the
-    cockpit never hits BQ on every page load. Dry-run-verified tiny (~hundreds of bytes —
-    partition+cluster pruned by the trade_date/symbol filter). Best-effort: a BQ failure
-    returns the last good cache (or {}) rather than raising."""
+def _recent_closes(c: Any, symbols: list[str]) -> dict[str, list[float]]:
+    """Last two daily closes per symbol from nse_delivery_daily (newest-first), cached
+    ~10 min in-process so the cockpit never hits BQ on every page load. Best-effort: a BQ
+    failure returns the last good cache (or {}) rather than raising.
+
+    Source = nse_delivery_daily (the live NSE EOD feed the delivery channel ingests daily:
+    ~2,400 symbols/session, plain tickers, current through the prior session). candles_1d
+    is deliberately NOT used — it stopped populating the traded universe (only 1-2 stray
+    symbols/day), so it marks every held name to nothing (verified 2026-08-05)."""
     import time
     syms = sorted({str(s).strip().upper() for s in symbols if s})
     now = time.time()
-    cached = _MARK_CACHE["prices"]
+    cached = _MARK_CACHE["recent"]
     if now - float(_MARK_CACHE["ts"]) < 600 and cached and all(x in cached for x in syms):
         return cached
     if not syms:
         return cached or {}
-    frm = (date.fromisoformat(now_ist().strftime("%Y-%m-%d")) - timedelta(days=10)).isoformat()
+    frm = (date.fromisoformat(now_ist().strftime("%Y-%m-%d")) - timedelta(days=12)).isoformat()
     inlist = ",".join("'" + s.replace("'", "") + "'" for s in syms)
-    q = (f"SELECT symbol, close FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.candles_1d` "
-         f"WHERE symbol IN ({inlist}) AND trade_date >= '{frm}' "
-         f"QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) = 1")
+    q = (f"SELECT symbol, date, close_price FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.nse_delivery_daily` "
+         f"WHERE symbol IN ({inlist}) AND date >= '{frm}' "
+         f"QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) <= 2")
     try:
-        prices = {str(r["symbol"]).strip().upper(): float(r["close"])
-                  for r in c.bq.query(q) if r.get("close") is not None}
+        rows = [r for r in c.bq.query(q) if r.get("close_price") is not None]
+        rows.sort(key=lambda r: str(r.get("date")), reverse=True)   # newest first
+        recent: dict[str, list[float]] = {}
+        for r in rows:
+            recent.setdefault(str(r["symbol"]).strip().upper(), []).append(float(r["close_price"]))
         _MARK_CACHE["ts"] = now
-        _MARK_CACHE["prices"] = prices
-        return prices
+        _MARK_CACHE["recent"] = recent
+        return recent
     except Exception as exc:
-        logger.error("channel unrealized mark query failed: %s", exc)
+        logger.error("channel mark query failed: %s", exc)
         return cached or {}
 
 
@@ -589,16 +606,33 @@ def _unrealized_by_channel(c: Any, positions: list[dict[str, Any]]) -> dict[str,
     """Unrealized P&L per channel = Σ (last_close − entry) × qty over open positions,
     marked to the latest candles_1d close. Symbols absent from candles (e.g. some ETFs)
     contribute 0. Channel routing reuses `_position_channel`."""
-    px = _latest_closes(c, [str(p.get("symbol") or "") for p in positions or []])
+    recent = _recent_closes(c, [str(p.get("symbol") or "") for p in positions or []])
     out: dict[str, float] = {}
     for p in positions or []:
-        last = px.get(str(p.get("symbol") or "").strip().upper())
-        if last is None:
+        closes = recent.get(str(p.get("symbol") or "").strip().upper())
+        if not closes:
             continue
         entry = float(p.get("entry_price") or 0)
         qty = float(p.get("qty") or 0)
         ch = _position_channel(p)
-        out[ch] = out.get(ch, 0.0) + (last - entry) * qty
+        out[ch] = out.get(ch, 0.0) + (closes[0] - entry) * qty
+    return {k: round(v, 2) for k, v in out.items()}
+
+
+def _daily_move_by_channel(c: Any, positions: list[dict[str, Any]]) -> dict[str, float]:
+    """Today's mark-to-market move per channel = Σ (last_close − prev_close) × qty over
+    open positions — the day-to-day P&L of a buy-and-hold book (realized-from-exits is ~0
+    on non-exit days). Positions with <2 available closes (just entered / illiquid / ETF
+    absent from candles) contribute 0. Channel routing reuses `_position_channel`."""
+    recent = _recent_closes(c, [str(p.get("symbol") or "") for p in positions or []])
+    out: dict[str, float] = {}
+    for p in positions or []:
+        closes = recent.get(str(p.get("symbol") or "").strip().upper())
+        if not closes or len(closes) < 2:
+            continue
+        qty = float(p.get("qty") or 0)
+        ch = _position_channel(p)
+        out[ch] = out.get(ch, 0.0) + (closes[0] - closes[1]) * qty
     return {k: round(v, 2) for k, v in out.items()}
 
 
@@ -636,6 +670,11 @@ def get_channels_overview(
     except Exception as exc:
         logger.error("channels/overview unrealized failed: %s", exc)
         unrealized_by = {}
+    try:
+        move_by = _daily_move_by_channel(c, positions)
+    except Exception as exc:
+        logger.error("channels/overview daily-move failed: %s", exc)
+        move_by = {}
     max_pos = {"swing": s.swing_max_positions, "intraday": s.max_positions,
                "pead": s.pead_max_positions, "gap_fade": s.gapfade_max_positions,
                "core": None, "delivery": s.delivery_max_positions,
@@ -646,6 +685,7 @@ def get_channels_overview(
         max_positions_of=lambda ch: max_pos.get(ch),
         daily_loss_pct=s.daily_loss_pct, daily_profit_pct=s.daily_profit_pct,
         realized_by_channel=realized_by, unrealized_by_channel=unrealized_by,
+        daily_move_by_channel=move_by,
     )
     out["asof"] = today
     return out
