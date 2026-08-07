@@ -821,3 +821,43 @@ def test_watchlist_v2_require_today_scored_blocks_when_today_coverage_incomplete
     assert out["selected"] == 0
     assert out["coverage"]["todayFull"] is False
     assert out["selected"] == 0
+
+
+# ── stock-only: ETFs must never become watchlist candidates (root-cause fix 2026-08-07) ──
+def _universe_row_for(symbol: str) -> list[str]:
+    """Build a universe row positioned by the REAL _UNIVERSE_COL map (so this test cannot
+    drift if column order changes). Values are the minimum for a plausible live row."""
+    col = {k: int(v) for k, v in UniverseService._UNIVERSE_COL.items()}
+    row = [""] * (max(col.values()) + 1)
+    def put(name: str, val: str) -> None:
+        if name in col:
+            row[col[name] - 1] = val
+    put("Symbol", symbol)
+    put("Exchange", "NSE")
+    put("Segment", "CASH")
+    put("Enabled", "Y")
+    put("Instrument Key", f"NSE_EQ|{symbol}")
+    put("Eligible Swing", "Y")
+    put("Eligible Intraday", "Y")
+    put("Turnover Rank 60D", "10")
+    put("Turnover Med 60D", "500000000")
+    put("Liquidity Bucket", "A")
+    put("Price Last", "250")
+    put("Bars 1D", "300")
+    put("Last 1D Date", "2026-08-07")
+    return row
+
+
+def test_watchlist_candidates_exclude_etfs():
+    """ETFs (LIQUIDCASE / LIQUIDADD / MON100 / *BEES) are dropped at the candidate
+    chokepoint even though they are Enabled=Y and eligible, while ordinary stocks pass.
+    Regression for the 2026-08-07 leak where LIQUIDCASE+LIQUIDADD reached swing SIGNAL."""
+    svc = UniverseService(object(), object(), StrategySettings())
+    etfs = ["LIQUIDCASE", "LIQUIDADD", "MON100", "NIFTYBEES", "SETFNIF50"]
+    stocks = ["SUNPHARMA", "DIXON", "LODHA"]
+    rows = [_universe_row_for(s) for s in etfs + stocks]
+    svc._load_universe_rows_from_firestore = lambda: list(rows)  # type: ignore[method-assign]
+    got = {c["symbol"] for c in svc._watchlist_v2_candidates("2026-08-07")}
+    assert got == set(stocks), f"expected only stocks, got {sorted(got)}"
+    for e in etfs:
+        assert e not in got

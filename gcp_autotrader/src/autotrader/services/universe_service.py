@@ -20,6 +20,7 @@ from autotrader.domain.indicators import calc_adx, calc_atr, calc_rsi, compute_i
 from autotrader.domain.scoring import compute_universe_score_breakdown, format_universe_score_calc_short
 from autotrader.domain.models import MarketBrainState, MarketPolicy, RegimeSnapshot, UniverseRow
 from autotrader.domain import swing_signals
+from autotrader.domain.delivery_signals import is_etf  # shared stock-only NSE-ETF classifier
 from autotrader.services.universe_v2 import (
     UNIVERSE_V2_HEADERS,
     CanonicalListing,
@@ -4223,6 +4224,13 @@ class UniverseService:
         for row in rows:
             symbol = row[col["Symbol"] - 1].strip().upper() if len(row) >= col["Symbol"] else ""
             if not symbol:
+                continue
+            # Stock-only (root cause of the ETF leak): NSE lists ETFs in the EQ series, so they
+            # reach the universe and became swing watchlist candidates (LIQUIDCASE/LIQUIDADD hit
+            # the SIGNAL stage 2026-08-07, blocked only incidentally by the regime gate). Drop
+            # them at the single chokepoint every watchlist candidate flows through, so no
+            # channel reading the watchlist (swing now, intraday on resume) can ever size one.
+            if is_etf(symbol):
                 continue
             exchange = row[col["Exchange"] - 1].strip().upper() if len(row) >= col["Exchange"] else "NSE"
             segment = row[col["Segment"] - 1].strip().upper() if len(row) >= col["Segment"] else "CASH"
