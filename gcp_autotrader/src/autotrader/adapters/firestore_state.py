@@ -387,20 +387,34 @@ class FirestoreStateStore:
             total += float(row.get("net_pnl", 0) or 0)
         return round(total, 2)
 
-    def get_realized_stats_by_channel(self) -> dict[str, dict[str, float]]:
-        """All-time realized stats per channel in ONE pass — for the dashboard cockpit.
+    def get_realized_stats_by_channel(self, since_entry: str = "") -> dict[str, dict[str, float]]:
+        """Realized stats per channel in ONE pass — for the dashboard cockpit.
 
         Returns {channel: {"realized": net₹, "closed": n, "wins": n}}. `realized`
         sums ``net_pnl`` (after full cost; falls back to gross ``pnl`` for legacy rows
         that predate net_pnl). Channel routing mirrors the other per-channel helpers
         (explicit ``channel`` → ``wl_type`` → "intraday"). Best-effort: a Firestore
-        outage returns {} (dashboard degrades to realized=0, never raises)."""
+        outage returns {} (dashboard degrades to realized=0, never raises).
+
+        ``since_entry`` (ISO date, e.g. "2026-07-27") restricts to trades **ENTERED** on or
+        after that date — the forward-test attribution rule. Deliberately keyed on
+        ``entry_ts``, NOT ``exit_ts``: at the 2026-07-27 cutoff, 34 pre-cutoff old-logic
+        positions were still open (core 30 entered Jun-23..Jul-01, delivery 4 entered
+        Jul-16..Jul-20) and they exit *inside* the forward window, so an exit-date filter
+        would credit their P&L to the revamped system. Empty string = all-time.
+        Rows with no parseable ``entry_ts`` are treated as pre-cutoff and EXCLUDED —
+        fail-closed, so an undated legacy row can never inflate forward-test results."""
         out: dict[str, dict[str, float]] = {}
+        cutoff = str(since_entry or "").strip()[:10]
         try:
             for d in self._db().collection("positions").stream():
                 row = d.to_dict() or {}
                 if str(row.get("status", "")).upper() != "CLOSED":
                     continue
+                if cutoff:
+                    ent = str(row.get("entry_ts", "") or "")[:10]
+                    if not ent or ent < cutoff:
+                        continue
                 ch = str(row.get("channel") or "").strip().lower()
                 if not ch:
                     wlt = str(row.get("wl_type") or "").strip().lower()

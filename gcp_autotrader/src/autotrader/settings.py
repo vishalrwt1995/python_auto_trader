@@ -55,6 +55,23 @@ class StrategySettings:
     # When 0, falls back to absolute max_daily_loss / daily_profit_target.
     daily_loss_pct: float = 0.03
     daily_profit_pct: float = 0.06
+
+    # ── Forward-test epoch (fixed 2026-08-07; env FORWARD_TEST_START) ──────────────
+    # THE canonical start of the honest PAPER forward test. The user's ground truth is
+    # that the last wrong-logic trades executed 2026-07-24 (a Friday), so the first clean
+    # session is Monday 2026-07-27. Everything before it is the pre-revamp system
+    # (206 closed trades, −₹12,614) and must NOT be mixed into forward-test results.
+    #
+    # Attribution rule: a trade belongs to the forward test iff its **entry_ts >= this
+    # date**. Entry-based, never exit-based — at the cutoff 34 old-logic positions were
+    # still open (core 30 entered Jun-23..Jul-01, delivery 4 entered Jul-16..Jul-20) and
+    # they close *inside* the window, so an exit-date rule would credit their P&L here.
+    #
+    # DO NOT move this date to flatter a result. Moving it forward discards real
+    # forward evidence; moving it back re-imports old-logic losses. If it must change,
+    # record why in PROJECT_KNOWLEDGE §8.
+    forward_test_start: str = "2026-07-27"
+
     risk_per_trade: float = 125.0
     max_daily_loss: float = 300.0
     daily_profit_target: float = 375.0
@@ -489,6 +506,7 @@ class AppSettings:
             capital_pledge=_env_float("CAPITAL_PLEDGE", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
+            forward_test_start=_env("FORWARD_TEST_START", "2026-07-27"),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
             max_daily_loss=_env_float("MAX_DAILY_LOSS", 300),
             daily_profit_target=_env_float("DAILY_PROFIT_TARGET", 375),

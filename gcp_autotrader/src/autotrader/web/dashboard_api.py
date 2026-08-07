@@ -495,7 +495,7 @@ def build_channel_overview(
     daily_move_by_channel = daily_move_by_channel or {}
     rows: list[dict[str, Any]] = []
     tot_cap = tot_pnl = tot_risk = tot_real = tot_unreal = tot_openval = tot_move = 0.0
-    tot_open = 0
+    tot_open = tot_closed = 0
     for ch in channels:
         cap = float(capital_of(ch) or 0.0)
         pnl = round(float((pnl_by_channel or {}).get(ch, 0.0)), 2)
@@ -545,6 +545,7 @@ def build_channel_overview(
         tot_openval += open_value
         tot_move += today_move
         tot_open += len(poss)
+        tot_closed += closed
     return {
         "channels": rows,
         "totals": {
@@ -556,6 +557,7 @@ def build_channel_overview(
             "overall_pnl": round(tot_real + tot_unreal, 2),
             "open_value": round(tot_openval, 2),
             "open_positions": tot_open,
+            "closed_trades": tot_closed,
             "open_risk": round(tot_risk, 2),
         },
     }
@@ -660,11 +662,20 @@ def get_channels_overview(
     except Exception as exc:
         logger.error("channels/overview risk failed: %s", exc)
         risk_by = {}
+    # Forward-test epoch: the cockpit reports the REVAMPED system's own record. Trades
+    # entered before settings.forward_test_start belong to the pre-revamp system and are
+    # excluded (entry-based, so old positions closing inside the window don't leak in).
+    fwd_start = str(getattr(s, "forward_test_start", "") or "").strip()
     try:
-        realized_by = c.state.get_realized_stats_by_channel()
+        realized_by = c.state.get_realized_stats_by_channel(since_entry=fwd_start)
     except Exception as exc:
         logger.error("channels/overview realized failed: %s", exc)
         realized_by = {}
+    try:                       # all-time kept alongside so nothing is hidden
+        alltime_by = c.state.get_realized_stats_by_channel()
+    except Exception as exc:
+        logger.error("channels/overview all-time realized failed: %s", exc)
+        alltime_by = {}
     try:
         unrealized_by = _unrealized_by_channel(c, positions)
     except Exception as exc:
@@ -688,6 +699,26 @@ def get_channels_overview(
         daily_move_by_channel=move_by,
     )
     out["asof"] = today
+    # Forward-test epoch context: `realized_pnl`/`overall_pnl` above are the REVAMPED
+    # system's own record (entries >= forward_test_start). All-time is reported alongside
+    # so the pre-revamp history is visible, never silently dropped.
+    at_real = round(sum(float((v or {}).get("realized", 0.0)) for v in alltime_by.values()), 2)
+    at_closed = int(sum(int((v or {}).get("closed", 0)) for v in alltime_by.values()))
+    fw_closed = int(out["totals"].get("closed_trades", 0) or 0)
+    out["forward_test"] = {
+        "start": fwd_start,
+        "basis": "entry_ts >= start (entry-based, so pre-cutoff positions closing inside "
+                 "the window are excluded)",
+        "realized_pnl": out["totals"].get("realized_pnl", 0.0),
+        "closed_trades": fw_closed,
+        "open_positions_in_epoch": sum(
+            1 for p in (positions or [])
+            if fwd_start and str(p.get("entry_ts", "") or "")[:10] >= fwd_start),
+        "all_time_realized_pnl": at_real,
+        "all_time_closed_trades": at_closed,
+        "pre_epoch_realized_pnl": round(at_real - float(out["totals"].get("realized_pnl", 0.0)), 2),
+        "pre_epoch_closed_trades": at_closed - fw_closed,
+    }
     return out
 
 

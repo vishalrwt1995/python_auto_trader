@@ -203,3 +203,57 @@ def _c_for_order_test():
         gcs = _GCS()
         state = _State()
     return _C()
+
+
+# ── forward-test epoch (fixed 2026-07-27) ─────────────────────────────────────
+def test_forward_test_start_is_fixed_and_env_overridable():
+    """The epoch is a real setting, not a magic literal scattered around."""
+    from autotrader.settings import StrategySettings
+    assert StrategySettings().forward_test_start == "2026-07-27"
+
+
+def test_realized_stats_entry_based_filter_excludes_old_positions_closing_late():
+    """THE attribution rule. A pre-cutoff position that EXITS inside the forward window
+    must NOT count — this is why the filter is entry-based, not exit-based. At the real
+    cutoff 34 such positions were open (core 30, delivery 4)."""
+    from autotrader.adapters.firestore_state import FirestoreStateStore
+
+    rows = [
+        # old-logic: entered before cutoff, exits AFTER it -> must be excluded
+        {"status": "CLOSED", "channel": "core", "entry_ts": "2026-06-23T09:20:00+05:30",
+         "exit_ts": "2026-08-05T15:20:00+05:30", "net_pnl": -5000.0},
+        {"status": "CLOSED", "channel": "delivery", "entry_ts": "2026-07-20T09:30:00+05:30",
+         "exit_ts": "2026-08-10T15:20:00+05:30", "net_pnl": -2491.0},
+        # forward-test: entered on/after cutoff -> counts
+        {"status": "CLOSED", "channel": "delivery", "entry_ts": "2026-07-27T09:30:00+05:30",
+         "exit_ts": "2026-08-20T15:20:00+05:30", "net_pnl": 800.0},
+        {"status": "CLOSED", "channel": "delivery", "entry_ts": "2026-08-03T09:30:00+05:30",
+         "exit_ts": "2026-08-21T15:20:00+05:30", "net_pnl": -300.0},
+        # undated legacy row -> fail-closed, excluded
+        {"status": "CLOSED", "channel": "delivery", "net_pnl": 99999.0},
+        {"status": "OPEN", "channel": "momentum", "entry_ts": "2026-08-01T09:35:00+05:30"},
+    ]
+
+    class _Doc:
+        def __init__(self, d): self._d = d
+        def to_dict(self): return self._d
+
+    class _Coll:
+        def stream(self): return [_Doc(r) for r in rows]
+
+    class _DB:
+        def collection(self, name): return _Coll()
+
+    st = FirestoreStateStore.__new__(FirestoreStateStore)   # bypass __init__ (no real client)
+    st._db = lambda: _DB()                               # type: ignore[method-assign]
+
+    fwd = st.get_realized_stats_by_channel(since_entry="2026-07-27")
+    assert "core" not in fwd                                     # old core exit excluded
+    assert fwd["delivery"]["closed"] == 2                        # only the 2 in-epoch
+    assert fwd["delivery"]["realized"] == 500.0                  # 800 - 300
+    assert fwd["delivery"]["wins"] == 1
+    assert 99999.0 not in (fwd["delivery"]["realized"],)         # undated row not counted
+
+    alltime = st.get_realized_stats_by_channel()                 # no filter = everything
+    assert alltime["core"]["closed"] == 1
+    assert alltime["delivery"]["closed"] == 4                    # incl. old + undated
