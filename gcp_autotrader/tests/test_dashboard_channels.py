@@ -114,3 +114,32 @@ def test_today_move_defaults_zero_when_omitted():
                                  {}, {}, _cap, _maxp, 0.03, 0.06)
     assert out["channels"][0]["today_move"] == 0.0
     assert out["totals"]["today_move"] == 0.0
+
+
+# ── candles_1d retirement: GCS is the PRIMARY 1d source (2026-08-07) ──────────
+def test_gcs_candles_1d_parses_and_windows():
+    """`_gcs_candles_1d` (now primary for 1d) returns BQ-shaped rows and honours the
+    date window. Guards the retirement of the cold BQ candles_1d table: the old
+    BQ-primary order silently truncated 1d charts at ~2026-04 because its GCS fallback
+    only fired on a completely empty result, and the table still holds 1.19M old rows."""
+    from autotrader.web.dashboard_api import _gcs_candles_1d
+
+    class _GCS:
+        def read_candles(self, path):
+            if path != "cache/score_1d/NSE/CASH/SBIN.json":
+                return []
+            return [
+                ["2026-07-01T00:00:00+05:30", 10.0, 11.0, 9.0, 10.5, 1000.0],
+                ["2026-08-03T00:00:00+05:30", 20.0, 21.0, 19.0, 20.5, 2000.0],
+                ["2026-08-06T00:00:00+05:30", 30.0, 31.0, 29.0, 30.5, 3000.0],  # recent bar
+            ]
+
+    class _C:
+        gcs = _GCS()
+
+    rows = _gcs_candles_1d(_C(), "sbin", "2026-08-01", "2026-08-06")
+    assert [r["time"] for r in rows] == ["2026-08-03", "2026-08-06"]   # window applied
+    assert rows[-1]["close"] == 30.5                                   # recent bar present
+    assert set(rows[0]) == {"time", "open", "high", "low", "close", "volume"}  # BQ-shaped
+    # unknown symbol -> empty (all three candidate paths miss), never raises
+    assert _gcs_candles_1d(_C(), "NOSUCHSYM", "2026-08-01", "2026-08-06") == []

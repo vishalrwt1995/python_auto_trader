@@ -154,7 +154,8 @@ If any layer fires, `policy_block_reason` is set + a `BLOCK` log is emitted with
 | Service URL | `https://autotrader-147177395303.asia-south1.run.app` |
 | Firestore collections | `market_brain` (latest brain state), `positions` (open + closed), `config` (runtime overrides), `audit_log` |
 | BigQuery dataset | `grow-profit-machine.autotrader` |
-| Key BQ tables | `candles_5m` (5.89M bars), `candles_1d`, `market_brain_history`, `scan_decisions`, `trades`, `signals`, `audit_log` |
+| Key BQ tables | `candles_5m` (5.89M bars), `market_brain_history`, `scan_decisions`, `trades`, `signals`, `audit_log`, `nse_delivery_daily` (~2,400 symbols/session, has `close_price`), `nse_insider_daily` |
+| `candles_1d` (RETIRED) | ⚠️ **Retired as a live source 2026-08-07** — frozen at 1.19M rows (2016-04-27 → ~2026-04, then cold). It was only ever written as a side effect of an Upstox fetch, so writes stopped once the GCS score cache went warm. **Do not build new consumers on it.** For daily bars use **GCS `score_1d`** (canonical, full 2000→today — what the live system reads at scan time) or **BQ `nse_delivery_daily`** (`close_price`). Rows retained; `backfill_candles_1d_to_bq` refills on demand. |
 | GCS bucket | `grow-profit-machine-autotrader-data` |
 | Cloud Scheduler | All jobs prefixed `autotrader-*` in `asia-south1` |
 

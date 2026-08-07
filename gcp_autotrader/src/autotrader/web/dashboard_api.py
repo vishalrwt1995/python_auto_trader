@@ -1672,8 +1672,12 @@ def get_symbol_detail(
 # ---------------------------------------------------------------------------
 
 
-def _gcs_candles_1d_fallback(c: Any, symbol: str, from_d: str, today: str) -> list[dict]:
-    """Read daily candles from GCS score cache when BQ is empty.
+def _gcs_candles_1d(c: Any, symbol: str, from_d: str, today: str) -> list[dict]:
+    """Read daily candles from the GCS score cache — the PRIMARY 1d source (2026-08-07).
+
+    This is the canonical store the live system reads at scan time (2000-02-22 → today,
+    full). It replaced BQ `candles_1d` as primary because that table went cold ~2026-04
+    (see the retirement note on `get_candles`), which made 1d charts silently truncate.
 
     Tries NSE/CASH, NSE/EQ, then BSE/CASH in order.
     Raw format per candle: [iso_ts, open, high, low, close, volume]
@@ -1724,16 +1728,36 @@ def get_candles(
     days: int = Query(default=90, ge=1, le=365),
     user: dict[str, Any] = Depends(verify_firebase_token),
 ) -> dict[str, Any]:
-    """Candle data for charting. BQ primary, GCS score cache fallback for 1d."""
+    """Candle data for charting. 1d reads GCS score cache (primary); 5m reads BQ candles_5m.
+
+    **BQ `candles_1d` is RETIRED as a live source (2026-08-07).** It was only ever written
+    as a side effect of an Upstox fetch inside `prefetch_score_cache_batch`, so once the GCS
+    score cache went warm (~2026-04) the writes stopped (~1-2 stray symbols/day; liquid names
+    like SBIN/RELIANCE/LUPIN absent entirely). The previous BQ-primary order carried a latent
+    bug: the GCS fallback fired only on `not rows`, but the table still holds 1.19M historical
+    rows, so a 1d chart got a NON-empty yet truncated series ending ~April and silently never
+    fell back. GCS score_1d is the canonical full+fresh store the live system itself reads, so
+    it is now primary; BQ is kept only as a last-resort net if GCS is unreachable. The table
+    and its rows are retained (nothing deleted) — see `backfill_candles_1d_to_bq` to refill
+    on demand if a future consumer needs SQL-side daily bars.
+    """
     c = get_container()
-    table = "candles_1d" if interval in ("1d", "day", "daily") else "candles_5m"
+    is_daily = interval in ("1d", "day", "daily")
     today = now_ist().strftime("%Y-%m-%d")
     from_d = (date.fromisoformat(today) - timedelta(days=days)).isoformat()
 
-    if table == "candles_1d":
+    if is_daily:
+        try:
+            rows = sorted(_gcs_candles_1d(c, symbol, from_d, today), key=lambda r: str(r["time"]))
+            if rows:
+                return {"symbol": symbol, "interval": interval, "candles": rows}
+            logger.info("candles_gcs_empty symbol=%s — trying retired BQ candles_1d", symbol)
+        except Exception as exc:
+            logger.error("candles gcs read failed symbol=%s: %s", symbol, exc)
+        # Last-resort net only (retired table — may be stale/truncated for recent dates)
         q = f"""
             SELECT trade_date as time, open, high, low, close, volume
-            FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.{table}`
+            FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.candles_1d`
             WHERE symbol = '{symbol}' AND trade_date BETWEEN '{from_d}' AND '{today}'
             QUALIFY ROW_NUMBER() OVER (PARTITION BY trade_date ORDER BY trade_date) = 1
             ORDER BY trade_date
@@ -1741,7 +1765,7 @@ def get_candles(
     else:
         q = f"""
             SELECT candle_ts as time, open, high, low, close, volume
-            FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.{table}`
+            FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.candles_5m`
             WHERE symbol = '{symbol}' AND trade_date BETWEEN '{from_d}' AND '{today}'
             ORDER BY candle_ts
         """
@@ -1752,13 +1776,6 @@ def get_candles(
             for k, v in r.items():
                 if hasattr(v, "isoformat"):
                     r[k] = v.isoformat()
-
-        # BQ empty → fall back to GCS score cache for daily candles
-        if not rows and table == "candles_1d":
-            rows = _gcs_candles_1d_fallback(c, symbol, from_d, today)
-            if rows:
-                logger.info("candles_gcs_fallback symbol=%s rows=%d", symbol, len(rows))
-
         return {"symbol": symbol, "interval": interval, "candles": rows}
     except Exception as exc:
         logger.error("candles query failed: %s", exc)

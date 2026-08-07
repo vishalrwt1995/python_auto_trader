@@ -340,7 +340,19 @@ class UniverseService:
         segment: str,
         candles: list[list[Any]],
     ) -> None:
-        """Best-effort dual-write of fresh daily candles to BigQuery."""
+        """Best-effort dual-write of fresh daily candles to BigQuery.
+
+        **RETIRED as a live source (2026-08-07) — do NOT build new consumers on `candles_1d`.**
+        This is called ONLY from the three `if api:` / `if older:` branches below, i.e. only
+        when an Upstox fetch actually happens. Once the GCS score cache went warm (~2026-04)
+        the daily job stopped fetching (`scanned=2698` vs `fetches=18`), so this stopped
+        writing and the table went cold (~1-2 stray symbols/day). It was always a side effect
+        of cache misses, never a first-class daily write. The canonical daily store is GCS
+        `score_1d` (full, fresh); `nse_delivery_daily` carries close_price for ~2,400
+        symbols/session. Kept (not deleted) so the historical 1.19M rows and the on-demand
+        `backfill_candles_1d_to_bq` path remain available. A correct daily writer would need
+        dedup (streaming inserts append, so re-writing history would duplicate).
+        """
         if not self.bq or not candles:
             return
         try:
