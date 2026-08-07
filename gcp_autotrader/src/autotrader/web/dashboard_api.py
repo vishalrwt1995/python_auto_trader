@@ -1675,15 +1675,33 @@ def get_symbol_detail(
 def _gcs_candles_1d(c: Any, symbol: str, from_d: str, today: str) -> list[dict]:
     """Read daily candles from the GCS score cache — the PRIMARY 1d source (2026-08-07).
 
-    This is the canonical store the live system reads at scan time (2000-02-22 → today,
-    full). It replaced BQ `candles_1d` as primary because that table went cold ~2026-04
-    (see the retirement note on `get_candles`), which made 1d charts silently truncate.
+    This is the canonical store the live system reads at scan time. It replaced BQ
+    `candles_1d` as primary because that table went cold ~2026-04 (see the retirement note
+    on `get_candles`), which made 1d charts silently truncate.
 
-    Tries NSE/CASH, NSE/EQ, then BSE/CASH in order.
+    **Path order mirrors `universe_service._read_score_cache_with_migration`: the
+    INSTRUMENT-KEY path first, then the legacy by-symbol path.** That order matters — the
+    live job migrated to instrument-key keying, so the legacy `cache/score_1d/<EX>/<SEG>/
+    <SYM>.json` files are frozen (verified 2026-08-07: SBIN legacy last bar 2026-02-26 vs
+    2026-08-06 under `score_1d_by_instrument/`). Reading legacy first would serve charts
+    ~5 months stale.
+
     Raw format per candle: [iso_ts, open, high, low, close, volume]
     """
     sym = symbol.upper()
-    candidate_paths = [
+    candidate_paths: list[str] = []
+    # Preferred: instrument-key path (what the live pipeline writes). Resolve the key from
+    # the universe row; best-effort — a lookup failure just falls through to legacy.
+    try:
+        row = c.state.get_universe_row(sym) or {}
+        ik = str(row.get("instrument_key") or "").strip()
+        exch = str(row.get("exchange") or "NSE").strip().upper() or "NSE"
+        seg = str(row.get("segment") or "CASH").strip().upper() or "CASH"
+        if ik:
+            candidate_paths.append(c.gcs.score_cache_1d_path_by_instrument_key(ik, exch, seg))
+    except Exception:
+        logger.info("candles_1d ik-path lookup failed symbol=%s — using legacy", sym, exc_info=True)
+    candidate_paths += [                       # legacy by-symbol (frozen; last-resort)
         f"cache/score_1d/NSE/CASH/{sym}.json",
         f"cache/score_1d/NSE/EQ/{sym}.json",
         f"cache/score_1d/BSE/CASH/{sym}.json",

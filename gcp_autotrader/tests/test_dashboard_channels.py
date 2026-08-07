@@ -125,21 +125,81 @@ def test_gcs_candles_1d_parses_and_windows():
     from autotrader.web.dashboard_api import _gcs_candles_1d
 
     class _GCS:
+        """Legacy by-symbol file is FROZEN (last bar 2026-02-26, as in prod); the
+        instrument-key file is FRESH. Reading legacy first would serve a stale chart."""
+        @staticmethod
+        def score_cache_1d_path_by_instrument_key(ik, exch, seg):
+            safe = ik.replace("|", "_")
+            return f"cache/score_1d_by_instrument/{exch}/{seg}/{safe}.json"
+
         def read_candles(self, path):
-            if path != "cache/score_1d/NSE/CASH/SBIN.json":
-                return []
-            return [
-                ["2026-07-01T00:00:00+05:30", 10.0, 11.0, 9.0, 10.5, 1000.0],
-                ["2026-08-03T00:00:00+05:30", 20.0, 21.0, 19.0, 20.5, 2000.0],
-                ["2026-08-06T00:00:00+05:30", 30.0, 31.0, 29.0, 30.5, 3000.0],  # recent bar
-            ]
+            if path == "cache/score_1d_by_instrument/NSE/CASH/NSE_EQ_INE062A01020.json":
+                return [
+                    ["2026-07-01T00:00:00+05:30", 10.0, 11.0, 9.0, 10.5, 1000.0],
+                    ["2026-08-03T00:00:00+05:30", 20.0, 21.0, 19.0, 20.5, 2000.0],
+                    ["2026-08-06T00:00:00+05:30", 30.0, 31.0, 29.0, 30.5, 3000.0],  # fresh
+                ]
+            if path == "cache/score_1d/NSE/CASH/SBIN.json":
+                return [["2026-02-26T00:00:00+05:30", 1.0, 1.0, 1.0, 1.0, 1.0]]  # STALE
+            return []
+
+    class _State:
+        def get_universe_row(self, sym):
+            return {"instrument_key": "NSE_EQ|INE062A01020", "exchange": "NSE", "segment": "CASH"}
 
     class _C:
         gcs = _GCS()
+        state = _State()
 
     rows = _gcs_candles_1d(_C(), "sbin", "2026-08-01", "2026-08-06")
     assert [r["time"] for r in rows] == ["2026-08-03", "2026-08-06"]   # window applied
     assert rows[-1]["close"] == 30.5                                   # recent bar present
     assert set(rows[0]) == {"time", "open", "high", "low", "close", "volume"}  # BQ-shaped
-    # unknown symbol -> empty (all three candidate paths miss), never raises
-    assert _gcs_candles_1d(_C(), "NOSUCHSYM", "2026-08-01", "2026-08-06") == []
+    # unknown symbol -> empty (every candidate path misses), never raises
+    class _NoRow(_C):
+        class state:  # type: ignore[misc]
+            @staticmethod
+            def get_universe_row(sym): return None
+    assert _gcs_candles_1d(_NoRow(), "NOSUCHSYM", "2026-08-01", "2026-08-06") == []
+
+
+def test_gcs_candles_1d_prefers_instrument_key_over_frozen_legacy():
+    """Path ORDER is the fix: the legacy by-symbol score_1d files froze when the live job
+    migrated to instrument-key keying (prod 2026-08-07: SBIN legacy last bar 2026-02-26 vs
+    2026-08-06 by-ik). Reading legacy first would serve a ~5-month-stale chart."""
+    from autotrader.web.dashboard_api import _gcs_candles_1d
+    rows = _gcs_candles_1d(_c_for_order_test(), "SBIN", "2026-01-01", "2026-08-06")
+    assert [r["time"] for r in rows][-1] == "2026-08-06"      # fresh ik file won
+    assert "2026-02-26" not in [r["time"] for r in rows]      # frozen legacy NOT used
+    # if the ik lookup fails, it still degrades to legacy rather than returning nothing
+    class _Broken(_c_for_order_test().__class__):
+        class state:  # type: ignore[misc]
+            @staticmethod
+            def get_universe_row(sym): raise RuntimeError("firestore down")
+    got = _gcs_candles_1d(_Broken(), "SBIN", "2026-01-01", "2026-08-06")
+    assert [r["time"] for r in got] == ["2026-02-26"]         # graceful legacy fallback
+
+
+def _c_for_order_test():
+    """Container stub: fresh instrument-key file + FROZEN legacy by-symbol file."""
+    class _GCS:
+        @staticmethod
+        def score_cache_1d_path_by_instrument_key(ik, exch, seg):
+            return f"cache/score_1d_by_instrument/{exch}/{seg}/{ik.replace('|', '_')}.json"
+
+        def read_candles(self, path):
+            if path == "cache/score_1d_by_instrument/NSE/CASH/NSE_EQ_INE062A01020.json":
+                return [["2026-08-06T00:00:00+05:30", 30.0, 31.0, 29.0, 30.5, 3000.0]]
+            if path == "cache/score_1d/NSE/CASH/SBIN.json":
+                return [["2026-02-26T00:00:00+05:30", 1.0, 1.0, 1.0, 1.0, 1.0]]
+            return []
+
+    class _State:
+        @staticmethod
+        def get_universe_row(sym):
+            return {"instrument_key": "NSE_EQ|INE062A01020", "exchange": "NSE", "segment": "CASH"}
+
+    class _C:
+        gcs = _GCS()
+        state = _State()
+    return _C()
