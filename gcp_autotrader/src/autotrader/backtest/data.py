@@ -18,11 +18,18 @@ store the live system reads from at scan time:
 The backtester never falls through to live Upstox fetch — historical runs
 must be reproducible.
 
-Data windows (verified 2026-05-05):
+Data windows (verified 2026-05-05; candles_1d re-verified 2026-08-07):
     GCS score_1d         : 2000-02-22 → today (full)
     GCS candles/5m       : ~2025-12-04 → today (last ~5 months, rolling)
     GCS candles/15m      : ~2026-04-02 → today
-    BQ candles_1d        : 2016-04-27 → 2026-04-30 (incomplete coverage)
+    BQ candles_1d        : 2016-04-27 → ~2026-04, then COLD. Do NOT trust for recent dates.
+                           Root-caused 2026-08-07: `universe_service._bq_write_candles_1d` is
+                           only called inside the `if api:` branches of prefetch_score_cache_batch,
+                           so once the GCS score cache went warm the daily job stopped fetching
+                           and therefore stopped writing (~1-2 stray symbols/day; liquid names
+                           like SBIN/RELIANCE/LUPIN absent entirely). For recent daily bars use
+                           GCS score_1d (full + fresh) or BQ nse_delivery_daily (~2,400
+                           symbols/session, has close_price).
     BQ candles_5m        : 2026-01-30 → 2026-04-30 (incomplete coverage)
     BQ scan_decisions    : 2026-04-10 → 2026-05-04 (90-day TTL)
     BQ market_brain      : 2026-04-02 → 2026-05-04
