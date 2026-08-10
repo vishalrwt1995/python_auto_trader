@@ -9,6 +9,17 @@ from typing import Any
 from autotrader.time_utils import now_utc, today_ist
 
 
+# ── Data-quality exclusion (2026-08-07) ───────────────────────────────────────
+# Positions tagged `data_quality="INVALID"` are NOT strategy outcomes and must never
+# reach any P&L / win-rate / drawdown aggregate. Tagged set (62 docs): the EOD-squareoff
+# bug that force-closed buy-and-hold channels the same session (core 30 + delivery 4),
+# CORE's commissioning reset churn (27, pnl=0), and one manual-cleanup artifact.
+# Tagging is add-only in Firestore, so the rows remain fully auditable.
+def _is_invalid(row: dict[str, Any]) -> bool:
+    """True when a position doc is tagged as invalid/corrupt data (exclude from stats)."""
+    return str((row or {}).get("data_quality", "") or "").strip().upper() == "INVALID"
+
+
 @dataclass
 class LockLease:
     name: str
@@ -222,6 +233,8 @@ class FirestoreStateStore:
                 row = d.to_dict() or {}
                 if str(row.get("status", "")).upper() != "CLOSED":
                     continue
+                if _is_invalid(row):          # tagged corrupt/artifact -> excluded
+                    continue
                 exit_ts = str(row.get("exit_ts", "") or "")
                 if not exit_ts:
                     continue
@@ -287,6 +300,8 @@ class FirestoreStateStore:
                 row = d.to_dict() or {}
                 if str(row.get("status", "")).upper() != "CLOSED":
                     continue
+                if _is_invalid(row):          # tagged corrupt/artifact -> excluded
+                    continue
                 exit_ts = str(row.get("exit_ts", "") or "")
                 if not exit_ts.startswith(today):
                     continue
@@ -311,6 +326,8 @@ class FirestoreStateStore:
             for d in self._db().collection("positions").stream():
                 row = d.to_dict() or {}
                 if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                if _is_invalid(row):          # tagged corrupt/artifact -> excluded
                     continue
                 exit_ts = str(row.get("exit_ts", "") or "")
                 if not exit_ts.startswith(today):
@@ -347,6 +364,8 @@ class FirestoreStateStore:
                 row = d.to_dict() or {}
                 if str(row.get("status", "")).upper() != "CLOSED":
                     continue
+                if _is_invalid(row):          # tagged corrupt/artifact -> excluded
+                    continue
                 exit_ts = str(row.get("exit_ts", "") or "")
                 if not exit_ts:
                     continue
@@ -377,6 +396,8 @@ class FirestoreStateStore:
         for d in self._db().collection("positions").stream():
             row = d.to_dict() or {}
             if str(row.get("status", "")).upper() != "CLOSED":
+                continue
+            if _is_invalid(row):          # tagged corrupt/artifact -> excluded
                 continue
             ch = str(row.get("channel") or "").strip().lower()
             if not ch:
@@ -410,6 +431,8 @@ class FirestoreStateStore:
             for d in self._db().collection("positions").stream():
                 row = d.to_dict() or {}
                 if str(row.get("status", "")).upper() != "CLOSED":
+                    continue
+                if _is_invalid(row):          # tagged corrupt/artifact -> excluded
                     continue
                 if cutoff:
                     ent = str(row.get("entry_ts", "") or "")[:10]

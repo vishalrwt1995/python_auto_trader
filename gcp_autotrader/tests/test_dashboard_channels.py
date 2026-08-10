@@ -257,3 +257,63 @@ def test_realized_stats_entry_based_filter_excludes_old_positions_closing_late()
     alltime = st.get_realized_stats_by_channel()                 # no filter = everything
     assert alltime["core"]["closed"] == 1
     assert alltime["delivery"]["closed"] == 4                    # incl. old + undated
+
+
+# ── data-quality exclusion (tagged 2026-08-07) ────────────────────────────────
+def test_is_invalid_helper_matches_only_tagged_rows():
+    from autotrader.adapters.firestore_state import _is_invalid
+    assert _is_invalid({"data_quality": "INVALID"}) is True
+    assert _is_invalid({"data_quality": "invalid"}) is True      # case-insensitive
+    assert _is_invalid({"data_quality": " INVALID "}) is True    # whitespace-tolerant
+    assert _is_invalid({}) is False                              # untagged = valid
+    assert _is_invalid({"data_quality": None}) is False          # fail-open on null
+    assert _is_invalid({"data_quality": ""}) is False
+    assert _is_invalid(None) is False                            # never raises
+
+
+def test_realized_stats_excludes_data_quality_invalid():
+    """Tagged rows (EOD-squareoff bug / commissioning artifacts) must not reach any
+    P&L or win-rate aggregate, even when they fall inside the requested window."""
+    from autotrader.adapters.firestore_state import FirestoreStateStore
+    rows = [
+        # tagged bug exit: real pnl, but must be ignored
+        {"status": "CLOSED", "channel": "delivery", "entry_ts": "2026-07-15T14:30:00+05:30",
+         "exit_ts": "2026-07-15T15:20:00+05:30", "net_pnl": -1162.87,
+         "data_quality": "INVALID", "invalid_reason": "EOD_SQUAREOFF_BUG"},
+        # tagged commissioning artifact
+        {"status": "CLOSED", "channel": "core", "entry_ts": "2026-06-21T09:20:00+05:30",
+         "exit_ts": "2026-06-22T15:20:00+05:30", "net_pnl": 0.0,
+         "data_quality": "INVALID", "invalid_reason": "CORE_COMMISSIONING_RESET"},
+        # genuine trade -> counts
+        {"status": "CLOSED", "channel": "delivery", "entry_ts": "2026-07-20T09:30:00+05:30",
+         "exit_ts": "2026-07-24T15:20:00+05:30", "net_pnl": -2491.0},
+    ]
+
+    class _Doc:
+        def __init__(self, d): self._d = d
+        def to_dict(self): return self._d
+
+    class _Coll:
+        def stream(self): return [_Doc(r) for r in rows]
+
+    class _DB:
+        def collection(self, name): return _Coll()
+
+    st = FirestoreStateStore.__new__(FirestoreStateStore)
+    st._db = lambda: _DB()                                   # type: ignore[method-assign]
+
+    out = st.get_realized_stats_by_channel()
+    assert "core" not in out                                 # only had a tagged row
+    assert out["delivery"]["closed"] == 1                    # the tagged bug exit dropped
+    assert out["delivery"]["realized"] == -2491.0
+    assert out["delivery"]["wins"] == 0
+    # today's per-channel P&L must also skip tagged rows
+    today = st.get_today_realized_pnl_by_channel("2026-07-15")
+    assert today.get("delivery", 0.0) == 0.0                 # the only 07-15 exit was tagged
+
+
+def test_bq_valid_trade_guard_is_null_safe():
+    """SQL `!=` drops NULLs, so the guard must use IFNULL or every untagged row
+    (121 of 155 in prod) would silently vanish from the dashboard."""
+    from autotrader.web.dashboard_api import _BQ_VALID_TRADE
+    assert "IFNULL" in _BQ_VALID_TRADE and "'INVALID'" in _BQ_VALID_TRADE

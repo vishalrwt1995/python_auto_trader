@@ -161,6 +161,7 @@ def get_trades_summary(
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
         WHERE trade_date BETWEEN '{fd}' AND '{td}'
           AND exit_reason != 'EOD_CLOSE_NO_QUOTE'
+          AND {_BQ_VALID_TRADE}
     """
     try:
         rows = c.bq.query(q)
@@ -208,6 +209,7 @@ def get_trades_equity_curve(
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
         WHERE trade_date BETWEEN '{fd}' AND '{td}'
           AND exit_reason != 'EOD_CLOSE_NO_QUOTE'
+          AND {_BQ_VALID_TRADE}
         GROUP BY trade_date
         ORDER BY trade_date
     """
@@ -251,7 +253,7 @@ def get_trades_list(
     q = f"""
         SELECT *
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
-        WHERE {where}
+        WHERE {where} AND {_BQ_VALID_TRADE}
         ORDER BY trade_date DESC, entry_ts DESC
         LIMIT {limit} OFFSET {offset}
     """
@@ -434,7 +436,7 @@ def get_pead_summary(
         q = (f"SELECT COUNT(*) n, COALESCE(SUM(pnl),0) total_pnl, "
              f"COUNTIF(pnl>0) wins, COUNTIF(pnl<0) losses "
              f"FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades` "
-             f"WHERE strategy='PEAD'")
+             f"WHERE strategy='PEAD' AND {_BQ_VALID_TRADE}")
         r = next(iter(c.bq.query(q)), None)
         if r:
             out["closed_trades"] = int(r.get("n") or 0)
@@ -565,6 +567,12 @@ def build_channel_overview(
 
 # Cache: {symbol: [latest_close, prev_close]} newest-first (up to 2). ONE BQ query feeds
 # BOTH the unrealized mark (latest close vs entry) and today's MTM move (latest − prev).
+# BQ trades exclusion (2026-08-07): rows tagged data_quality='INVALID' are the
+# EOD-squareoff bug exits (core 30 + delivery 4) — never strategy outcomes, so they must
+# not reach any P&L/win-rate aggregate. NULL-safe via IFNULL (SQL `!=` drops NULLs).
+_BQ_VALID_TRADE = "IFNULL(data_quality,'') != 'INVALID'"
+
+
 _MARK_CACHE: dict[str, Any] = {"ts": 0.0, "recent": {}}
 
 
@@ -1676,6 +1684,7 @@ def get_symbol_detail(
             SELECT *
             FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
             WHERE UPPER(symbol) = '{sym}' AND trade_date BETWEEN '{from_d}' AND '{today}'
+            AND {_BQ_VALID_TRADE}
             ORDER BY trade_date DESC, entry_ts DESC
             LIMIT 50
         """
