@@ -381,3 +381,27 @@ def test_pre_change_retired_logic_is_excluded_like_any_invalid_tag():
     assert set(out) == {"core", "delivery"}
     assert round(sum(v["realized"] for v in out.values()), 2) == -3861.21
     assert sum(v["closed"] for v in out.values()) == 2
+
+
+def test_trades_queries_project_canonical_net_pnl():
+    """Durable fix for the gross/net split (2026-08-10). The backend used to hand out BOTH
+    `pnl` (gross) and `net_pnl`, letting each frontend site pick — so the journal's stat
+    tiles showed net while its own table rows showed gross for the same trade. Both
+    trades-table SELECTs now REPLACE `pnl`/`pnl_pct` with the net values at the source, so
+    no consumer can pick wrong; the pre-cost figures survive as gross_pnl/gross_pnl_pct.
+    Verified on live BQ: JSWCEMENT pnl=-2491.25 (net) / gross_pnl=-2334.15."""
+    import re
+    src = open("src/autotrader/web/dashboard_api.py").read()
+    # every SELECT * against the trades table must carry the REPLACE projection
+    star_on_trades = [
+        m for m in re.finditer(r"SELECT \*(.{0,400}?)\.trades`", src, re.S)
+    ]
+    assert star_on_trades, "expected at least one SELECT * on trades"
+    for m in star_on_trades:
+        blk = m.group(0)
+        assert "REPLACE(" in blk, f"unguarded SELECT * on trades: {blk[:80]!r}"
+        assert "IFNULL(net_pnl, pnl) AS pnl" in blk
+        assert "IFNULL(net_pnl_pct, pnl_pct) AS pnl_pct" in blk
+        assert "pnl AS gross_pnl" in blk          # pre-cost figure preserved
+    # and the aggregate queries stay net too
+    assert src.count("IFNULL(net_pnl, pnl)") >= 3

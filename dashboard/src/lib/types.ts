@@ -443,6 +443,10 @@ export interface Trade {
   brokerage?: number;
   net_pnl?: number;
   net_pnl_pct?: number;
+  // `pnl` / `pnl_pct` are NET of costs (backend projects IFNULL(net_pnl, pnl));
+  // these carry the pre-cost figures for reference. See dashboard_api /trades/list.
+  gross_pnl?: number;
+  gross_pnl_pct?: number;
 }
 
 /* ── Audit Log ── */

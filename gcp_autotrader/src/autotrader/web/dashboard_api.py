@@ -260,7 +260,10 @@ def get_trades_list(
         where += f" AND UPPER(symbol) = '{symbol_safe.upper()}'"
 
     q = f"""
-        SELECT *
+        SELECT * REPLACE(
+            IFNULL(net_pnl, pnl) AS pnl,              -- canonical `pnl` is NET of costs
+            IFNULL(net_pnl_pct, pnl_pct) AS pnl_pct
+        ), pnl AS gross_pnl, pnl_pct AS gross_pnl_pct
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
         WHERE {where} AND {_BQ_VALID_TRADE}
         ORDER BY trade_date DESC, entry_ts DESC
@@ -1710,7 +1713,10 @@ def get_symbol_detail(
     recent_trades: list[dict] = []
     try:
         q = f"""
-            SELECT *
+            SELECT * REPLACE(
+                IFNULL(net_pnl, pnl) AS pnl,              -- canonical `pnl` is NET of costs
+                IFNULL(net_pnl_pct, pnl_pct) AS pnl_pct
+            ), pnl AS gross_pnl, pnl_pct AS gross_pnl_pct
             FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
             WHERE UPPER(symbol) = '{sym}' AND trade_date BETWEEN '{from_d}' AND '{today}'
             AND {_BQ_VALID_TRADE}
