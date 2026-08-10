@@ -339,3 +339,45 @@ def test_cards_lead_with_all_time_and_carry_forward_epoch_secondary():
     b = build_channel_overview(["swing"], positions, {}, {}, _cap, _maxp, 0.03, 0.06,
                                realized_by_channel=alltime)
     assert b["channels"][0]["fwd_realized_pnl"] == 0.0
+
+
+def test_pre_change_retired_logic_is_excluded_like_any_invalid_tag():
+    """swing/intraday trades under the retired config are tagged
+    invalid_reason='PRE_CHANGE_RETIRED_LOGIC' (real fills, superseded logic) — a DISTINCT
+    reason from the data-bug tags so they stay forensically separable, but excluded from
+    aggregates identically. 122 rows tagged 2026-08-10."""
+    from autotrader.adapters.firestore_state import FirestoreStateStore, _is_invalid
+    # the helper keys on data_quality only — reason is metadata, never a second gate
+    assert _is_invalid({"data_quality": "INVALID",
+                        "invalid_reason": "PRE_CHANGE_RETIRED_LOGIC"}) is True
+    rows = [
+        {"status": "CLOSED", "channel": "swing", "entry_ts": "2026-06-24T09:20:00+05:30",
+         "net_pnl": -6617.51, "data_quality": "INVALID",
+         "invalid_reason": "PRE_CHANGE_RETIRED_LOGIC"},
+        {"status": "CLOSED", "channel": "intraday", "entry_ts": "2026-07-03T09:20:00+05:30",
+         "net_pnl": -1641.98, "data_quality": "INVALID",
+         "invalid_reason": "PRE_CHANGE_RETIRED_LOGIC"},
+        # survivors: core CORE_DROP + delivery SL_HIT (the real post-cleanup record)
+        {"status": "CLOSED", "channel": "core", "entry_ts": "2026-06-23T09:20:00+05:30",
+         "net_pnl": -1369.96},
+        {"status": "CLOSED", "channel": "delivery", "entry_ts": "2026-07-20T09:30:00+05:30",
+         "net_pnl": -2491.25},
+    ]
+
+    class _Doc:
+        def __init__(self, d): self._d = d
+        def to_dict(self): return self._d
+
+    class _Coll:
+        def stream(self): return [_Doc(r) for r in rows]
+
+    class _DB:
+        def collection(self, name): return _Coll()
+
+    st = FirestoreStateStore.__new__(FirestoreStateStore)
+    st._db = lambda: _DB()                                   # type: ignore[method-assign]
+    out = st.get_realized_stats_by_channel()
+    assert "swing" not in out and "intraday" not in out      # retired logic gone
+    assert set(out) == {"core", "delivery"}
+    assert round(sum(v["realized"] for v in out.values()), 2) == -3861.21
+    assert sum(v["closed"] for v in out.values()) == 2
