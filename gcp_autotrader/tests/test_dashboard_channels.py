@@ -317,3 +317,25 @@ def test_bq_valid_trade_guard_is_null_safe():
     (121 of 155 in prod) would silently vanish from the dashboard."""
     from autotrader.web.dashboard_api import _BQ_VALID_TRADE
     assert "IFNULL" in _BQ_VALID_TRADE and "'INVALID'" in _BQ_VALID_TRADE
+
+
+def test_cards_lead_with_all_time_and_carry_forward_epoch_secondary():
+    """Regression for the 2026-08-10 mistake: the epoch was briefly the PRIMARY card
+    number, which blanked every card to ₹0/0 trades and hid the whole trade history.
+    All-time clean must lead; the epoch rides along as fwd_*."""
+    positions = [{"channel": "swing", "symbol": "X", "entry_price": 100.0, "qty": 10}]
+    alltime = {"swing": {"realized": -6618.0, "closed": 22, "wins": 8}}
+    fwd = {"swing": {"realized": 0.0, "closed": 0, "wins": 0}}     # nothing closed in epoch
+    out = build_channel_overview(["swing"], positions, {}, {}, _cap, _maxp, 0.03, 0.06,
+                                 realized_by_channel=alltime, forward_by_channel=fwd)
+    r = out["channels"][0]
+    assert r["realized_pnl"] == -6618.0 and r["closed_trades"] == 22   # history VISIBLE
+    assert r["win_rate"] == 36.4
+    assert r["fwd_realized_pnl"] == 0.0 and r["fwd_closed_trades"] == 0
+    assert out["totals"]["realized_pnl"] == -6618.0
+    assert out["totals"]["fwd_realized_pnl"] == 0.0
+    assert out["totals"]["fwd_closed_trades"] == 0
+    # omitting forward_by_channel must not break anything (back-compat)
+    b = build_channel_overview(["swing"], positions, {}, {}, _cap, _maxp, 0.03, 0.06,
+                               realized_by_channel=alltime)
+    assert b["channels"][0]["fwd_realized_pnl"] == 0.0

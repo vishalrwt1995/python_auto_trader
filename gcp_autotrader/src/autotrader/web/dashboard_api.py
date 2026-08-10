@@ -479,6 +479,7 @@ def build_channel_overview(
     realized_by_channel: Any = None,
     unrealized_by_channel: Any = None,
     daily_move_by_channel: Any = None,
+    forward_by_channel: Any = None,
 ) -> dict[str, Any]:
     """PURE per-channel rollup (no I/O — unit-tested). For each channel: capital,
     enabled, open-position count + symbols, today's realized P&L, open R-at-risk,
@@ -488,16 +489,24 @@ def build_channel_overview(
     close — the meaningful daily P&L for a hold book where realized-from-exits is ~0 on
     non-exit days). `realized_by_channel` maps ch -> {realized, closed, wins};
     `unrealized_by_channel` / `daily_move_by_channel` map ch -> ₹ (all optional — omitted
-    → 0). Unfunded channels (capital 0) are `enabled=False` and never trip the breaker."""
+    → 0). Unfunded channels (capital 0) are `enabled=False` and never trip the breaker.
+
+    `realized_by_channel` is the ALL-TIME clean record (invalid-tagged rows already
+    excluded upstream) — it is what the cards lead with. `forward_by_channel` carries the
+    same shape restricted to the forward-test epoch and is surfaced as the secondary
+    `fwd_*` fields. Rationale (2026-08-10): making the epoch the primary number blanked
+    every card to ₹0/0 trades, hiding the whole trade history for no gain."""
     grouped: dict[str, list] = {}
     for p in positions or []:
         grouped.setdefault(_position_channel(p), []).append(p)
     realized_by_channel = realized_by_channel or {}
     unrealized_by_channel = unrealized_by_channel or {}
     daily_move_by_channel = daily_move_by_channel or {}
+    forward_by_channel = forward_by_channel or {}
     rows: list[dict[str, Any]] = []
     tot_cap = tot_pnl = tot_risk = tot_real = tot_unreal = tot_openval = tot_move = 0.0
-    tot_open = tot_closed = 0
+    tot_fwd_real = 0.0
+    tot_open = tot_closed = tot_fwd_closed = 0
     for ch in channels:
         cap = float(capital_of(ch) or 0.0)
         pnl = round(float((pnl_by_channel or {}).get(ch, 0.0)), 2)
@@ -510,6 +519,9 @@ def build_channel_overview(
         win_rate = round(100.0 * wins / closed, 1) if closed else None
         unreal = round(float(unrealized_by_channel.get(ch, 0.0)), 2)
         today_move = round(float(daily_move_by_channel.get(ch, 0.0)), 2)
+        fstat = forward_by_channel.get(ch, {}) or {}
+        fwd_real = round(float(fstat.get("realized", 0.0)), 2)
+        fwd_closed = int(fstat.get("closed", 0) or 0)
         open_value = round(sum(float(p.get("entry_price") or 0) * float(p.get("qty") or 0) for p in poss), 2)
         overall = round(realized + unreal, 2)
         loss_limit = round(-abs(daily_loss_pct) * cap, 2)
@@ -529,6 +541,8 @@ def build_channel_overview(
             "overall_pnl": overall,
             "closed_trades": closed,
             "win_rate": win_rate,
+            "fwd_realized_pnl": fwd_real,     # forward-test epoch only (secondary line)
+            "fwd_closed_trades": fwd_closed,
             "open_value": open_value,
             "open_risk": risk,
             "max_positions": max_positions_of(ch),
@@ -548,6 +562,8 @@ def build_channel_overview(
         tot_move += today_move
         tot_open += len(poss)
         tot_closed += closed
+        tot_fwd_real += fwd_real
+        tot_fwd_closed += fwd_closed
     return {
         "channels": rows,
         "totals": {
@@ -560,6 +576,8 @@ def build_channel_overview(
             "open_value": round(tot_openval, 2),
             "open_positions": tot_open,
             "closed_trades": tot_closed,
+            "fwd_realized_pnl": round(tot_fwd_real, 2),
+            "fwd_closed_trades": tot_fwd_closed,
             "open_risk": round(tot_risk, 2),
         },
     }
@@ -703,28 +721,30 @@ def get_channels_overview(
         capital_of=s.channel_capital,
         max_positions_of=lambda ch: max_pos.get(ch),
         daily_loss_pct=s.daily_loss_pct, daily_profit_pct=s.daily_profit_pct,
-        realized_by_channel=realized_by, unrealized_by_channel=unrealized_by,
-        daily_move_by_channel=move_by,
+        realized_by_channel=alltime_by, unrealized_by_channel=unrealized_by,
+        daily_move_by_channel=move_by, forward_by_channel=realized_by,
     )
     out["asof"] = today
-    # Forward-test epoch context: `realized_pnl`/`overall_pnl` above are the REVAMPED
-    # system's own record (entries >= forward_test_start). All-time is reported alongside
-    # so the pre-revamp history is visible, never silently dropped.
-    at_real = round(sum(float((v or {}).get("realized", 0.0)) for v in alltime_by.values()), 2)
-    at_closed = int(sum(int((v or {}).get("closed", 0)) for v in alltime_by.values()))
-    fw_closed = int(out["totals"].get("closed_trades", 0) or 0)
+    # PRIMARY on the cards = the ALL-TIME clean record (`realized_pnl` / `overall_pnl` /
+    # `closed_trades`); the forward-test epoch rides along as `fwd_*` + this block.
+    # (2026-08-10: the epoch was briefly primary, which blanked every card to ₹0/0 trades
+    # and hid the whole trade history — corrected.)
+    at_real = round(float(out["totals"].get("realized_pnl", 0.0)), 2)
+    at_closed = int(out["totals"].get("closed_trades", 0) or 0)
+    fw_closed = int(out["totals"].get("fwd_closed_trades", 0) or 0)
+    fw_real = round(float(out["totals"].get("fwd_realized_pnl", 0.0)), 2)
     out["forward_test"] = {
         "start": fwd_start,
         "basis": "entry_ts >= start (entry-based, so pre-cutoff positions closing inside "
                  "the window are excluded)",
-        "realized_pnl": out["totals"].get("realized_pnl", 0.0),
+        "realized_pnl": fw_real,
         "closed_trades": fw_closed,
         "open_positions_in_epoch": sum(
             1 for p in (positions or [])
             if fwd_start and str(p.get("entry_ts", "") or "")[:10] >= fwd_start),
         "all_time_realized_pnl": at_real,
         "all_time_closed_trades": at_closed,
-        "pre_epoch_realized_pnl": round(at_real - float(out["totals"].get("realized_pnl", 0.0)), 2),
+        "pre_epoch_realized_pnl": round(at_real - fw_real, 2),
         "pre_epoch_closed_trades": at_closed - fw_closed,
     }
     return out

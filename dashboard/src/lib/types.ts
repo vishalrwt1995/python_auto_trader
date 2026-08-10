@@ -23,6 +23,8 @@ export interface ChannelOverviewRow {
   overall_pnl: number;
   closed_trades: number;
   win_rate: number | null;
+  fwd_realized_pnl: number;      // forward-test epoch only
+  fwd_closed_trades: number;
   open_value: number;
   open_risk: number;
   max_positions: number | null;
@@ -37,6 +39,13 @@ export interface ChannelOverview {
   totals: {
     capital: number; today_pnl: number; today_move: number; realized_pnl: number; unrealized_pnl: number;
     overall_pnl: number; open_value: number; open_positions: number; open_risk: number;
+    closed_trades: number; fwd_realized_pnl: number; fwd_closed_trades: number;
+  };
+  forward_test?: {
+    start: string; basis: string;
+    realized_pnl: number; closed_trades: number; open_positions_in_epoch: number;
+    all_time_realized_pnl: number; all_time_closed_trades: number;
+    pre_epoch_realized_pnl: number; pre_epoch_closed_trades: number;
   };
   asof?: string;
 }

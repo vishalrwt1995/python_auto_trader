@@ -98,7 +98,9 @@ function ChannelCard({ row, expanded, onClick }: {
       </div>
       <div style={{ display: "flex", gap: 14 }}>
         <StatTile label="Trades" value={row.closed_trades > 0 ? String(row.closed_trades) : "—"}
-          sub={row.win_rate != null ? `${row.win_rate}% win` : undefined} />
+          sub={[row.win_rate != null ? `${row.win_rate}% win` : null,
+                `fwd ${signedRupee(row.fwd_realized_pnl)} · ${row.fwd_closed_trades}tr`]
+                .filter(Boolean).join(" · ")} />
         <StatTile label="Risk at stake" value={row.open_risk > 0 ? rupee(row.open_risk) : "—"} />
       </div>
       {row.enabled && row.daily_loss_limit < 0 && (
@@ -276,6 +278,10 @@ export default function ChannelsPage() {
           <StatTile label="Open Positions" value={String(totals.open_positions)}
             sub={totals.open_value > 0 ? `${rupee(totals.open_value)} deployed` : undefined} />
           <StatTile label="Risk at stake" value={rupee(totals.open_risk)} />
+          <StatTile label="Forward test"
+            value={totals.fwd_closed_trades > 0 ? signedRupee(totals.fwd_realized_pnl) : "no closed trades"}
+            color={totals.fwd_closed_trades > 0 ? pnlColor(totals.fwd_realized_pnl) : TXT3}
+            sub={data?.forward_test?.start ? `since ${data.forward_test.start} · ${totals.fwd_closed_trades} tr` : undefined} />
         </div>
       )}
 
