@@ -42,6 +42,12 @@ const REGIME_COLORS: Record<string, string> = {
   RECOVERY: "#3b82f6",
 };
 
+// Product by channel: multi-day books settle as delivery (CNC); only the same-day
+// books are intraday (MIS). Keep in sync with the channel roster in lib/types.ts.
+const CNC_CHANNELS = new Set([
+  "swing", "core", "delivery", "momentum", "insider", "pledge", "pead", "corp_action",
+]);
+
 export default function JournalPage() {
   const [range, setRange] = useState<DateRange>("30d");
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -277,19 +283,24 @@ export default function JournalPage() {
         sortValue: (r) => r.symbol,
         render: (r) => {
           const ch = inferTradeChannel(r);
+          // Product is per-CHANNEL, not "swing vs everything else". Every multi-day
+          // channel is delivery/CNC; only the same-day books are MIS. The old binary
+          // labelled CNC holds (delivery/core/momentum/insider/pledge/pead) as MIS —
+          // JSWCEMENT, a 4-day CNC delivery hold, showed "MIS".
+          const isCnc = CNC_CHANNELS.has(ch);
           return (
             <div className="flex items-center gap-1.5">
               <span className="font-medium">{r.symbol}</span>
               <span
                 className={cn(
                   "text-[9px] font-semibold px-1 py-0.5 rounded",
-                  ch === "swing"
+                  isCnc
                     ? "bg-indigo-500/15 text-indigo-400"
                     : "bg-cyan-500/15 text-cyan-400",
                 )}
-                title={ch === "swing" ? "Swing (CNC)" : "Intraday (MIS)"}
+                title={`${CHANNEL_META[ch]?.label ?? ch} (${isCnc ? "CNC" : "MIS"})`}
               >
-                {ch === "swing" ? "CNC" : "MIS"}
+                {isCnc ? "CNC" : "MIS"}
               </span>
             </div>
           );

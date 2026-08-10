@@ -144,24 +144,33 @@ def get_trades_summary(
     fd = from_date or today
     td = to_date or today
 
+    # P&L is NET of costs (`IFNULL(net_pnl, pnl)`) — gross `pnl` understates every loss by
+    # the round-trip cost and made this page disagree with /channels on the same trade
+    # (JSWCEMENT: gross -2,334.15 vs net -2,491.25, brokerage 157.10). Fallback to `pnl`
+    # covers pre-cost-model rows that have no net_pnl.
+    # biggest_win/biggest_loss are SIGN-GUARDED: a bare MAX(pnl) over a loss-only period
+    # returned the least-bad LOSS as "Best Win" (and the mirror bug for an all-wins period).
     q = f"""
+        WITH t AS (
+            SELECT exit_reason, IFNULL(net_pnl, pnl) AS p
+            FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
+            WHERE trade_date BETWEEN '{fd}' AND '{td}'
+              AND exit_reason != 'EOD_CLOSE_NO_QUOTE'
+              AND {_BQ_VALID_TRADE}
+        )
         SELECT
             COUNT(*) as total_trades,
-            -- Use exit_reason as primary win/loss signal; fall back to pnl sign
-            -- so EOD_CLOSE_NO_QUOTE (pnl=0) rows don't silently inflate win_rate.
-            COUNTIF(exit_reason = 'TARGET_HIT' OR (exit_reason NOT IN ('SL_HIT','EOD_CLOSE_NO_QUOTE') AND pnl > 0)) as wins,
-            COUNTIF(exit_reason = 'SL_HIT' OR (exit_reason NOT IN ('TARGET_HIT','EOD_CLOSE_NO_QUOTE') AND pnl < 0)) as losses,
-            COALESCE(SUM(pnl), 0) as total_pnl,
-            COALESCE(AVG(CASE WHEN exit_reason = 'TARGET_HIT' OR pnl > 0 THEN pnl END), 0) as avg_win,
-            COALESCE(AVG(CASE WHEN exit_reason = 'SL_HIT' OR pnl < 0 THEN pnl END), 0) as avg_loss,
-            COALESCE(MAX(pnl), 0) as biggest_win,
-            COALESCE(MIN(pnl), 0) as biggest_loss,
-            COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) as gross_profit,
-            COALESCE(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0) as gross_loss
-        FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
-        WHERE trade_date BETWEEN '{fd}' AND '{td}'
-          AND exit_reason != 'EOD_CLOSE_NO_QUOTE'
-          AND {_BQ_VALID_TRADE}
+            -- exit_reason stays the primary win/loss signal so pnl=0 rows can't inflate win_rate
+            COUNTIF(exit_reason = 'TARGET_HIT' OR (exit_reason NOT IN ('SL_HIT','EOD_CLOSE_NO_QUOTE') AND p > 0)) as wins,
+            COUNTIF(exit_reason = 'SL_HIT' OR (exit_reason NOT IN ('TARGET_HIT','EOD_CLOSE_NO_QUOTE') AND p < 0)) as losses,
+            COALESCE(SUM(p), 0) as total_pnl,
+            COALESCE(AVG(CASE WHEN p > 0 THEN p END), 0) as avg_win,
+            COALESCE(AVG(CASE WHEN p < 0 THEN p END), 0) as avg_loss,
+            COALESCE(MAX(CASE WHEN p > 0 THEN p END), 0) as biggest_win,
+            COALESCE(MIN(CASE WHEN p < 0 THEN p END), 0) as biggest_loss,
+            COALESCE(SUM(CASE WHEN p > 0 THEN p ELSE 0 END), 0) as gross_profit,
+            COALESCE(ABS(SUM(CASE WHEN p < 0 THEN p ELSE 0 END)), 0) as gross_loss
+        FROM t
     """
     try:
         rows = c.bq.query(q)
@@ -205,7 +214,7 @@ def get_trades_equity_curve(
     fd = from_date or (date.fromisoformat(td) - timedelta(days=90)).isoformat()
 
     q = f"""
-        SELECT trade_date, SUM(pnl) as daily_pnl
+        SELECT trade_date, SUM(IFNULL(net_pnl, pnl)) as daily_pnl   -- NET of costs (see stats note)
         FROM `{c.settings.gcp.project_id}.{c.settings.gcp.bq_dataset}.trades`
         WHERE trade_date BETWEEN '{fd}' AND '{td}'
           AND exit_reason != 'EOD_CLOSE_NO_QUOTE'
