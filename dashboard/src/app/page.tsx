@@ -85,6 +85,11 @@ export default function CommandCenter() {
   const ltpCache = useDashboardStore((s) => s.ltpCache);
 
   const [summary, setSummary] = useState<TradeSummary | null>(null);
+  // Book P&L comes from the SAME server-side source as /channels so the two pages
+  // reconcile by construction. Previously this page summed window-scoped realized
+  // (getTradeSummary) + client-side LTP unrealized, which could never agree with
+  // /channels (all-time realized + BQ-close unrealized).
+  const [overview, setOverview] = useState<ChannelOverview | null>(null);
   const [equityData, setEquityData] = useState<{ date: string; pnl: number }[]>([]);
 
   useEffect(() => {
@@ -94,6 +99,7 @@ export default function CommandCenter() {
   useEffect(() => {
     if (!user) return;
     api.getTradeSummary().then((d) => setSummary(d as unknown as TradeSummary)).catch(() => {});
+    api.getChannelsOverview().then(setOverview).catch(() => {});
     api.getEquityCurve().then((d: any) => setEquityData(d.series ?? [])).catch(() => {});
   }, [user]);
 
@@ -171,7 +177,12 @@ export default function CommandCenter() {
   if (!user) return null;
 
   const marketOpen = isMarketOpen();
-  const todayPnl = (summary?.total_pnl ?? 0) + unrealizedPnl;
+  // Book P&L = all-time clean realized + unrealized, both from /channels/overview.
+  // `unrealizedPnl` (client LTP) is kept for the per-position view only — mixing it in
+  // here is what made this page disagree with /channels during market hours.
+  const bookRealized = overview?.totals.realized_pnl ?? 0;
+  const bookUnrealized = overview?.totals.unrealized_pnl ?? 0;
+  const bookPnl = overview?.totals.overall_pnl ?? bookRealized + bookUnrealized;
 
   const regimeColor = brain ? regimeBorderColor(brain.regime) : "#6b7280";
   const regimeTintColor = brain ? regimeTint(brain.regime) : "transparent";
@@ -257,13 +268,13 @@ export default function CommandCenter() {
         {/* P&L Card — uses PnLCard, add shadow + dynamic border via wrapper */}
         <div
           className="rounded-lg shadow-lg"
-          style={{ borderTop: `3px solid ${todayPnl >= 0 ? "#22c55e" : "#ef4444"}` }}
+          style={{ borderTop: `3px solid ${bookPnl >= 0 ? "#22c55e" : "#ef4444"}` }}
         >
           <PnLCard
-            label="Today's P&L"
-            value={todayPnl}
-            subLabel={openPositions.length > 0 && !ltpAvailable ? "⚠ LTP unavailable" : "Realized"}
-            subValue={openPositions.length > 0 && !ltpAvailable ? "" : formatCurrency(summary?.total_pnl ?? 0)}
+            label="Book P&L"
+            value={bookPnl}
+            subLabel="realized · unrealized"
+            subValue={`${formatCurrency(bookRealized)} · ${formatCurrency(bookUnrealized)}`}
           />
         </div>
 
@@ -563,8 +574,8 @@ function ChannelStrip() {
               <p className="text-[11px] text-text-secondary">{meta.label}</p>
               <p className="text-xs font-mono text-text-primary">
                 {formatCurrency(c.capital)}
-                <span className={`ml-1.5 ${c.today_pnl >= 0 ? "text-profit" : "text-loss"}`}>
-                  {c.today_pnl >= 0 ? "+" : ""}{formatCurrency(c.today_pnl)}
+                <span className={`ml-1.5 ${c.today_move >= 0 ? "text-profit" : "text-loss"}`}>
+                  {c.today_move >= 0 ? "+" : ""}{formatCurrency(c.today_move)}
                 </span>
               </p>
             </div>
