@@ -479,8 +479,13 @@ export default function AnalyticsPage() {
       {/* Key Metrics */}
       {displaySummary && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          {/* REALIZED only — this page analyses CLOSED trades (unrealized has no place in
+              win rate / expectancy / hold-time buckets). `filteredSummary` hardcodes
+              unrealized_pnl: 0 by design. Labelled explicitly so the gap vs the
+              Command Center / Channels "Book P&L" (which adds unrealized) reads as a
+              different measure rather than a contradiction. */}
           <MetricCard
-            label="Total P&L"
+            label="Realized P&L"
             value={formatCurrency(displaySummary.total_pnl)}
             positive={displaySummary.total_pnl >= 0}
             borderColor={displaySummary.total_pnl >= 0 ? "#22c55e" : "#ef4444"}
