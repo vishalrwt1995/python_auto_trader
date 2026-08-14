@@ -330,6 +330,28 @@ class StrategySettings:
             return self.capital_pledge
         return self.capital
 
+    # Explicit per-channel allocation map — reporting only.
+    _CHANNEL_CAPITAL_FIELDS = {
+        "swing": "capital_swing", "intraday": "capital_intraday", "pead": "capital_pead",
+        "gap_fade": "capital_gapfade", "core": "capital_core", "momentum": "capital_momentum",
+        "delivery": "capital_delivery", "insider": "capital_insider", "pledge": "capital_pledge",
+    }
+
+    def channel_capital_allocated(self, channel: str) -> float:
+        """Explicit per-channel allocation; **0 when unfunded**.
+
+        Unlike `channel_capital()`, this does NOT fall back to the shared `capital`
+        pool. That fallback is deliberate for the trading path (single-pool deploys,
+        risk.py sizing, PortfolioBook DD) and must stay — but it makes REPORTING lie:
+        a killed channel with CAPITAL_GAPFADE=0 was inheriting the Rs6L global pool, so
+        the cockpit showed Rs25L allocated instead of the real Rs19L, credited Rs6L to
+        gap_fade, computed breaker limits off phantom capital, and (because `enabled`
+        is `capital > 0`) badged a KILLED channel as ACTIVE. Use this for any display
+        or attribution; use `channel_capital()` for sizing/risk.
+        """
+        f = self._CHANNEL_CAPITAL_FIELDS.get(str(channel or "").strip().lower())
+        return float(getattr(self, f, 0.0) or 0.0) if f else 0.0
+
 
 @dataclass(frozen=True)
 class UpstoxSettings:

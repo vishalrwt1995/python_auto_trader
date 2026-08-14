@@ -405,3 +405,69 @@ def test_trades_queries_project_canonical_net_pnl():
         assert "pnl AS gross_pnl" in blk          # pre-cost figure preserved
     # and the aggregate queries stay net too
     assert src.count("IFNULL(net_pnl, pnl)") >= 3
+
+
+# ── funded-capital + halted status (2026-08-14 cockpit bugs) ──────────────────
+def test_allocated_capital_has_no_global_fallback():
+    """`channel_capital()` fail-opens to the shared pool (single-pool deploys, risk.py,
+    PortfolioBook) — correct for trading, WRONG for reporting: it credited killed
+    gap_fade with the Rs6L global pool, so the cockpit showed Rs25L allocated instead of
+    Rs19L and badged a KILLED channel ACTIVE (since `enabled` is `capital > 0`)."""
+    from autotrader.settings import StrategySettings
+    s = StrategySettings(capital=600000, capital_gapfade=0, capital_swing=500000,
+                         capital_intraday=100000, capital_pead=200000, capital_core=300000,
+                         capital_momentum=200000, capital_delivery=200000,
+                         capital_insider=200000, capital_pledge=200000)
+    assert s.channel_capital("gap_fade") == 600000        # trading fallback UNCHANGED
+    assert s.channel_capital_allocated("gap_fade") == 0.0  # reporting: unfunded
+    assert s.channel_capital_allocated("corp_action") == 0.0   # no field at all
+    assert s.channel_capital_allocated("core") == 300000
+    chs = ["swing", "intraday", "pead", "gap_fade", "core", "momentum",
+           "delivery", "insider", "pledge"]
+    assert sum(s.channel_capital_allocated(c) for c in chs) == 1_900_000   # the real roster
+
+
+def test_halted_channels_flagged_not_active():
+    """intraday (halted 07-09) and gap_fade (killed 07-14) must not read ACTIVE."""
+    from autotrader.web.dashboard_api import _halted_channels
+
+    class _S:
+        watchlist_swing_only = True
+        def channel_capital_allocated(self, ch): return 0.0 if ch == "gap_fade" else 200000.0
+
+    h = _halted_channels(_S())
+    assert "intraday" in h and "WATCHLIST_SWING_ONLY" in h["intraday"]
+    assert "gap_fade" in h and "killed" in h["gap_fade"]
+    # a live channel must NOT be flagged
+    assert "delivery" not in h and "core" not in h
+
+    out = build_channel_overview(["intraday", "gap_fade", "delivery"], [], {}, {},
+                                 lambda c: 0.0 if c == "gap_fade" else 200000.0, _maxp,
+                                 0.03, 0.06, halted_by_channel=h)
+    by = {r["channel"]: r for r in out["channels"]}
+    assert by["intraday"]["halted"] is True and by["intraday"]["halt_reason"]
+    assert by["gap_fade"]["halted"] is True
+    assert by["delivery"]["halted"] is False and by["delivery"]["halt_reason"] is None
+
+
+def test_today_realized_is_net_of_costs():
+    """"realized today" was the last aggregate still summing GROSS pnl, so the cockpit
+    showed TIMKEN at +1,386.72 while the journal showed +1,334.31 net (Rs52.41 = brokerage)."""
+    from autotrader.adapters.firestore_state import FirestoreStateStore
+    rows = [{"status": "CLOSED", "channel": "delivery", "exit_ts": "2026-08-14T09:30:00+05:30",
+             "pnl": 1386.72, "net_pnl": 1334.31}]
+
+    class _Doc:
+        def __init__(self, d): self._d = d
+        def to_dict(self): return self._d
+
+    class _Coll:
+        def stream(self): return [_Doc(r) for r in rows]
+
+    class _DB:
+        def collection(self, name): return _Coll()
+
+    st = FirestoreStateStore.__new__(FirestoreStateStore)
+    st._db = lambda: _DB()                                # type: ignore[method-assign]
+    assert st.get_today_realized_pnl_by_channel("2026-08-14")["delivery"] == 1334.31
+    assert st.get_today_realized_pnl("2026-08-14") == 1334.31

@@ -39,6 +39,10 @@ function StatTile({ label, value, color, sub }: { label: string; value: string; 
 }
 
 function channelStatus(row: ChannelOverviewRow): { text: string; color: string } {
+  // A killed/halted channel must never read ACTIVE. `enabled` is only `capital > 0`,
+  // so it cannot distinguish "funded but switched off" (intraday, halted 07-09) from
+  // live — the backend now sends an explicit `halted` flag for that.
+  if (row.halted) return { text: "HALTED", color: "#f59e0b" };
   if (!row.enabled) return { text: "DORMANT", color: TXT3 };
   if (row.breaker_tripped) {
     return row.breaker_reason === "daily_profit_target_hit"
@@ -255,7 +259,10 @@ export default function ChannelsPage() {
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Layers size={20} style={{ color: "#60a5fa" }} />
         <h1 style={{ fontSize: 20, fontWeight: 800, color: TXT, margin: 0 }}>Channels</h1>
-        <span style={{ fontSize: 12, color: TXT3 }}>5 funded books · paper</span>
+        <span style={{ fontSize: 12, color: TXT3 }}>
+          {/* computed, not hardcoded — "5 funded books" was stale and disagreed with the cards */}
+          {data ? `${data.channels.filter((c) => c.enabled && !c.halted).length} active · ${data.channels.filter((c) => c.halted).length} halted · paper` : "paper"}
+        </span>
         <button onClick={load} title="Refresh" style={{
           marginLeft: "auto", background: "transparent", border: `1px solid ${BORDER}`,
           color: TXT2, borderRadius: 8, padding: "5px 9px", cursor: "pointer",

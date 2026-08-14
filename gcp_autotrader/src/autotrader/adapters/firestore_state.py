@@ -305,7 +305,7 @@ class FirestoreStateStore:
                 exit_ts = str(row.get("exit_ts", "") or "")
                 if not exit_ts.startswith(today):
                     continue
-                total += float(row.get("pnl", 0) or 0)
+                total += float(row.get("net_pnl", row.get("pnl", 0)) or 0)   # NET of costs
         except Exception:
             pass
         return round(total, 2)
@@ -340,7 +340,7 @@ class FirestoreStateStore:
                     ch = "swing" if wlt == "swing" else "intraday"
                 if ch not in out:
                     out[ch] = 0.0
-                out[ch] += float(row.get("pnl", 0) or 0)
+                out[ch] += float(row.get("net_pnl", row.get("pnl", 0)) or 0)   # NET of costs
         except Exception:
             return {"swing": 0.0, "intraday": 0.0}
         return {k: round(v, 2) for k, v in out.items()}
@@ -370,7 +370,7 @@ class FirestoreStateStore:
                 if not exit_ts:
                     continue
                 if exit_ts[:10] >= start_date_iso:
-                    total += float(row.get("pnl", 0) or 0)
+                    total += float(row.get("net_pnl", row.get("pnl", 0)) or 0)   # NET of costs
         except Exception:
             pass
         return round(total, 2)

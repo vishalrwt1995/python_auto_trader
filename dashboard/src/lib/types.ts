@@ -25,6 +25,8 @@ export interface ChannelOverviewRow {
   win_rate: number | null;
   fwd_realized_pnl: number;      // forward-test epoch only
   fwd_closed_trades: number;
+  halted?: boolean;              // intentionally stopped (halted/killed)
+  halt_reason?: string | null;
   open_value: number;
   open_risk: number;
   max_positions: number | null;

@@ -492,6 +492,7 @@ def build_channel_overview(
     unrealized_by_channel: Any = None,
     daily_move_by_channel: Any = None,
     forward_by_channel: Any = None,
+    halted_by_channel: Any = None,
 ) -> dict[str, Any]:
     """PURE per-channel rollup (no I/O — unit-tested). For each channel: capital,
     enabled, open-position count + symbols, today's realized P&L, open R-at-risk,
@@ -515,6 +516,7 @@ def build_channel_overview(
     unrealized_by_channel = unrealized_by_channel or {}
     daily_move_by_channel = daily_move_by_channel or {}
     forward_by_channel = forward_by_channel or {}
+    halted_by_channel = halted_by_channel or {}
     rows: list[dict[str, Any]] = []
     tot_cap = tot_pnl = tot_risk = tot_real = tot_unreal = tot_openval = tot_move = 0.0
     tot_fwd_real = 0.0
@@ -531,6 +533,7 @@ def build_channel_overview(
         win_rate = round(100.0 * wins / closed, 1) if closed else None
         unreal = round(float(unrealized_by_channel.get(ch, 0.0)), 2)
         today_move = round(float(daily_move_by_channel.get(ch, 0.0)), 2)
+        halt = str(halted_by_channel.get(ch, "") or "")   # non-empty => channel is stopped
         fstat = forward_by_channel.get(ch, {}) or {}
         fwd_real = round(float(fstat.get("realized", 0.0)), 2)
         fwd_closed = int(fstat.get("closed", 0) or 0)
@@ -555,6 +558,8 @@ def build_channel_overview(
             "win_rate": win_rate,
             "fwd_realized_pnl": fwd_real,     # forward-test epoch only (secondary line)
             "fwd_closed_trades": fwd_closed,
+            "halted": bool(halt),             # intentionally stopped (halted/killed)
+            "halt_reason": halt or None,
             "open_value": open_value,
             "open_risk": risk,
             "max_positions": max_positions_of(ch),
@@ -676,6 +681,21 @@ def _daily_move_by_channel(c: Any, positions: list[dict[str, Any]]) -> dict[str,
     return {k: round(v, 2) for k, v in out.items()}
 
 
+def _halted_channels(s: Any) -> dict[str, str]:
+    """Channels intentionally stopped, so the cockpit can badge them HALTED instead of
+    ACTIVE. `enabled` alone is `capital > 0`, which cannot express "funded but switched
+    off" (intraday) or "killed" (gap_fade). Derived from live config only — no guessing:
+      * intraday  -> WATCHLIST_SWING_ONLY=true means its scan path is off (halted 07-09)
+      * gap_fade  -> zero allocation == killed (07-14); its scheduler is PAUSED too
+    """
+    out: dict[str, str] = {}
+    if bool(getattr(s, "watchlist_swing_only", False)):
+        out["intraday"] = "halted (WATCHLIST_SWING_ONLY)"
+    if float(s.channel_capital_allocated("gap_fade") or 0) <= 0:
+        out["gap_fade"] = "killed (unfunded)"
+    return out
+
+
 @router.get("/channels/overview")
 def get_channels_overview(
     user: dict[str, Any] = Depends(verify_firebase_token),
@@ -730,11 +750,15 @@ def get_channels_overview(
                "insider": s.insider_max_positions, "pledge": s.pledge_max_positions}
     out = build_channel_overview(
         _CHANNELS, positions, pnl_by, risk_by,
-        capital_of=s.channel_capital,
+        # ALLOCATED capital, not the trading fallback: channel_capital() fail-opens to
+        # the shared pool, which credited killed gap_fade with Rs6L and inflated the
+        # cockpit total to Rs25L vs the real Rs19L (and badged it ACTIVE via capital>0).
+        capital_of=s.channel_capital_allocated,
         max_positions_of=lambda ch: max_pos.get(ch),
         daily_loss_pct=s.daily_loss_pct, daily_profit_pct=s.daily_profit_pct,
         realized_by_channel=alltime_by, unrealized_by_channel=unrealized_by,
         daily_move_by_channel=move_by, forward_by_channel=realized_by,
+        halted_by_channel=_halted_channels(s),
     )
     out["asof"] = today
     # PRIMARY on the cards = the ALL-TIME clean record (`realized_pnl` / `overall_pnl` /
