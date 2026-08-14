@@ -198,7 +198,8 @@ def _candidate_status(sym, planned_syms, entered_syms, held, breaker, macro_ok):
 
 
 def _persist_pledge_watchlist(state, asof, channel_capital, realized_today, candidates,
-                              planned_syms, entered_syms, held, macro_ok, macro_ctx, cfg):
+                              planned_syms, entered_syms, held, macro_ok, macro_ctx, cfg,
+                              revoke_syms: int = 0):
     try:
         loss_limit = -abs(cfg.daily_loss_pct) * channel_capital
         profit_limit = abs(cfg.daily_profit_pct) * channel_capital
@@ -213,8 +214,12 @@ def _persist_pledge_watchlist(state, asof, channel_capital, realized_today, cand
             "reaction_date": c.get("reaction_date", asof),
             "status": _candidate_status(c["symbol"], planned_syms, entered_syms, held, breaker, macro_ok),
         } for c in candidates]
-        payload = {"asof": asof, "channel": "pledge", "macro_gate_ok": macro_ok,
-                   "macro": macro_ctx, "breaker_tripped": breaker, "candidates": len(rows),
+        # ``asof`` here IS the reaction date (the caller passes reaction_target). Both keys are
+        # written because the success path used to omit reaction_date/revoke_symbols entirely,
+        # so days that DID find revokes still rendered as "0 revokes" on the dashboard.
+        payload = {"asof": asof, "reaction_date": asof, "channel": "pledge",
+                   "macro_gate_ok": macro_ok, "macro": macro_ctx, "breaker_tripped": breaker,
+                   "revoke_symbols": int(revoke_syms), "candidates": len(rows),
                    "entered": len(entered_syms), "held_before": len(held), "rows": rows}
         state.set_json("pledge_watchlist", asof, payload, merge=False)
         state.set_json("pledge_watchlist", "latest", payload, merge=False)
@@ -246,12 +251,19 @@ def _persist_pledge_status(state, asof, reaction_date, macro_ok, macro_ctx, revo
 
 
 def run_pledge_scan_once(*, settings, upstox, state, order_service, bq=None,
-                         reaction_date: str | None = None) -> dict[str, Any]:
-    """Live PLEDGE daily scan + entry (PAPER). Fail-closed at every step. Reuses the existing Upstox
-    client, Firestore state, and order_service — no swing/intraday/other-channel path."""
+                         reaction_date: str | None = None,
+                         asof: str | None = None) -> dict[str, Any]:
+    """Live PLEDGE daily scan + entry for ONE reaction date (PAPER). Fail-closed at every step.
+    Reuses the existing Upstox client, Firestore state, and order_service — no swing/intraday/
+    other-channel path.
+
+    ``asof`` is the *scan* day and ``reaction_date`` the disclosure day being settled. They differ
+    when ``run_pledge_scan_catchup`` replays a date the previous scan missed; keeping them separate
+    matters because the daily loss/profit breaker must read TODAY's realised P&L, not the
+    reaction day's. Default preserves the original single-arg behaviour."""
     from autotrader.time_utils import now_ist
     cfg = settings.strategy
-    asof = reaction_date or now_ist().strftime("%Y-%m-%d")
+    asof = asof or reaction_date or now_ist().strftime("%Y-%m-%d")
     channel_capital = cfg.channel_capital("pledge")
     # fail-closed: no-op unless the channel's OWN capital is funded (channel_capital falls back to
     # shared capital for single-pool compat — must not trade on it when CAPITAL_PLEDGE is unset).
@@ -324,10 +336,104 @@ def run_pledge_scan_once(*, settings, upstox, state, order_service, bq=None,
             logger.exception("pledge_place_entry_failed sym=%s", s["symbol"])
 
     _persist_pledge_watchlist(state, reaction_target, channel_capital, realized_today, candidates,
-                              planned_syms, entered_syms, set(open_syms), macro_ok, macro_ctx, cfg)
+                              planned_syms, entered_syms, set(open_syms), macro_ok, macro_ctx, cfg,
+                              revoke_syms=len(revokes))
 
     summary = {"asof": asof, "reaction_date": reaction_target, "macro_gate_ok": macro_ok,
                "macro": macro_ctx, "revoke_symbols": len(revokes), "candidates": len(candidates),
                "planned": len(specs), "entered": len(entered_syms), "open_before": len(open_syms)}
     logger.info("pledge_scan_summary %s", summary)
+    return summary
+
+
+# ---------------------------------------------------------------------------------------------
+# Reaction-date catch-up (2026-08-14). The scheduled scan used to read only MAX(date) and never
+# revisit it, so weekend-dated filings and rows that landed after their own date's scan were lost
+# permanently — 2 of 6 qualifying promoter revokes in 2026-07-20..08-13 (Sat 07-25 RAMCOIND, and
+# 07-31 EMBDL whose row reached BQ after the 08-03 morning scan). See domain/reaction_dates.py.
+# ---------------------------------------------------------------------------------------------
+_SCAN_STATE_COLL = "pledge_scan_state"
+_PROCESSED_KEY = "processed"
+_KEEP_DATES = 40
+
+
+def _completed_reaction_dates(state) -> list[str] | None:
+    """Reaction dates this channel has already settled. ``[]`` when the ledger is simply absent
+    (first run), but ``None`` on a READ FAILURE — and the caller must then do nothing. Treating an
+    unreadable ledger as empty is the one path that could re-enter every date in the window."""
+    try:
+        doc = state.get_json(_SCAN_STATE_COLL, _PROCESSED_KEY)
+        if doc is None:
+            return []
+        return [str(d)[:10] for d in (doc.get("dates") or [])]
+    except Exception:
+        logger.error("pledge_completed_dates_read_failed — skipping catch-up (fail-closed)",
+                     exc_info=True)
+        return None
+
+
+def _mark_reaction_date_done(state, day: str) -> None:
+    """Append ``day`` to the processed ledger, newest ``_KEEP_DATES`` retained."""
+    try:
+        prior = _completed_reaction_dates(state)
+        done = sorted(set(prior or []) | {str(day)[:10]})[-_KEEP_DATES:]
+        state.set_json(_SCAN_STATE_COLL, _PROCESSED_KEY, {"dates": done}, merge=False)
+    except Exception:
+        logger.warning("pledge_mark_date_done_failed day=%s", day, exc_info=True)
+
+
+def run_pledge_scan_catchup(*, settings, upstox, state, order_service, bq=None,
+                            lookback_days: int = 10) -> dict[str, Any]:
+    """Scheduled PLEDGE entry point: settle EVERY reaction date owed today, not just ``MAX(date)``.
+
+    A date is owed on the first trading day after it — precisely where the backtest enters it — so
+    a Saturday filing is settled on Monday and parity holds. Dates whose entry window has already
+    passed are logged as ``pledge_missed_stale`` and deliberately NOT entered: filling them today
+    would use a price the backtest never validated. Fail-closed at every step; each date is settled
+    by the unchanged single-date scan, and only marked done once it completes."""
+    import datetime as _dt
+
+    from autotrader.domain import reaction_dates
+    from autotrader.time_utils import NSE_TRADING_HOLIDAYS, now_ist
+
+    asof = now_ist().strftime("%Y-%m-%d")
+    if bq is None:
+        return {"skipped": "no_bq", "asof": asof}
+    if settings.strategy.capital_pledge <= 0:
+        return {"skipped": "pledge_capital_zero", "asof": asof}
+
+    completed = _completed_reaction_dates(state)
+    if completed is None:
+        return {"skipped": "completed_ledger_unreadable", "asof": asof}
+
+    available = pledge_signal_service.available_reaction_dates(bq, lookback_days)
+    if not available:
+        return {"skipped": "no_insider_data", "asof": asof, "processed": [], "stale": []}
+
+    start = (_dt.date.fromisoformat(asof) - _dt.timedelta(days=lookback_days + 10)).isoformat()
+    trading_days = reaction_dates.trading_days_between(start, asof, NSE_TRADING_HOLIDAYS)
+    to_process, stale = reaction_dates.classify_pending_dates(available, completed, asof, trading_days)
+    if stale:
+        logger.warning("pledge_missed_stale asof=%s dates=%s — entry window passed; NOT entering "
+                       "late (backtest parity)", asof, stale)
+
+    runs: list[dict[str, Any]] = []
+    for day in to_process:
+        try:
+            res = run_pledge_scan_once(settings=settings, upstox=upstox, state=state,
+                                       order_service=order_service, bq=bq,
+                                       reaction_date=day, asof=asof) or {}
+            runs.append(res)
+            if not res.get("skipped"):
+                _mark_reaction_date_done(state, day)
+        except Exception:
+            logger.exception("pledge_catchup_date_failed day=%s — left unmarked for retry", day)
+
+    def _sum(key: str) -> int:
+        return sum(int(r.get(key, 0) or 0) for r in runs)
+
+    summary = {"asof": asof, "processed": to_process, "stale": stale,
+               "revoke_symbols": _sum("revoke_symbols"), "candidates": _sum("candidates"),
+               "planned": _sum("planned"), "entered": _sum("entered"), "runs": runs}
+    logger.info("pledge_catchup_summary %s", {k: v for k, v in summary.items() if k != "runs"})
     return summary

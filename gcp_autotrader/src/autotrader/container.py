@@ -239,14 +239,14 @@ class AppContainer:
         (b200>50 AND Nifty>100DMA), clusters BQ nse_insider_daily disclosures, fetches dailies,
         places CNC entries. No-op unless CAPITAL_INSIDER>0."""
         from autotrader.services import insider_trading_service
-        return insider_trading_service.run_insider_scan_once(
-            settings=self.settings,
-            upstox=self.upstox,
-            state=self.state,
-            order_service=self.order_service(),
-            bq=self.bq,
-            reaction_date=reaction_date,
-        )
+        kw = dict(settings=self.settings, upstox=self.upstox, state=self.state,
+                  order_service=self.order_service(), bq=self.bq)
+        # Explicit date = manual/backfill run, settle exactly that day (unchanged behaviour).
+        # Scheduled run (no date) = catch-up, so weekend-dated filings and late-landing rows are
+        # not skipped forever by a single MAX(date) read.
+        if reaction_date:
+            return insider_trading_service.run_insider_scan_once(reaction_date=reaction_date, **kw)
+        return insider_trading_service.run_insider_scan_catchup(**kw)
 
     def run_insider_ingest(self, asof: str | None = None) -> dict:
         """Fetch the recent NSE SEBI-PIT disclosure window → upsert to BQ nse_insider_daily
@@ -270,14 +270,14 @@ class AppContainer:
         insider — no separate ingest), fetches dailies, applies px>200DMA + turnover>=25cr, places
         CNC entries. No-op unless CAPITAL_PLEDGE>0."""
         from autotrader.services import pledge_trading_service
-        return pledge_trading_service.run_pledge_scan_once(
-            settings=self.settings,
-            upstox=self.upstox,
-            state=self.state,
-            order_service=self.order_service(),
-            bq=self.bq,
-            reaction_date=reaction_date,
-        )
+        kw = dict(settings=self.settings, upstox=self.upstox, state=self.state,
+                  order_service=self.order_service(), bq=self.bq)
+        # Explicit date = manual/backfill run, settle exactly that day (unchanged behaviour).
+        # Scheduled run (no date) = catch-up, so weekend-dated filings and late-landing rows are
+        # not skipped forever by a single MAX(date) read.
+        if reaction_date:
+            return pledge_trading_service.run_pledge_scan_once(reaction_date=reaction_date, **kw)
+        return pledge_trading_service.run_pledge_scan_catchup(**kw)
 
     def corp_action_reconciliation_service(self) -> CorpActionReconciliationService:
         if self._corp_action_reconciliation_service is None:

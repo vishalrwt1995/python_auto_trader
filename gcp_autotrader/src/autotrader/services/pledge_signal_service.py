@@ -129,3 +129,20 @@ def latest_reaction_date(bq) -> str:
     except Exception as exc:
         logger.error("pledge_latest_reaction_date_failed err=%s", exc)
         return ""
+
+
+def available_reaction_dates(bq, lookback_days: int = 10) -> list[str]:
+    """Ascending DISTINCT dissemination days in BQ ``nse_insider_daily`` over the trailing
+    ``lookback_days``. Feeds ``domain.reaction_dates.classify_pending_dates`` so a scan settles
+    EVERY date it still owes rather than only ``MAX(date)`` — a single-date read silently dropped
+    weekend-dated filings and rows that landed after their own date's scan. Fail-closed: ``[]``."""
+    try:
+        rows = bq.query(
+            "SELECT DISTINCT CAST(date AS STRING) AS d "
+            "FROM `grow-profit-machine.autotrader.nse_insider_daily` "
+            f"WHERE date >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL {int(lookback_days)} DAY) "
+            "ORDER BY d")
+        return [str(r.get("d"))[:10] for r in rows if r.get("d")]
+    except Exception as exc:
+        logger.error("pledge_available_reaction_dates_failed err=%s", exc)
+        return []
