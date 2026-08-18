@@ -3,7 +3,7 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last updated:** 2026-08-14 (㉕ **PLEDGE + INSIDER REACTION-DATE COVERAGE LEAK FIXED** — rev `autotrader-00313-2s9`, PR #70, commit `6b3ccf48`, PAPER, single-service (Rule 8 N/A — entry logic). Both event channels read exactly **ONE** reaction date per scan (`latest_reaction_date` = `MAX(date)` on `nse_insider_daily`) and never revisited it, so any date whose rows were not already in BQ at its own scan was lost **permanently**. Live evidence 07-20→08-13: **6 qualifying promoter pledge-revoke legs across 5 dates, 2 never evaluated at all** — Sat **07-25 RAMCOIND** (no run ever read that date; `MAX(date)` had advanced to 07-27) and **07-31 EMBDL** (the 08-03 09:12 scan logged `rows=0`, yet the row is in BQ — the 08-03 19:30 ingest wrote it hours later). The 3 dates that *were* read behaved correctly (07-23 `candidates=1` then closed macro gate; 07-30/08-12 rejected on the validated turnover/200DMA filters) ⇒ **~33% coverage leak, not a blind channel.** Fix = new PURE `domain/reaction_dates.py`: a date is settled **only on the first trading day after it — exactly where the backtest enters it** — so a Saturday filing fills at Monday's validated price and **parity is structural, not conventional**; dates past their window are logged `*_missed_stale` and deliberately dropped. Idempotency ledger (`{pledge,insider}_scan_state/processed`) **fails CLOSED** (unreadable ⇒ scan does nothing, never replays the window); `asof` now decoupled from `reaction_date` so the daily breaker reads TODAY's realised P&L. Manual/backfill path unchanged. Also closed the reporting gap that hid this 3 weeks (success path never wrote `reaction_date`/`revoke_symbols`/`clusters` ⇒ days that DID find signals rendered as 0). **Backtest provably untouched:** `domain/{pledge,insider}_signals.py` byte-unchanged; `plan_pledge_entries`/`plan_insider_entries`/`_candidate_status`/`aggregate_revokes`/`build_clusters` = **0 diff lines**. **Live-verified:** both catchups `processed:['2026-08-13']`, stale 08-04→08-12 NOT entered, ledgers persisted, **0 positions changed**; the stale list contains **Sat 08-08 + Sun 08-09**, independently confirming the feed really carries weekend-dated rows the old reader could never reach. 1131 tests (13 new, 8 written to fail first). Prior ㉔ 2026-08-07: **ETF STOCK-ONLY LEAK FIXED AT THE ROOT** — rev `autotrader-00312-j2t` (+ dashboard `00084-pgl`), commits `bc4ede4`/`70b9f5e`/`cf7a025`/`c8071e6`/`db52361`, PAPER. Swing was sizing-eligible on NSE ETFs: `LIQUIDCASE`+`LIQUIDADD` reached the SIGNAL stage 08-07, stopped only incidentally by the regime gate. Fixed at the single watchlist chokepoint (`universe_service._watchlist_v2_candidates`, feeding BOTH builders) with the shared `delivery_signals.is_etf` — 126 universe ETFs (26 gate-passing) now excluded; live proof: watchlist 2 ETFs -> **0** with rows still 300 (zero capacity loss). ETF coverage now complete across all 8 channels (momentum filter also added; pead+corp_action verified structurally immune). Also repaired the /channels P&L marks, which were silently ₹0 because `candles_1d` stopped populating the traded universe — now marked off `nse_delivery_daily` (48/48 held symbols; unrealized +₹10,405) plus a new Today's-MTM tile. 1105 tests pass. ★ Insider channel's FIRST-EVER paper trade: HEG 08-05 @ ₹679.63x29. ⚠️ OPEN: Upstox WS token expired -> ws-monitor crash-looping (needs re-auth).)
+> **Last updated:** 2026-08-18 (㉖ **★ FIRST FORWARD-TEST CLOSED TRADE + full e2e audit** — no deploy, read-only session; live unchanged at `autotrader-00313-2s9`. **LGEINDIA (delivery) entry 08-14 @₹1,579.88×25 → exit 08-18 @₹1,660.07 = net +₹1,844.09, MFE +2.018R** ⇒ forward test (entry ≥07-27) is **1 closed / +₹1,844.09**, first evidence the post-revamp config produces anything. Profitable `SL_HIT` is correct — `sl_moved=True`, stop trailed to ₹1,671.92 **above** entry ⇒ first live proof of delivery's trail on a winner. **P&L through 08-18:** realized **+₹5,242.92** (11 closed) + unrealized **+₹10,182.95** (57 open, marked @08-14 close) = **+₹13,581.78** on ₹699,505 cost basis (**+1.38%**); **delivery carries 100% of gross realized profit (+₹6,612.88) on ₹2L**, core is **−₹1,369.96 on ₹3L**. **~75% of the total is unrealized paper marks.** **Monday 08-17's reaction-date fix ran UNATTENDED and correctly** — `processed:['2026-08-14']` with **08-13 NOT reprocessed** ⇒ cross-day idempotency held over a weekend; predicted stale-list decay verified (one date ageing out per day, empty ~08-24). **Full e2e audit clean:** autotrader **0 errors**, dashboard 0, ws-monitor 4 disconnect/reconnects (~6s each, not crash-looping), 41 ENABLED / 3 intentionally PAUSED schedulers, brain + watchlist fresh, all ten channels' pipelines exercised daily with every zero explained. **pead verified NOT to have the reaction-date bug** (window-based from the start — a predicted third instance that did not exist); **corp_action reviewed for the first time** (feed alive, 5–12 events/session, all correctly rejected) ⇒ channel review now complete across all ten. ws `keys=50` vs 58 positions resolved as correct dedup (8 symbols shared momentum×core). ⚠️ **TWO NEW §7 OPEN ITEMS: (1) exits price off a PRE-OPEN REST LTP poll — possible parity break affecting every channel, MEASURE before fixing; (2) delivery's freed slot idles ~1 day = 0.6pp, deliberately DEFERRED in favour of the ₹2L→₹5L reallocation (+1.5pp, zero code).** Prior ㉕ 2026-08-14: **PLEDGE + INSIDER REACTION-DATE COVERAGE LEAK FIXED** — rev `autotrader-00313-2s9`, PR #70, commit `6b3ccf48`, PAPER, single-service (Rule 8 N/A — entry logic). Both event channels read exactly **ONE** reaction date per scan (`latest_reaction_date` = `MAX(date)` on `nse_insider_daily`) and never revisited it, so any date whose rows were not already in BQ at its own scan was lost **permanently**. Live evidence 07-20→08-13: **6 qualifying promoter pledge-revoke legs across 5 dates, 2 never evaluated at all** — Sat **07-25 RAMCOIND** (no run ever read that date; `MAX(date)` had advanced to 07-27) and **07-31 EMBDL** (the 08-03 09:12 scan logged `rows=0`, yet the row is in BQ — the 08-03 19:30 ingest wrote it hours later). The 3 dates that *were* read behaved correctly (07-23 `candidates=1` then closed macro gate; 07-30/08-12 rejected on the validated turnover/200DMA filters) ⇒ **~33% coverage leak, not a blind channel.** Fix = new PURE `domain/reaction_dates.py`: a date is settled **only on the first trading day after it — exactly where the backtest enters it** — so a Saturday filing fills at Monday's validated price and **parity is structural, not conventional**; dates past their window are logged `*_missed_stale` and deliberately dropped. Idempotency ledger (`{pledge,insider}_scan_state/processed`) **fails CLOSED** (unreadable ⇒ scan does nothing, never replays the window); `asof` now decoupled from `reaction_date` so the daily breaker reads TODAY's realised P&L. Manual/backfill path unchanged. Also closed the reporting gap that hid this 3 weeks (success path never wrote `reaction_date`/`revoke_symbols`/`clusters` ⇒ days that DID find signals rendered as 0). **Backtest provably untouched:** `domain/{pledge,insider}_signals.py` byte-unchanged; `plan_pledge_entries`/`plan_insider_entries`/`_candidate_status`/`aggregate_revokes`/`build_clusters` = **0 diff lines**. **Live-verified:** both catchups `processed:['2026-08-13']`, stale 08-04→08-12 NOT entered, ledgers persisted, **0 positions changed**; the stale list contains **Sat 08-08 + Sun 08-09**, independently confirming the feed really carries weekend-dated rows the old reader could never reach. 1131 tests (13 new, 8 written to fail first). Prior ㉔ 2026-08-07: **ETF STOCK-ONLY LEAK FIXED AT THE ROOT** — rev `autotrader-00312-j2t` (+ dashboard `00084-pgl`), commits `bc4ede4`/`70b9f5e`/`cf7a025`/`c8071e6`/`db52361`, PAPER. Swing was sizing-eligible on NSE ETFs: `LIQUIDCASE`+`LIQUIDADD` reached the SIGNAL stage 08-07, stopped only incidentally by the regime gate. Fixed at the single watchlist chokepoint (`universe_service._watchlist_v2_candidates`, feeding BOTH builders) with the shared `delivery_signals.is_etf` — 126 universe ETFs (26 gate-passing) now excluded; live proof: watchlist 2 ETFs -> **0** with rows still 300 (zero capacity loss). ETF coverage now complete across all 8 channels (momentum filter also added; pead+corp_action verified structurally immune). Also repaired the /channels P&L marks, which were silently ₹0 because `candles_1d` stopped populating the traded universe — now marked off `nse_delivery_daily` (48/48 held symbols; unrealized +₹10,405) plus a new Today's-MTM tile. 1105 tests pass. ★ Insider channel's FIRST-EVER paper trade: HEG 08-05 @ ₹679.63x29. ⚠️ OPEN: Upstox WS token expired -> ws-monitor crash-looping (needs re-auth).)
 >
 > **If you are a future Claude session reading this:** verify the "Production State" section against live `gcloud` output before asserting current state — drift is possible. Then read the "Recent History" log (newest at top) for context on the last few sessions of work.
 
@@ -247,6 +247,51 @@ Each gate's rejection writes a `blocked_reason` to `scan_decisions`.
 
 These are observed but not yet resolved. Discuss before acting.
 
+### ★ NEW 2026-08-18 — Exits price off a PRE-OPEN REST LTP poll (possible backtest parity break)
+**Affects every channel's exits, so treat as the highest-priority open item.** LGEINDIA (delivery) exited
+2026-08-18 at **09:00:02 IST — 15 minutes before the 09:15 continuous open** — filling ₹1,660.07 against a
+₹1,671.92 trailed stop (₹11.85 *through* it). Traced end to end:
+- **Not** the recon: `delivery_recon_summary {'checked':5,'updated_sl':1,'closed_sl_breach':0}` — it trailed
+  the stop at 08:38 and closed nothing.
+- **Not** the WS tick path either: ws-monitor's `ws_connected` was 09:14:35, *after* the exit.
+- It came from a **periodic REST LTP poll inside ws-monitor** — one
+  `GET /v3/market-quote/ltp?instrument_key=…` per position, ~0.3s apart, ending in `positions_refreshed`.
+  The 09:02:51 cycle logged `count=49` (LGEINDIA already gone), so a ~09:00:00 cycle priced and exited it.
+  That window is NSE's **pre-open auction (09:00–09:08)**.
+
+**Why it matters:** the backtests price stops off DAILY BARS. If prod exits on a pre-open indicative print
+(or worse, a stale previous close), no backtest number describes what prod actually does — the same class of
+divergence the pledge reaction-date fix just removed. Note this exit was *profitable* (+₹1,844.09), so it is
+not visible as a loss; it is a fidelity question, not a P&L complaint.
+
+**The decisive test (cheap, do this first — do NOT fix before measuring):** once 2026-08-18's bhavcopy is in
+`nse_delivery_daily`, compare the ₹1,660.07 exit against 08-18's real OHLC.
+- Inside the day's range → prod filled at a genuinely tradeable price. Record and leave alone.
+- Below the low, or equal to 08-17's close → prod exits at prices the backtest cannot generate = real parity
+  break.
+
+**Fix if confirmed:** gate exit evaluation to market hours (≥09:15). Lives in `ws_monitor` / `exit_fsm.py`
+= the live exit path for all ten channels ⇒ **Rule 8 dual deploy** (`cloudbuild.ws.yaml` build + ws-monitor
+deploy) plus tests. This is the change class that shipped broken twice before; no quick patches.
+
+**Related, same trace (not urgent):** that REST poll is **one HTTP call per position** — 50 positions ≈ 15s of
+continuous Upstox calls per cycle, scaling linearly with the book. Very likely the source of the Upstox 429s
+reviewed 2026-08-14 (cosmetic then: 0.8%, no `/jobs/*` ever throttled). Upstox LTP accepts multiple instrument
+keys per call ⇒ ~50× reduction available. Becomes the first thing to break as the book grows.
+
+### ★ NEW 2026-08-18 — Delivery's freed slot idles ~1 day (quantified; DEFERRED by decision)
+Sequence on 08-18: recon 08:38 trailed LGEINDIA's stop → delivery scan 08:48 saw `open_before=5` and rejected
+**2 live candidates** as full → LGEINDIA exited 09:00. Delivery then ran 4/5 slots all day; the scan is daily
+and does **not** queue rejected candidates.
+- **Cost:** ~60–90 exits/yr × 1 idle day × ⅕ of capital ≈ **5% of capital-days ≈ 0.5–0.6pp of delivery's
+  return (~₹1,200/yr at ₹2L)**.
+- **Not fixable by re-ordering** — recon already runs before the scan; price-driven exits can fire any time.
+- The only real fix (a second afternoon scan) enters at a time the backtest never validated ⇒ parity risk,
+  needs a re-validation grind first.
+- **Decision 2026-08-18: DEFER.** Reallocating delivery ₹2L→₹5L is **+1.5pp** (11.8→13.3%, Calmar 0.85→1.00,
+  6-of-7→7-of-7), needs zero code, and is already backtested — ~2.5× this fix's value and strictly safer. The
+  leak scales with capital, so it earns its fix *after* scaling, not before.
+
 ### A. VWAP_TREND target/SL calibration (high priority)
 Live evidence 2026-05-08: 3/3 closed VWAP_TREND trades hit SL.
 - GAIL VWAP_TREND BUY −₹64.40 / 122 min / SL_HIT (entry 167.80, sl 166.29, tgt 169.31)
@@ -324,6 +369,72 @@ Shipped + ENABLED (§8 ⑰, PR #59, rev `autotrader-00289-ftq` + ws-monitor `000
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### ㉖ 2026-08-18 · ★ FIRST FORWARD-TEST CLOSED TRADE + full e2e audit (no deploy — read-only session)
+No code shipped. Live state unchanged: `autotrader-00313-2s9` · ws-monitor `00048-b9g` · dashboard `00084-pgl`.
+
+**★ THE MILESTONE — the forward test finally has a realized trade.** LGEINDIA (delivery): entry 2026-08-14
+@ ₹1,579.88 × 25 → exit 2026-08-18 09:00 @ ₹1,660.07, **net +₹1,844.09** (gross ₹2,004.75 − ₹160.66 costs),
+MFE **+2.018R** / MAE −0.019R, hold ~4 days. **Forward test (entry ≥ 2026-07-27): 1 closed, +₹1,844.09, 100%
+WR on n=1** — statistically meaningless, but the first evidence the post-revamp config produces anything.
+The profitable `SL_HIT` is correct, not a mislabel: `sl_moved=True` with `sl_price ₹1,671.92` **above** the
+₹1,579.88 entry — the delivery recon trailed the stop after +2R and the trail locked the gain in.
+`breakeven_sl_fired=False`, so this was the daily trail, not the breakeven mechanism. **First live proof of
+delivery's trail on a winner.** (Caveat: the exit itself is under review — see §7 pre-open REST LTP item.)
+
+**P&L through 2026-08-18 (clean data only; 200 INVALID docs excluded).** Realized net, and mark-to-market at
+the 08-14 close (BQ marks, 51MB/₹0.03; all 58 then-open positions marked to the same date, 0 missing):
+
+| channel | closed | realized | open | unrealized @08-14 | cost basis | ret% |
+|---|---|---|---|---|---|---|
+| delivery | 6 | **+₹6,612.88** | 4 | +₹3,788.15 | ₹144,487 | +2.06% |
+| core | 5 | −₹1,369.96 | 30 | +₹5,312.81 | ₹299,864 | +1.77% |
+| insider | 0 | ₹0.00 | 3 | +₹1,367.91 | ₹54,988 | **+2.49%** |
+| momentum | 0 | ₹0.00 | 20 | −₹285.92 | ₹200,166 | −0.14% |
+| swing/pledge/pead/corp | 0 | ₹0.00 | 0 | — | — | — |
+| **TOTAL** | **11** | **+₹5,242.92** | **57** | **+₹10,182.95** | **₹699,505** | **+1.38%** |
+
+**Delivery carries the system** — 100% of gross realized profit, best combined result, and the only channel
+with both real closed wins and documented capacity headroom. It holds ₹2L. **Core is −₹1,370 realized on the
+largest allocation (₹3L)**, positive only via marks. Two other closes since 08-14: SCHAEFFLER −₹1,212.29
+(MAX_HOLD_20D, 08-17), and JSWCEMENT −₹2,491.25 was pre-epoch. **~75% of the +₹13,581 book total is
+unrealized** — paper marks, gross of the ~0.3–0.6% exit cost still to come.
+
+**Monday 08-17: the reaction-date fix ran UNATTENDED and correctly.** `pledge/insider_catchup_summary
+{asof:'2026-08-17', processed:['2026-08-14'], entered:0}` — and **`2026-08-13` was NOT reprocessed**, proving
+**cross-day idempotency** (the one path that could double-enter) held over a weekend with no intervention.
+**The predicted stale-list decay verified:** `['08-07'..'08-12']` on 08-17 → `['08-08'..'08-12']` on 08-18,
+exactly one date ageing out per day as forecast; expect empty ~08-24. If it is not, investigate.
+
+**Full e2e audit — every channel's pipeline exercised daily, every zero has a named validated cause:**
+- `autotrader` **0 errors** (24h and today). `dashboard` **0 errors**. ws-monitor 4/24h = websocket
+  disconnect tracebacks each followed by reconnect in ~6s (`ws_connected` + `ws_subscribed keys=50`) — churn,
+  not crash-looping.
+- Schedulers **41 ENABLED / 3 PAUSED**, all three intentional (2× intraday halted 07-09, gapfade killed 07-14).
+- Brain updating (08-18, "Range · Normal mode"); watchlist refreshing through 11:45 IST.
+- 08-18 scans: `pledge` gate OPEN (b200 62.54) revokes 0 · `insider` gate OPEN clusters 0 · `delivery` rows 36
+  candidates 2 planned 0 (slots full) · `pead` **result_events 773 → eligible 210 → candidates 0**
+  (nifty_dd −0.0775 vs −0.05 gate) · `corp` events 7 → candidates 0.
+- **pead verified NOT to have the reaction-date bug** — it uses `asof = now_ist()` plus
+  `fetch_result_events(lookback_days=5)`, i.e. a window from the start, so it is structurally immune. A
+  predicted third instance of the bug that did not exist; pead is the better-engineered event channel.
+- **corp_action reviewed for the first time** — both schedulers firing, feed returning 5–12 events/session,
+  all correctly rejected by selection. 0 positions ever. Channel review is now complete across all ten.
+- **ws `keys=50` vs 58 open positions resolved as correct dedup**, not unmonitored positions: 58 positions span
+  exactly **50 distinct instruments**, with 8 symbols held by both momentum and core (APOLLOHOSP, AUROPHARMA,
+  BHARATFORG, CUMMINSIND, FEDERALBNK, LAURUSLABS, NYKAA, TORNTPHARM). 0 missing instrument keys.
+
+**Two new open items recorded in §7** (pre-open REST-LTP exit parity — highest priority, measure before
+fixing; and delivery's ~1-day idle slot, quantified 0.6pp and deliberately deferred).
+
+**Also noted:** 16 CLOSED positions carry a blank `wl_type`/`channel` (legacy, pre-epoch) — excluded from
+forward P&L by the `entry_ts ≥ 2026-07-27` filter anyway, but untagged data worth knowing about.
+
+**Method note (third repeat this session, now a standing rule):** every wrong turn came from reading DERIVED
+state instead of the code path's own log — absent Firestore fields read as `revoke_symbols=0`; a nested-map
+`market_brain/latest` read as "empty"; and the session's own date assumed from prod timestamps three days
+stale. **Cloud Run logs are authoritative; Firestore/BQ projections are not.** Corollary already in ㉕: an
+empty result is only evidence once you have confirmed the check could have produced a non-empty one.
 
 ### ㉕ 2026-08-14 · PLEDGE + INSIDER reaction-date coverage leak fixed — autotrader `00313-2s9` (PR #70, commit `6b3ccf48`)
 Single-service deploy (entry/scan logic — **Rule 8 N/A**, ws-monitor untouched at `00048-b9g`). Found while reviewing why pledge had held ₹2L with **zero entries since 07-21**.
