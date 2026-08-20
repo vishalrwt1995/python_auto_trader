@@ -308,6 +308,24 @@ def run_pledge_scan_once(*, settings, upstox, state, order_service, bq=None,
     candidates = pledge_signal_service.scan(
         reaction_target, revokes, candles,
         turnover_min_cr=cfg.pledge_turnover_min_cr, price_min=pledge_signals.PRICE_MIN)
+    # Name what was rejected (2026-08-20) — mirrors insider. MASTERTR (08-12) was dropped on the
+    # Rs25cr turnover floor and nothing recorded it; only the aggregate count survived.
+    if len(candidates) < len(revokes):
+        _kept = {str(c.get("symbol", "")).upper() for c in candidates}
+        for _sym in sorted(revokes):
+            if str(_sym).upper() in _kept:
+                continue
+            _bars = candles.get(_sym) or []
+            logger.info("pledge_revoke_dropped sym=%s n_revokes=%s has_key=%s bars=%d "
+                        "newest_bar=%s target=%s turnover_min_cr=%s price_min=%s",
+                        _sym, (revokes.get(_sym) or {}).get("n_revokes", "?"),
+                        bool(ik_for.get(_sym)), len(_bars),
+                        (str(_bars[-1][0]) if _bars else "-"), reaction_target,
+                        cfg.pledge_turnover_min_cr, pledge_signals.PRICE_MIN)
+    if revokes and not candidates:
+        logger.warning("pledge_candidates_zero revokes=%d candles=%d target=%s — every revoke was "
+                       "dropped downstream; see pledge_revoke_dropped lines for the reason",
+                       len(revokes), len(candles), reaction_target)
     for c in candidates:
         c["instrument_key"] = ik_for.get(c["symbol"], "")
 

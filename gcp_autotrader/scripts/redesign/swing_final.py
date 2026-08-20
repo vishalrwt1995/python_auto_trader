@@ -211,6 +211,20 @@ MAX_HOLD = DEFAULT_MAX_HOLD_DAYS     # = 20 — SWING_MAX_HOLD_DAYS env override
 ACTIVATE_R = DEFAULT_ACTIVATE_R      # = 1.75
 TRAIL_R = DEFAULT_TRAIL_R            # = 1.0
 SLIP = 0.0010                        # paper_entry/exit_slippage_pct (order_service.py:161) — 0.10%/leg adverse
+# --- 2026-08-18 grind knobs (defaults reproduce prod EXACTLY; overridden via CLI like SLIP) ---
+MOM_B200_FLOOR = 70.0                # prod gate (trading_service.py:1614). --mom-b200-floor to sweep.
+MOM_B200_SUSTAIN = 0                 # HYSTERESIS: require b200 >= floor for this many CONSECUTIVE
+#                                      days before a new MOMENTUM entry. 0/1 = off (prod behaviour).
+#                                      Motivated by 2025: all 6 trades entered at b200 71.0-71.1,
+#                                      i.e. AT the gate, and 4 of 6 stopped out — while the 80+
+#                                      bucket averaged +Rs2,126/trade vs +Rs479 for 70-80. Raising the
+#                                      threshold failed the plateau test (85 -> Calmar 0.03), so the
+#                                      hypothesis is that the problem is entering AT the boundary,
+#                                      not the boundary's level.
+_B200_SEQ: list[tuple[str, float]] = []   # (day, b200) for the CURRENT run; self-resets per run
+MOM_TOV_EXCL_REGIMES = ("TREND_UP",)  # cells the turnover dead-zone applies to. Prod = TREND_UP only;
+#                                      the in-code warning says all 3 TU filters sign-flip on RANGE,
+#                                      so broadening this is a RE-VALIDATION test, not a fix.
 ATR_BASE_MULT = 1.5                  # intraday atr_sl_mult; adaptive swing mult built off this (trading_service.py:1226-1234)
 
 # ── Universe gates (BALANCED, from universe_service.py) ──────────────────────
@@ -612,6 +626,12 @@ def run(symdata, regime: dict, market_inputs: dict,
         b200_above = sum(1 for _, s, j, _ in elig if j >= 200 and s.c[j] > s.ema200[j])
         b200_elig = sum(1 for _, s, j, _ in elig if j >= 200)
         b200 = (b200_above * 100.0 / b200_elig) if b200_elig else 0.0
+        # hysteresis bookkeeping: dates are ascending within a run, so a non-increasing date
+        # means a NEW run started -> reset. Written before any gate reads it, so look-backs
+        # only ever see days already processed in this same run (no cross-run leakage).
+        if _B200_SEQ and d <= _B200_SEQ[-1][0]:
+            _B200_SEQ.clear()
+        _B200_SEQ.append((d, b200))
 
         for sym, s, j, _ in elig:
             if j + 1 >= len(s.c):
@@ -667,15 +687,20 @@ def run(symdata, regime: dict, market_inputs: dict,
                         _max_b200 = pb_month_block_maxb200 if pb_month_block_maxb200 is not None else 100.0
                         if b200 < _max_b200:
                             continue
-                if setup == "MOMENTUM" and b200 > 0.0 and b200 < 70.0:
+                if setup == "MOMENTUM" and b200 > 0.0 and b200 < MOM_B200_FLOOR:
                     continue
+                if (setup == "MOMENTUM" and MOM_B200_SUSTAIN > 1 and b200 > 0.0
+                        and not (len(_B200_SEQ) >= MOM_B200_SUSTAIN
+                                 and all(v >= MOM_B200_FLOOR
+                                         for _dd, v in _B200_SEQ[-MOM_B200_SUSTAIN:]))):
+                    continue      # hysteresis: gate must have HELD, not just been crossed today
                 # MOMENTUM filters below are scoped to TREND_UP: they were validated
                 # on TREND_UP trades only (2026-07-02); the RANGE cell showed
                 # sign-flip/no-transfer for all three (Jan, turnover dead-zone,
                 # same-day cap) — do not broaden without re-validation per cell.
                 if setup == "MOMENTUM" and reg == "TREND_UP" and mom_month_block and int(d[5:7]) in mom_month_block:
                     continue          # candidate filter: Jan consistently bad IS+OOS (2026-07-02 grind)
-                if setup == "MOMENTUM" and reg == "TREND_UP" and mom_turnover_exclude:
+                if setup == "MOMENTUM" and reg in MOM_TOV_EXCL_REGIMES and mom_turnover_exclude:
                     _tlo, _thi = mom_turnover_exclude
                     if _tlo <= (s.turnmed60[j] / 1e7) < _thi:
                         continue      # candidate filter: 5-40cr "dead zone" bad IS+OOS (2026-07-02 grind)
@@ -1070,9 +1095,21 @@ def main():
                     help="override per-leg slippage fraction (default 0.0010 = 0.10%%); e.g. 0.003 for liquidity stress")
     ap.add_argument("--liq-cap-pct", type=float, default=None,
                     help="cap position at this %% of trailing 60d daily turnover (prod-replicable liquidity cap), e.g. 1.0")
+    ap.add_argument("--mom-b200-floor", type=float, default=None,
+                    help="MOMENTUM breadth-EMA200 gate (prod=70). e.g. 80 to tighten")
+    ap.add_argument("--mom-tov-excl-regimes", default=None,
+                    help="comma-sep cells the turnover dead-zone applies to (prod=TREND_UP); "
+                         "e.g. TREND_UP,RANGE — RE-VALIDATION test, see in-code warning")
     args = ap.parse_args()
     if getattr(args, 'slippage', None) is not None:
         globals()['SLIP'] = args.slippage
+    if getattr(args, 'mom_b200_floor', None) is not None:
+        globals()['MOM_B200_FLOOR'] = args.mom_b200_floor
+        print(f"[knob] MOM_B200_FLOOR = {args.mom_b200_floor}")
+    if getattr(args, 'mom_tov_excl_regimes', None):
+        globals()['MOM_TOV_EXCL_REGIMES'] = tuple(
+            x.strip().upper() for x in args.mom_tov_excl_regimes.split(",") if x.strip())
+        print(f"[knob] MOM_TOV_EXCL_REGIMES = {globals()['MOM_TOV_EXCL_REGIMES']}")
         print(f"[slippage override] SLIP = {args.slippage:.4f} ({args.slippage*100:.2f}%/leg)")
     if args.risk is not None:
         global RISK

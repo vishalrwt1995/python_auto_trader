@@ -325,6 +325,25 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
     candidates = insider_signal_service.scan(
         reaction_target, clusters, candles,
         turnover_min_cr=cfg.insider_turnover_min_cr, price_min=insider_signals.PRICE_MIN)
+    # Name what was rejected (2026-08-20). Previously only the COUNTS were emitted, so a
+    # `clusters=2 -> candidates=0` day left no record of WHICH symbols dropped or WHY —
+    # the same blind spot that let the pledge reaction-date leak hide for three weeks.
+    if len(candidates) < len(clusters):
+        _kept = {str(c.get("symbol", "")).upper() for c in candidates}
+        for _sym in sorted(clusters):
+            if str(_sym).upper() in _kept:
+                continue
+            _bars = candles.get(_sym) or []
+            logger.info("insider_cluster_dropped sym=%s n_buyers=%s has_key=%s bars=%d "
+                        "newest_bar=%s target=%s turnover_min_cr=%s price_min=%s",
+                        _sym, (clusters.get(_sym) or {}).get("n_buyers", "?"),
+                        bool(ik_for.get(_sym)), len(_bars),
+                        (str(_bars[-1][0]) if _bars else "-"), reaction_target,
+                        cfg.insider_turnover_min_cr, insider_signals.PRICE_MIN)
+    if clusters and not candidates:
+        logger.warning("insider_candidates_zero clusters=%d candles=%d target=%s — every cluster "
+                       "was dropped downstream; see insider_cluster_dropped lines for the reason",
+                       len(clusters), len(candles), reaction_target)
     for c in candidates:
         c["instrument_key"] = ik_for.get(c["symbol"], "")
 
