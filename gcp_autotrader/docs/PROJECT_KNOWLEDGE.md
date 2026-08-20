@@ -263,13 +263,26 @@ From the `delivery_lock.py` perturbation @₹5L, the shipped `hold20` is a **loc
 ### ★ NEW 2026-08-20 — PEAD reaction date is single-valued with NO catch-up (half the ㉕ bug)
 Corrects ㉖'s "structurally immune". The *event fetch* is windowed (5-day lookback) ✅; the *reaction date* is
 `nifty_daily[-1][0]`, single-valued, **never revisited** ❌. Eligibility is an **exact date equality**, so a
-one-session skew between the index series and symbol dailies zeroes it **for every symbol at once, silently,
-with no HTTP error** — observed 08-19 (`events=528 → eligible=0`) and 08-20 (`260 → 2`) against a prior
-seven-session range of 107-247.
-- **Zero live impact today** — pead is gated off (`nifty_dd −8.55%` vs −5%) and has never traded.
-- PR #71 now makes it *visible* (`pead_eligible_zero` warning + `newest_bar` vs `reaction_target`), which is
-  what was missing. **The structural fix is the ㉕ pattern:** settle owed reaction dates with the
-  first-trading-day parity rule and a fail-closed ledger.
+one-session skew between the index series and the symbol dailies WOULD zero it **for every symbol at once,
+silently, with no HTTP error**. That fragility is real and unfixed.
+
+**⚠️ BUT the 08-19/08-20 episode was NOT that — my initial diagnosis was WRONG, and PR #71 disproved it within
+minutes of shipping.** First `pead_fetch_funnel` line on rev `00314-49j`:
+`events=260 syms=250 no_key=37 short_bars=2 candles=211 newest_bar=2026-08-19 reaction_target=2026-08-19`
+**`newest_bar` EQUALS `reaction_target`** ⇒ bars were current, 211 symbols had usable candles, no skew. The low
+eligibility is **genuine**: only ~2 of the 260 windowed events filed on the prior session (08-18), and only
+those can have a reaction day of 08-19. The 27% → 0.8% ratio fall is **results season ending** — the 5-day
+window is now dominated by older filings whose reaction days have already passed. `pead_eligible_zero`
+correctly did NOT fire (eligible was 2, not 0).
+- **So there is no live defect here today.** pead is additionally gated off (`nifty_dd −8.55%` vs −5%) and has
+  never traded. What remains is a **latent** single-date fragility, not an active failure.
+- **The structural fix is still the ㉕ pattern** if it is ever wanted: settle owed reaction dates with the
+  first-trading-day parity rule and a fail-closed ledger. Low priority while pead is dormant.
+- **Incidental, previously invisible:** `no_key=37` — 37 of 250 event symbols fail instrument-key resolution.
+  Worth a look if pead is ever activated.
+- **Method note:** this entry is the clearest case in the log of a confidently-argued mechanism being refuted
+  by one log line. The freshness theory was plausible, fitted both observed days, and was wrong. Ship the
+  instrumentation before writing the diagnosis.
 - Sequence behind the two items above — pead is dormant and holds ₹2L that has never traded — but **the day the
   drawdown gate opens is the worst possible day to discover this.**
 
@@ -464,6 +477,14 @@ both 08-19 and 08-20 with the gate OPEN. Added a pead funnel line (**`newest_bar
 decisive pair**), per-symbol `insider_cluster_dropped`/`pledge_revoke_dropped` lines, and a **WARNING whenever
 an upstream count is non-zero and the downstream count is zero**. Logging only — no gate/threshold/sizing/
 ordering change. 1105 tests pass.
+**★ It paid for itself immediately — and refuted the diagnosis it was built to test.** First
+`pead_fetch_funnel` on rev `00314-49j`: `events=260 syms=250 no_key=37 short_bars=2 candles=211
+newest_bar=2026-08-19 reaction_target=2026-08-19`. **`newest_bar` EQUALS `reaction_target`** ⇒ no
+data-freshness skew; bars were current and 211 symbols had usable candles. The low eligibility is **genuine**
+(only ~2 of 260 windowed events filed on the prior session; the ratio fall is results season ending), and
+`pead_eligible_zero` correctly did NOT fire. Also surfaced `no_key=37` — 37 of 250 event symbols fail
+instrument-key resolution, previously invisible. **The freshness hypothesis was plausible, fitted both observed
+days, and was wrong: ship the instrumentation before writing the diagnosis.**
 
 **⚠️ pead has HALF the reaction-date bug after all** (correcting ㉖, which called it "structurally immune"):
 the *event fetch* is windowed (5-day lookback) ✅, but the *reaction date* is single-valued from
