@@ -247,6 +247,32 @@ Each gate's rejection writes a `blocked_reason` to `scan_decisions`.
 
 These are observed but not yet resolved. Discuss before acting.
 
+### ★ NEW 2026-08-20 — DELIVERY: `hold18` beats the shipped `hold20` (strongest un-shipped candidate)
+From the `delivery_lock.py` perturbation @₹5L, the shipped `hold20` is a **local MINIMUM on Calmar**:
+`hold 15/18/20/22/25 → 1.45 / 1.33 / **0.82** / 1.18 / 1.11`. Every neighbour beats it, some by 60%+.
+- **hold18:** Calmar **1.33 vs 0.82**, maxDD **−10.0% vs −15.5%**, CAGR 13.3% vs 12.8%, and critically
+  **OOS 16.1 > IS 15.0** — the opposite of an overfit signature.
+- It also relieves slot saturation from the other side (faster recycling) without more capital or slots.
+- **Do NOT ship on this alone.** One perturbation grid at one capital level, and hold20 being an isolated dip
+  is odd enough to explain before trusting. Owes: its own plateau confirmation, 3× slippage, and a fit/test
+  split. Env knob is `DELIVERY_MAX_HOLD_DAYS`.
+- **Settled in the same grid: do NOT add slots.** `slots 5→7` is neutral (12.8%→12.6%, OOS 14.0→11.9), so
+  delivery's turned-away candidates (13 over 11 sessions, saturated 7-of-11) **cost nothing** — the ranking is
+  working. An earlier read of this as a capacity loss was wrong.
+
+### ★ NEW 2026-08-20 — PEAD reaction date is single-valued with NO catch-up (half the ㉕ bug)
+Corrects ㉖'s "structurally immune". The *event fetch* is windowed (5-day lookback) ✅; the *reaction date* is
+`nifty_daily[-1][0]`, single-valued, **never revisited** ❌. Eligibility is an **exact date equality**, so a
+one-session skew between the index series and symbol dailies zeroes it **for every symbol at once, silently,
+with no HTTP error** — observed 08-19 (`events=528 → eligible=0`) and 08-20 (`260 → 2`) against a prior
+seven-session range of 107-247.
+- **Zero live impact today** — pead is gated off (`nifty_dd −8.55%` vs −5%) and has never traded.
+- PR #71 now makes it *visible* (`pead_eligible_zero` warning + `newest_bar` vs `reaction_target`), which is
+  what was missing. **The structural fix is the ㉕ pattern:** settle owed reaction dates with the
+  first-trading-day parity rule and a fail-closed ledger.
+- Sequence behind the two items above — pead is dormant and holds ₹2L that has never traded — but **the day the
+  drawdown gate opens is the worst possible day to discover this.**
+
 ### ★ NEW 2026-08-18 — Exits price off a PRE-OPEN REST LTP poll (possible backtest parity break)
 **Affects every channel's exits, so treat as the highest-priority open item.** LGEINDIA (delivery) exited
 2026-08-18 at **09:00:02 IST — 15 minutes before the 09:15 continuous open** — filling ₹1,660.07 against a
@@ -369,6 +395,104 @@ Shipped + ENABLED (§8 ⑰, PR #59, rev `autotrader-00289-ftq` + ws-monitor `000
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### ㉗ 2026-08-18→20 · SWING GOD-MODE GRIND (13 hypotheses, 0 improvements) + DELIVERY parity re-validated + observability fix — autotrader `00314-49j` (PR #71, commit `328e6e29`)
+Single-service deploy (entry/scan logging only — **Rule 8 N/A**). Three days of work; the grind is the bulk.
+
+**★ SWING: ~49 engine arms, 13 hypotheses, ZERO improvements survive.** The shipped config won on every
+axis tested. Harness committed as `scripts/redesign/swing_{p0..p9,cell_regime_lens}.py`.
+
+**1. The baseline reproduces** — 9.5%/yr vs the documented 9.7%, maxDD −15% vs −16%, reproduced 3× identically
+(265 trades / +₹530,568 / 2015-2026). The 9.7% was genuinely uncertain before this; it is now verified.
+
+**2. THE MECHANISM (carry this forward — it explains every failure below).** Swing's edge is **exit asymmetry,
+NOT selection**:
+`TRAIL n=58 @ +1.76R = +₹886,062 | MAX_HOLD n=127 @ +0.31R = +₹385,621 | SL n=87 @ −1.06R = −₹855,360`
+⇒ expectancy **+0.18R/trade**. The scorer has **zero forecasting power** (adj_score r=−0.006, raw_score
+r=−0.033, wl_score r=+0.037 vs net; the LOWEST adj_score bucket beats the highest, +₹2,105 vs +₹894/trade),
+and winners are **indistinguishable from losers at entry on all 11 recorded features** (adj_score 73/68.5/69,
+rsi 70.0/70.5/69.8, adx 42.4/40.7/41.5, b200 79.5/81.1/79.0 for MAX_HOLD/TRAIL/SL). **The 1.75R trail-arm IS
+the selection filter — applied POST-entry.** Arming at 1.0R converts MAX_HOLDs→TRAILs (57→102) and gives the
+best WR of any arm (50.5%), yet net collapses ₹530,568→₹171,295: the edge is not "more trails", it is
+"trails that already captured a big move".
+
+**3. ERA SPLIT — the real problem, quantified.**
+`2015-2021: n=171 WR 48.5% +₹491,093 avg +₹2,872 avgR +0.30 Calmar 1.15 (6/6 yrs)`
+`2022-2026: n= 94 WR 40.4%  +₹39,474 avg   +₹420 avgR +0.03 Calmar 0.20 (3/4 yrs)`
+Per-trade economics fell **7×**; avgR is ~zero. **avgR is size-neutral ⇒ the EDGE decayed, not the sizing.**
+Frequency barely moved (24.4 → 22.3 trades/yr): swing did not stop trading, **the trades stopped working**.
+
+**4. Rejections (all with numbers).** b200→80: Calmar 0.68 but a **lone spike** (85 → **0.03**) ⇒ overfit.
+Turnover dead-zone→RANGE: net −38%, Calmar 0.29 — independently **reproduces the in-code warning** that all
+3 TU filters sign-flip on RANGE. Same-day cap RANGE:1 → maxDD *worse* (−16.7%). Drop RANGE → Calmar 0.40.
+Hysteresis 3/5/10/20d → best 0.33 vs control 0.45, chaotic surface, no plateau (20d had the best WR of the
+day at 50.3% and still lost — confirming the mechanism). **10 slots passed in-sample (+31.5%) then FAILED
+OOS: ordering INVERTS** (FIT 7-slot Calmar **1.15** vs 10-slot 0.65; TEST reverses) ⇒ mix artefact.
+**Exit params: all three already optimal**, each on a single-peaked ridge — `max_hold` 8/10/12/15/**20**/25 →
+0.31/0.20/0.22/0.27/**0.45**/0.04; `activate_R` 1.0/1.25/1.5/**1.75**/2.25 → 0.09/0.21/0.40/**0.45**/0.27;
+`trail_R` 0.5/0.75/**1.0**/1.5 → 0.25/0.18/**0.45**/0.13. Shortening max_hold **truncates winners** (TRAIL
+57→31 at 8d) — the opposite of the predicted MAXH→TRAIL conversion.
+
+**5. Gate at 70 CONFIRMED optimal** across 6 values — highest net AND best consistency (9/10 yrs): 65→Calmar
+0.11/maxDD **−34%**, **70→0.45/₹530,568/9-of-10**, 75→0.40, 80→0.68(spike), 85→0.03, 90→0.11. **Shipped
+config survives 3× slippage**: +₹388,320, Calmar 0.31, 8/10 yrs (gap_fade died at 0.75%). Occupancy is only
+**~23%** of slot capacity ⇒ ₹5L allocated ≈ **₹1.2L effectively deployed**. Payoff is option-like: **2017 +
+2021 = 64%** of 11 years' profit. **Conclusion: swing is correctly built and correctly tuned; the constraint
+is REGIME, not configuration** (b200 60.53 on 08-20 vs a gate of 70, declining 63.38→62.54→61.85→60.53).
+
+**★ DELIVERY re-validated e2e (before any capital change).** `delivery_parity.py` imports the SHIPPED
+`delivery_signals`/`pead_book` modules and **hit its documented target exactly ⇒ no prod↔backtest drift**:
+`@₹2L CAGR 11.8% Cal 0.85 DD −14.0% ₹31.8k/y n=411 IS15.5/OOS13.0 (6/7+)` ·
+`@₹5L CAGR 13.3% Cal 1.00 DD −13.3% ₹92.5k/y n=408 IS18.7/OOS14.0 (7/7+)`.
+By-year @₹2L→@₹5L: 2020 +19k→+51k · 2021 +67k→+165k · **2022 −3k→+44k** (this flip makes it 7/7) ·
+2023 +43k→+115k · 2024 +12k→+38k · 2025 +35k→+94k · 2026 +16k→+45k(partial).
+**Capital effect: +₹60,700/yr for +₹3L — 2.5× capital → 2.9× profit, marginal return ~20%/yr, and drawdown
+IMPROVES.** Trade count is flat (411→408) ⇒ this is **sizing, not participation**.
+**Perturbation @₹5L:** `slots 3/5/7 → 6.0%/12.8%/12.6%` (**5→7 is NEUTRAL — adding slots does NOT help;
+delivery's turned-away candidates cost nothing**); `hold 15/18/20/22/25 → Calmar 1.45/1.33/**0.82**/1.18/1.11`
+⇒ **shipped hold20 is a local MINIMUM; hold18 shows Calmar 1.33, DD −10.0%, and OOS 16.1 > IS 15.0** (no
+overfit signature) — **the strongest un-shipped candidate in the book, needs its own validation.** Guardrails
+are tight: `deliv≥78` collapses to 5.5%, `band 30-60cr` **FAILS**. (`delivery_lock.py` is an independent
+harness and disagrees mildly — @₹2L 2022 +3k not −3k, n=434 not 411, @₹5L Cal 0.82 not 1.00. **Use the parity
+numbers for decisions** — only that script imports the shipped modules.)
+
+**★ OBSERVABILITY FIX SHIPPED (PR #71).** All three event channels emitted only aggregate counts, so a day
+that found signals and dropped every one was indistinguishable from a quiet market — the same blind spot that
+let the pledge leak hide 3 weeks. Two undiagnosable live cases drove this: **pead** 08-19 `events=528 →
+eligible=0` and 08-20 `260 → 2` (prior 7 sessions 107-247), and **insider** `clusters=2 → candidates=0` on
+both 08-19 and 08-20 with the gate OPEN. Added a pead funnel line (**`newest_bar` vs `reaction_target` is the
+decisive pair**), per-symbol `insider_cluster_dropped`/`pledge_revoke_dropped` lines, and a **WARNING whenever
+an upstream count is non-zero and the downstream count is zero**. Logging only — no gate/threshold/sizing/
+ordering change. 1105 tests pass.
+
+**⚠️ pead has HALF the reaction-date bug after all** (correcting ㉖, which called it "structurally immune"):
+the *event fetch* is windowed (5-day lookback) ✅, but the *reaction date* is single-valued from
+`nifty_daily[-1][0]` with **no catch-up** ❌. Eligibility is an EXACT date equality, so a one-session skew
+between the index series and symbol dailies zeroes it **for every symbol at once, silently**. Zero live impact
+(gated off at nifty_dd −8.55% vs −5%, never traded) but it is the same permanent-loss shape as RAMCOIND/EMBDL.
+
+**Also resolved / corrected this session:**
+- **A3 pre-open exit CLOSED — no parity break.** LGEINDIA's ₹1,660.07 fill sits between 08-17's close
+  (1,667.60) and 08-18's (1,649.40) ⇒ a real traded level. Trail arithmetic exact (`best 1755 − sl_dist
+  83.08 = 1671.92`). The one-day trail lag is inherent to a daily recon and is what a daily-bar backtest
+  models ⇒ parity holds. (`nse_delivery_daily` has close only, no OHLC — "in range" is inferred.)
+- **ws-monitor 401 storm on 08-20 was NOT a defect** — ≥300 errors 09:02→09:21:30 IST, self-healed; caused by
+  a later-than-usual manual token approval. Retry loop behaved correctly.
+- **`severity>=ERROR` is BLIND to Python-logged errors on these services** — returned 0 on 08-19/20 while a
+  TEXT search found 9. **Every "0 errors" in earlier entries used that filter. Use text matching.**
+- `swing_prod_faithful.py` looks authoritative but is **pre-PR#51** and yields 0.6%, not 9.7%. In
+  `swing_final.py`: `--long` is NOT a 2015-2026 baseline, the **default arms ignore every CLI parameter**, and
+  `--trades-out` works only under `--by-year` — three silent no-ops, each caught only by checking output
+  against a known number.
+- **GitHub identity drifted to `vishal01012` TWICE mid-session** (one push rejected 403). `gh auth switch
+  --user vishalrwt1995` is a **per-push** check, not per-session.
+- 2019 still produces zero backtest trades despite 131 tradeable regime days and 314,558 complete bars ⇒ the
+  "11-year" baseline is really 10 trading years. Unexplained.
+
+**Method note (now a standing rule):** thirteen hypotheses failed because they targeted *selection*, which
+P4 proved is noise. **Four of four hypotheses derived from 2024's forensics were wrong — correlates are not
+causes.** And I dismissed exits early, then found the edge lives there: **re-plan when a mechanism is
+discovered mid-grind.**
 
 ### ㉖ 2026-08-18 · ★ FIRST FORWARD-TEST CLOSED TRADE + full e2e audit (no deploy — read-only session)
 No code shipped. Live state unchanged: `autotrader-00313-2s9` · ws-monitor `00048-b9g` · dashboard `00084-pgl`.
