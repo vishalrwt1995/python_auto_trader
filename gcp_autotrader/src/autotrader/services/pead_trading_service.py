@@ -185,18 +185,39 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     key_map = _resolve_instrument_keys(ev_syms, bq) if bq else {}
     candles: dict[str, list[list]] = {}
     ik_for: dict[str, str] = {}
+    _n_nokey = _n_short = 0
+    _newest_bar = ""
     for sym in ev_syms:
         ik = key_map.get(sym)
         if not ik:
+            _n_nokey += 1
             continue
         bars = _fetch_symbol_daily(upstox, ik, reaction_target)
         if len(bars) >= pead_signal_service.ATR_WINDOW + 2:
             candles[sym] = bars
             ik_for[sym] = ik
+            if bars and str(bars[-1][0]) > _newest_bar:
+                _newest_bar = str(bars[-1][0])
+        else:
+            _n_short += 1
+    # Funnel visibility (2026-08-20): `events=N -> eligible=0` was previously indistinguishable
+    # from a quiet market, because nothing recorded how many symbols actually had usable bars
+    # or how fresh those bars were. `newest_bar` vs `reaction_target` is the decisive pair.
+    logger.info("pead_fetch_funnel events=%d syms=%d no_key=%d short_bars=%d candles=%d "
+                "newest_bar=%s reaction_target=%s", len(events), len(ev_syms), _n_nokey,
+                _n_short, len(candles), _newest_bar or "-", reaction_target)
 
     # keep only names whose reaction day (first session after their filing) == target —
     # the faithful per-event reaction filter (vs naively pricing every recent reporter)
     eligible = _select_reaction_symbols(events, candles, reaction_target)
+    if candles and not eligible:
+        # eligibility is an EXACT date match, so a one-session skew between the NIFTY series
+        # (which sets reaction_target) and the symbol dailies zeroes it for every symbol at
+        # once — silently, with no HTTP error. Warn rather than let it read as a quiet day.
+        logger.warning("pead_eligible_zero events=%d candles=%d newest_bar=%s reaction_target=%s "
+                       "— no symbol's first bar after its filing equals the target; suspect a "
+                       "data-freshness skew (newest_bar < reaction_target) rather than absent signals",
+                       len(events), len(candles), _newest_bar or "-", reaction_target)
     candidates = pead_signal_service.scan(reaction_target, candles, nifty_daily,
                                           result_symbols=eligible,
                                           market_dd_gate=cfg.pead_market_dd_gate,
