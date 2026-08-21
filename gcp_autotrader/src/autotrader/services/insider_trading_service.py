@@ -334,12 +334,25 @@ def run_insider_scan_once(*, settings, upstox, state, order_service, bq=None,
             if str(_sym).upper() in _kept:
                 continue
             _bars = candles.get(_sym) or []
-            logger.info("insider_cluster_dropped sym=%s n_buyers=%s has_key=%s bars=%d "
-                        "newest_bar=%s target=%s turnover_min_cr=%s price_min=%s",
+            # measured-vs-threshold, so the reader can see WHICH gate bit rather than
+            # inferring it. (2026-08-21: the first version logged only the thresholds,
+            # which named the symbol but still left the reason ambiguous.)
+            _tov = _px = -1.0
+            if _bars:
+                try:
+                    _dts = [b[0] for b in _bars]
+                    _i = _dts.index(reaction_target) if reaction_target in _dts else len(_bars) - 1
+                    _tov = insider_signals.turnover_20d_cr(
+                        [float(b[4]) for b in _bars], [float(b[5]) for b in _bars], _i)
+                    _px = float(_bars[_i][4])
+                except Exception:            # diagnostic only — never break the scan
+                    pass
+            logger.info("insider_cluster_dropped sym=%s n_buyers=%s has_key=%s bars=%d/min%d "
+                        "turnover_cr=%.2f/min%.1f close=%.2f/min%.1f newest_bar=%s target=%s",
                         _sym, (clusters.get(_sym) or {}).get("n_buyers", "?"),
-                        bool(ik_for.get(_sym)), len(_bars),
-                        (str(_bars[-1][0]) if _bars else "-"), reaction_target,
-                        cfg.insider_turnover_min_cr, insider_signals.PRICE_MIN)
+                        bool(ik_for.get(_sym)), len(_bars), insider_signals.MIN_BARS,
+                        _tov, cfg.insider_turnover_min_cr, _px, insider_signals.PRICE_MIN,
+                        (str(_bars[-1][0]) if _bars else "-"), reaction_target)
     if clusters and not candidates:
         logger.warning("insider_candidates_zero clusters=%d candles=%d target=%s — every cluster "
                        "was dropped downstream; see insider_cluster_dropped lines for the reason",

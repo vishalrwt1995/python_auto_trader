@@ -316,12 +316,28 @@ def run_pledge_scan_once(*, settings, upstox, state, order_service, bq=None,
             if str(_sym).upper() in _kept:
                 continue
             _bars = candles.get(_sym) or []
-            logger.info("pledge_revoke_dropped sym=%s n_revokes=%s has_key=%s bars=%d "
-                        "newest_bar=%s target=%s turnover_min_cr=%s price_min=%s",
+            # measured-vs-threshold (2026-08-21). Pledge additionally needs px > 200DMA, so
+            # log the SMA too — otherwise a name above the turnover floor but below its MA
+            # is indistinguishable from a thin one.
+            _tov = _px = _sma = -1.0
+            if _bars:
+                try:
+                    _dts = [b[0] for b in _bars]
+                    _i = _dts.index(reaction_target) if reaction_target in _dts else len(_bars) - 1
+                    _cl = [float(b[4]) for b in _bars]
+                    _tov = pledge_signals.turnover_20d_cr(_cl, [float(b[5]) for b in _bars], _i)
+                    _px = _cl[_i]
+                    _sma = pledge_signals.sma(_cl, pledge_signals.MA_DAYS, _i) or -1.0
+                except Exception:            # diagnostic only — never break the scan
+                    pass
+            logger.info("pledge_revoke_dropped sym=%s n_revokes=%s has_key=%s bars=%d/min%d "
+                        "turnover_cr=%.2f/min%.1f close=%.2f/min%.1f sma%d=%.2f above_ma=%s "
+                        "newest_bar=%s target=%s",
                         _sym, (revokes.get(_sym) or {}).get("n_revokes", "?"),
-                        bool(ik_for.get(_sym)), len(_bars),
-                        (str(_bars[-1][0]) if _bars else "-"), reaction_target,
-                        cfg.pledge_turnover_min_cr, pledge_signals.PRICE_MIN)
+                        bool(ik_for.get(_sym)), len(_bars), pledge_signals.MIN_BARS,
+                        _tov, cfg.pledge_turnover_min_cr, _px, pledge_signals.PRICE_MIN,
+                        pledge_signals.MA_DAYS, _sma, (_px > _sma if _sma > 0 else "?"),
+                        (str(_bars[-1][0]) if _bars else "-"), reaction_target)
     if revokes and not candidates:
         logger.warning("pledge_candidates_zero revokes=%d candles=%d target=%s — every revoke was "
                        "dropped downstream; see pledge_revoke_dropped lines for the reason",

@@ -211,13 +211,18 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     # the faithful per-event reaction filter (vs naively pricing every recent reporter)
     eligible = _select_reaction_symbols(events, candles, reaction_target)
     if candles and not eligible:
-        # eligibility is an EXACT date match, so a one-session skew between the NIFTY series
-        # (which sets reaction_target) and the symbol dailies zeroes it for every symbol at
-        # once — silently, with no HTTP error. Warn rather than let it read as a quiet day.
+        # Eligibility is an EXACT date match on `reaction_target` (set from nifty_daily[-1]).
+        # State the facts and let the reader judge: if newest_bar < reaction_target it IS a
+        # data-freshness skew; if they are equal the shortfall is upstream (few filings landed
+        # on the qualifying session, and/or no_key/short_bars thinned the candle set).
+        # 2026-08-20/21 were the equal case — an earlier version of this message asserted the
+        # skew as the cause and was wrong.
         logger.warning("pead_eligible_zero events=%d candles=%d newest_bar=%s reaction_target=%s "
-                       "— no symbol's first bar after its filing equals the target; suspect a "
-                       "data-freshness skew (newest_bar < reaction_target) rather than absent signals",
-                       len(events), len(candles), _newest_bar or "-", reaction_target)
+                       "stale_bars=%s — no symbol's first bar after its filing equals the target; "
+                       "compare newest_bar vs reaction_target (see pead_fetch_funnel for no_key/"
+                       "short_bars) before assuming a cause",
+                       len(events), len(candles), _newest_bar or "-", reaction_target,
+                       bool(_newest_bar and _newest_bar < reaction_target))
     candidates = pead_signal_service.scan(reaction_target, candles, nifty_daily,
                                           result_symbols=eligible,
                                           market_dd_gate=cfg.pead_market_dd_gate,
