@@ -187,10 +187,12 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     ik_for: dict[str, str] = {}
     _n_nokey = _n_short = 0
     _newest_bar = ""
+    _nokey_syms: list[str] = []
     for sym in ev_syms:
         ik = key_map.get(sym)
         if not ik:
             _n_nokey += 1
+            _nokey_syms.append(str(sym))
             continue
         bars = _fetch_symbol_daily(upstox, ik, reaction_target)
         if len(bars) >= pead_signal_service.ATR_WINDOW + 2:
@@ -206,6 +208,11 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     logger.info("pead_fetch_funnel events=%d syms=%d no_key=%d short_bars=%d candles=%d "
                 "newest_bar=%s reaction_target=%s", len(events), len(ev_syms), _n_nokey,
                 _n_short, len(candles), _newest_bar or "-", reaction_target)
+    if _nokey_syms:
+        # NAME them — a count alone is not actionable. These are symbols the event feed
+        # reported but neither key source could resolve, so they can never be traded.
+        logger.warning("pead_no_key_symbols n=%d syms=%s", len(_nokey_syms),
+                       ",".join(sorted(_nokey_syms)[:40]))
 
     # keep only names whose reaction day (first session after their filing) == target —
     # the faithful per-event reaction filter (vs naively pricing every recent reporter)
@@ -315,17 +322,53 @@ def _persist_pead_watchlist(state, asof, nifty_dd, market_dd_gate, channel_capit
 
 
 def _resolve_instrument_keys(symbols: Sequence[str], bq) -> dict[str, str]:
-    """symbol -> Upstox instrument_key via BQ candles_daily (deep, has the keys even
-    when recent bars are stale). Fail-closed: returns {} on error."""
+    """symbol -> Upstox instrument_key, from the FRESH source first, then the DEEP one.
+
+    Why two sources (2026-08-24): `candles_daily` stopped being written on **2026-06-07**, so
+    it silently fails to resolve any symbol that listed — or entered the universe — after that.
+    Measured on pead's event set: **no_key 15% (08-20) -> 78% (08-21) -> 64% (08-24)**, which
+    reads as "quiet market" rather than "broken lookup".
+
+    `candles_5m` is written daily (partitioned by trade_date, clustered by symbol, so a
+    date+symbol probe prunes hard) BUT its 30-day window is NARROWER, because it only carries
+    actively-traded intraday names. Measured coverage:
+        candles_daily 2,638 syms · candles_5m(30d) 2,440 · gained 224 · **LOST 422 if replaced**
+    So a straight swap would be a net loss dressed up as a fix. The union — fresh wins on
+    conflict, deep fills the gaps — gains 224 and loses nothing (~2,862 resolvable).
+
+    Deliberately two queries merged in Python rather than one clever UNION: each is
+    independently debuggable, and if the fresh probe fails we still degrade to the deep table
+    instead of losing everything. Fail-closed overall: {} only if BOTH fail.
+
+    NOTE: insider/pledge/delivery each carry their own copy of this function still pointing at
+    `candles_daily` alone. Same latent bug, lower blast radius (their universes are established
+    names). Left untouched here on purpose — see PROJECT_KNOWLEDGE §7.
+    """
+    syms = ",".join("'" + str(s).strip().upper().replace("'", "") + "'" for s in symbols)
+    if not syms:
+        return {}
+    deep: dict[str, str] = {}
+    fresh: dict[str, str] = {}
     try:
-        syms = ",".join("'" + str(s).strip().upper().replace("'", "") + "'" for s in symbols)
         q = (f"SELECT symbol, ANY_VALUE(instrument_key) ik "
              f"FROM `grow-profit-machine.autotrader.candles_daily` "
              f"WHERE UPPER(symbol) IN ({syms}) AND instrument_key IS NOT NULL GROUP BY symbol")
-        return {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
+        deep = {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
     except Exception as exc:
-        logger.error("pead_resolve_keys_failed err=%s", exc)
-        return {}
+        logger.error("pead_resolve_keys_deep_failed err=%s", exc)
+    try:
+        q = (f"SELECT symbol, ANY_VALUE(instrument_key) ik "
+             f"FROM `grow-profit-machine.autotrader.candles_5m` "
+             f"WHERE trade_date >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 30 DAY) "
+             f"AND UPPER(symbol) IN ({syms}) AND instrument_key IS NOT NULL GROUP BY symbol")
+        fresh = {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
+    except Exception as exc:
+        logger.error("pead_resolve_keys_fresh_failed err=%s", exc)
+    merged = {**deep, **fresh}                      # fresh wins on conflict
+    logger.info("pead_resolve_keys asked=%d deep=%d fresh=%d merged=%d fresh_only=%d",
+                len(symbols), len(deep), len(fresh), len(merged),
+                len(set(fresh) - set(deep)))
+    return merged
 
 
 def _pead_realized_today(state, asof: str) -> float:
