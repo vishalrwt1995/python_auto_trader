@@ -366,8 +366,7 @@ def _resolve_instrument_keys(symbols: Sequence[str], bq) -> dict[str, str]:
         logger.error("pead_resolve_keys_fresh_failed err=%s", exc)
     merged = {**deep, **fresh}                      # fresh wins on conflict
     logger.info("pead_resolve_keys asked=%d deep=%d fresh=%d merged=%d fresh_only=%d",
-                len(symbols), len(deep), len(fresh), len(merged),
-                len(set(fresh) - set(deep)))
+                len(symbols), len(deep), len(fresh), len(merged), len(set(fresh) - set(deep)))
     return merged
 
 

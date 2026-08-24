@@ -151,15 +151,52 @@ def _fetch_symbol_daily(upstox, instrument_key: str, asof: str) -> list[list]:
 
 
 def _resolve_instrument_keys(symbols: Sequence[str], bq) -> dict[str, str]:
+    """symbol -> Upstox instrument_key, from the FRESH source first, then the DEEP one.
+
+    Why two sources (2026-08-24): `candles_daily` stopped being written on **2026-06-07**, so
+    it silently fails to resolve any symbol that listed — or entered the universe — after that
+    date. Measured on pead's event set the day this was found: **no_key 15% (08-20) -> 78%
+    (08-21) -> 64% (08-24)** — which reads in the logs as "quiet market", not "broken lookup".
+
+    `candles_5m` is written daily (partitioned by trade_date, clustered by symbol, so a
+    date+symbol probe prunes hard) BUT its 30-day window is NARROWER, because it only carries
+    actively-traded intraday names. Measured coverage:
+        candles_daily 2,638 syms · candles_5m(30d) 2,440 · gained 224 · **LOST 422 if replaced**
+    So a straight swap would be a net loss dressed up as a fix. The union — fresh wins on
+    conflict, deep fills the gaps — gains 224 and loses nothing (~2,862 resolvable).
+
+    Deliberately two queries merged in Python rather than one clever UNION: each is
+    independently debuggable, and if the fresh probe fails we still degrade to the deep table
+    instead of losing everything. Fail-closed overall: {} only if BOTH fail.
+
+    Still a per-channel copy rather than a shared helper (2026-08-24): all four copies are now
+    byte-identical apart from the log prefix, so extracting one is a mechanical follow-up —
+    but doing it in this same change would have put four live entry paths on one blast radius.
+    """
+    syms = ",".join("'" + str(s).strip().upper().replace("'", "") + "'" for s in symbols)
+    if not syms:
+        return {}
+    deep: dict[str, str] = {}
+    fresh: dict[str, str] = {}
     try:
-        syms = ",".join("'" + str(s).strip().upper().replace("'", "") + "'" for s in symbols)
         q = (f"SELECT symbol, ANY_VALUE(instrument_key) ik "
              f"FROM `grow-profit-machine.autotrader.candles_daily` "
              f"WHERE UPPER(symbol) IN ({syms}) AND instrument_key IS NOT NULL GROUP BY symbol")
-        return {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
+        deep = {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
     except Exception as exc:
-        logger.error("insider_resolve_keys_failed err=%s", exc)
-        return {}
+        logger.error("insider_resolve_keys_deep_failed err=%s", exc)
+    try:
+        q = (f"SELECT symbol, ANY_VALUE(instrument_key) ik "
+             f"FROM `grow-profit-machine.autotrader.candles_5m` "
+             f"WHERE trade_date >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 30 DAY) "
+             f"AND UPPER(symbol) IN ({syms}) AND instrument_key IS NOT NULL GROUP BY symbol")
+        fresh = {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
+    except Exception as exc:
+        logger.error("insider_resolve_keys_fresh_failed err=%s", exc)
+    merged = {**deep, **fresh}                      # fresh wins on conflict
+    logger.info("insider_resolve_keys asked=%d deep=%d fresh=%d merged=%d fresh_only=%d",
+                len(symbols), len(deep), len(fresh), len(merged), len(set(fresh) - set(deep)))
+    return merged
 
 
 def _insider_realized_today(state, asof: str) -> float:
