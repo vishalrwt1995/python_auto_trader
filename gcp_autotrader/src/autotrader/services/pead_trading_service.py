@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Sequence
 
+from autotrader.adapters import instrument_keys
 from autotrader.domain import pead_book, pead_signals
 from autotrader.services import pead_signal_service
 
@@ -182,7 +183,8 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
 
     # resolve instrument keys + fetch fresh dailies for the reported names
     ev_syms = sorted({s for s, _ in events})
-    key_map = _resolve_instrument_keys(ev_syms, bq) if bq else {}
+    key_map = (instrument_keys.resolve_instrument_keys(ev_syms, bq, "pead")
+               if bq else {})
     candles: dict[str, list[list]] = {}
     ik_for: dict[str, str] = {}
     _n_nokey = _n_short = 0
@@ -319,55 +321,6 @@ def _persist_pead_watchlist(state, asof, nifty_dd, market_dd_gate, channel_capit
         state.set_json("pead_watchlist", "latest", payload, merge=False)
     except Exception:
         logger.warning("pead_watchlist_persist_failed asof=%s — non-critical", asof, exc_info=True)
-
-
-def _resolve_instrument_keys(symbols: Sequence[str], bq) -> dict[str, str]:
-    """symbol -> Upstox instrument_key, from the FRESH source first, then the DEEP one.
-
-    Why two sources (2026-08-24): `candles_daily` stopped being written on **2026-06-07**, so
-    it silently fails to resolve any symbol that listed — or entered the universe — after that.
-    Measured on pead's event set: **no_key 15% (08-20) -> 78% (08-21) -> 64% (08-24)**, which
-    reads as "quiet market" rather than "broken lookup".
-
-    `candles_5m` is written daily (partitioned by trade_date, clustered by symbol, so a
-    date+symbol probe prunes hard) BUT its 30-day window is NARROWER, because it only carries
-    actively-traded intraday names. Measured coverage:
-        candles_daily 2,638 syms · candles_5m(30d) 2,440 · gained 224 · **LOST 422 if replaced**
-    So a straight swap would be a net loss dressed up as a fix. The union — fresh wins on
-    conflict, deep fills the gaps — gains 224 and loses nothing (~2,862 resolvable).
-
-    Deliberately two queries merged in Python rather than one clever UNION: each is
-    independently debuggable, and if the fresh probe fails we still degrade to the deep table
-    instead of losing everything. Fail-closed overall: {} only if BOTH fail.
-
-    NOTE: insider/pledge/delivery each carry their own copy of this function still pointing at
-    `candles_daily` alone. Same latent bug, lower blast radius (their universes are established
-    names). Left untouched here on purpose — see PROJECT_KNOWLEDGE §7.
-    """
-    syms = ",".join("'" + str(s).strip().upper().replace("'", "") + "'" for s in symbols)
-    if not syms:
-        return {}
-    deep: dict[str, str] = {}
-    fresh: dict[str, str] = {}
-    try:
-        q = (f"SELECT symbol, ANY_VALUE(instrument_key) ik "
-             f"FROM `grow-profit-machine.autotrader.candles_daily` "
-             f"WHERE UPPER(symbol) IN ({syms}) AND instrument_key IS NOT NULL GROUP BY symbol")
-        deep = {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
-    except Exception as exc:
-        logger.error("pead_resolve_keys_deep_failed err=%s", exc)
-    try:
-        q = (f"SELECT symbol, ANY_VALUE(instrument_key) ik "
-             f"FROM `grow-profit-machine.autotrader.candles_5m` "
-             f"WHERE trade_date >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 30 DAY) "
-             f"AND UPPER(symbol) IN ({syms}) AND instrument_key IS NOT NULL GROUP BY symbol")
-        fresh = {str(r["symbol"]).strip().upper(): str(r["ik"]) for r in bq.query(q)}
-    except Exception as exc:
-        logger.error("pead_resolve_keys_fresh_failed err=%s", exc)
-    merged = {**deep, **fresh}                      # fresh wins on conflict
-    logger.info("pead_resolve_keys asked=%d deep=%d fresh=%d merged=%d fresh_only=%d",
-                len(symbols), len(deep), len(fresh), len(merged), len(set(fresh) - set(deep)))
-    return merged
 
 
 def _pead_realized_today(state, asof: str) -> float:

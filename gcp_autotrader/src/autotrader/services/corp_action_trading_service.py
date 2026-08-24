@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Sequence
 
+from autotrader.adapters import instrument_keys
 from autotrader.domain import pead_book
 from autotrader.services import corp_action_signal_service, pead_trading_service
 
@@ -178,7 +179,8 @@ def run_corp_action_scan_once(*, settings, upstox, state, order_service, bq=None
         return {"asof": asof, "last_session": last_session, "events": 0, "candidates": 0, "entered": 0}
 
     ev_syms = sorted({e["symbol"] for e in events})
-    key_map = pead_trading_service._resolve_instrument_keys(ev_syms, bq) if bq else {}
+    key_map = (instrument_keys.resolve_instrument_keys(ev_syms, bq, "corp_action")
+               if bq else {})
     candles: dict[str, list[list]] = {}
     ik_for: dict[str, str] = {}
     for sym in ev_syms:
