@@ -390,6 +390,35 @@ rather than merely plausible. So the chain is verified except the NSE-weekend un
   (Fri + Sat), not one. That is the predicted behaviour change landing.
 
 
+### ★ DEFERRED BY USER 2026-08-25 — DELIVERY capital ₹2L → ₹5L (+₹60,700/yr, measured)
+Measured in §8 ㉗ but never filed here, so it read as history rather than a decision awaiting a call —
+filing it explicitly because **the user deferred it on 2026-08-25 ("we will do capital increase later")** and a
+deferred item that lives only in the history section is how work quietly disappears.
+
+**The number:** ₹2L → ₹5L is **+₹60,700/yr** — 2.5× capital → **2.9× profit**, i.e. *superlinear*, marginal
+return ~20%/yr on the added ₹3L. Almost certainly slot starvation: at ₹2L the 5 slots cannot be filled at the
+sizes the signal wants, so added capital buys previously-skipped fills rather than just scaling existing ones.
+
+**Mechanism when it happens:** env-only, `CAPITAL_DELIVERY=500000` via
+`gcloud run services update --update-env-vars` (Rule 4 — **no** rebuild, ~30s, every other env var preserved,
+no stale-dir risk). Instant rollback via `CAPITAL_DELIVERY=0`. Do NOT reach for `gcloud run deploy`.
+
+**The honest tension, and why "later" is defensible.** The system is in PAPER, so raising paper capital risks
+nothing real and earns nothing real — the +₹60,700 is a backtest figure. Two readings:
+* **for doing it sooner:** forward-testing at ₹2L validates a size you do not intend to run. Raising it now
+  would generate forward evidence at the *intended* size, which is the number that will actually matter.
+* **for waiting (the user's call):** it moves the goalposts mid-experiment. The forward test currently stands at
+  **2 closed trades, +₹575.19** — scaling the size on 2 trades means the before/after series are not comparable,
+  and 2 trades is not evidence of anything either way.
+
+**What should actually unblock this:** forward-test trade count, not further backtesting. The capital question is
+already answered as well as a backtest can answer it (delivery is parity-proven, backtest == prod). What is
+missing is live fill evidence at ₹2L — specifically whether delivery's mid-cap 25-50cr band fills at modelled
+prices. That is the same open question as the swing 9.7%-vs-14% capacity issue (item K): thin-stock alpha is
+created AND capped by illiquidity, and only real fills settle it. Revisit once delivery has a meaningful number
+of closed trades, and treat superlinearity as suspect until then — a slot-starvation story predicts it, but
+so does a subtly optimistic fill model.
+
 ### ★ NEW 2026-08-20 — DELIVERY: `hold18` beats the shipped `hold20` (strongest un-shipped candidate)
 From the `delivery_lock.py` perturbation @₹5L, the shipped `hold20` is a **local MINIMUM on Calmar**:
 `hold 15/18/20/22/25 → 1.45 / 1.33 / **0.82** / 1.18 / 1.11`. Every neighbour beats it, some by 60%+.
