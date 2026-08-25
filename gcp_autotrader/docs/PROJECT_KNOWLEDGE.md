@@ -378,8 +378,14 @@ rather than merely plausible. So the chain is verified except the NSE-weekend un
 
 **REMAINING — two live checkpoints:**
 * **Sat 2026-08-29 (first weekend run):** an `insider_ingest_summary` timestamped Sat/Sun ⇒ NSE serves weekends,
-  gap closed. `insider_ingest_no_rows` ⇒ it does not, and the fix must become the Monday-08:55 variant instead.
-  Either way harmless — the guard returns before the DELETE.
+  gap closed. `insider_ingest_no_rows` ⇒ it does not, and the fix must become the Monday-08:55 variant instead
+  (a new job at `55 8 * * 1` IST on the same POST target — `_WINDOW_DAYS = 3` means a Monday run still reaches
+  back to Friday and captures Sat+Sun). Either way harmless — the guard returns before the DELETE.
+  **A one-off scheduled task already covers this**, so do not duplicate it:
+  `verify-weekend-insider-ingest` (`~/.claude/scheduled-tasks/verify-weekend-insider-ingest/SKILL.md`), fires
+  Sat 2026-08-29 20:07 IST, self-contained, and also watches for `missing_xbrl > 0` (the partial-write hazard
+  filed below). Caveat: scheduled tasks only run while the app is open — if it was closed it fires on next
+  launch, which is why its prompt uses a 48h log window instead of trusting "recent".
 * **Mon 2026-08-31:** `pledge_catchup_summary` / `insider_catchup_summary` should carry **TWO** owed dates
   (Fri + Sat), not one. That is the predicted behaviour change landing.
 
