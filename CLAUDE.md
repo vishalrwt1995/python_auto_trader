@@ -20,13 +20,21 @@ git merge --ff-only origin/main            # if behind
 ```
 Incident: 2026-05-27, a stale-dir deploy rolled back a full day's work. Caught via `tact=NULL` brain regression. See `docs/PROJECT_KNOWLEDGE.md` §8.
 
-### Rule 2 — Commit in worktrees via Python subprocess, NOT `git commit` directly
-Claude SDK worktrees (`.claude/worktrees/*`) hold a lock on the index. `git commit` via the Bash tool fails with `index.lock: File exists`. Use:
+### Rule 2 — Work in the MAIN CHECKOUT, not a worktree (user decision 2026-08-26)
+**Default: work directly in `/Users/apple/Projects_Migrated/Auto Trading Python GCP`.** Do not start a `.claude/worktrees/*` session unless genuine isolation is actually needed (a risky experiment that must not touch the main tree). A worktree session on 2026-08-25/26 paid three costs and gained nothing — every commit went straight to `main` anyway:
+
+1. **`index.lock`** — `git commit` via the Bash tool fails, so every commit needs a Python subprocess.
+2. **A hard isolation guard** — the session *cannot* run git against the shared checkout at all. `cd <main> && git …`, `git -C <main> …` and every other redirect are refused, so the main directory can only be synced by the user, by hand.
+3. **Main-dir drift after every commit** ⇒ **four manual `git merge --ff-only` requests in one session**, and at one point the main dir sat **11 days stale**. That directory is what `gcloud run deploy --source` builds from, so this is a live **Rule 1 trap**: the next ordinary deploy would have silently rolled back a full day's work.
+
+In the main checkout, `git commit` works normally, there is no isolation guard, and the deploy source always matches what was just committed — no sync step, no drift, no Rule 1 exposure.
+
+**If a worktree IS in use**, commit via Python subprocess (the `index.lock` problem is worktree-specific):
 ```python
 import subprocess
 subprocess.run(['git', 'commit', '-m', 'msg'], cwd='/path/to/worktree', capture_output=True, text=True)
 ```
-`git add`, `git push`, `git status` work fine from Bash — only `git commit` is affected.
+`git add`, `git push`, `git status` work fine from Bash — only `git commit` is affected. Also **never** use bare `git stash` / `git stash pop`: the stash stack is shared across the main checkout and all worktrees, so another session's work can be popped by accident. And re-sync the main dir before any `deploy --source`.
 
 ### Rule 3 — gcloud auth uses an ADC access token
 The `vishalrwt1995@gmail.com` account has NO on-disk credentials. Before any `gcloud run deploy`:
