@@ -149,6 +149,7 @@ from __future__ import annotations
 
 import collections
 import json
+import random as _random
 import math
 import os
 import statistics
@@ -207,6 +208,10 @@ RISK = 7500.0                        # SWING_RISK_PER_TRADE env override (flat, 
 CAP = 500_000.0                      # CAPITAL_SWING env override
 ATR_SL_MULT = 2.5                    # swing_atr_sl_mult (code default)
 EMIT_FLOOR = 45.0                    # SWING_MIN_SIGNAL_SCORE env override
+CAND_SORT = None                     # None = prod behaviour (sort by -wl_score).
+                                     # "random" = shuffle instead, to test whether the
+                                     # scorer's slot-ordering role carries any signal.
+_CAND_RNG = None                     # set to random.Random(seed) by the caller per run
 MAX_HOLD = DEFAULT_MAX_HOLD_DAYS     # = 20 — SWING_MAX_HOLD_DAYS env override
 ACTIVATE_R = DEFAULT_ACTIVATE_R      # = 1.75
 TRAIL_R = DEFAULT_TRAIL_R            # = 1.0
@@ -328,7 +333,8 @@ def _rsi_series(c: list[float]) -> list[float]:
 
 class Sym:
     __slots__ = ("bars", "d", "o", "h", "l", "c", "v", "idx", "ema20", "ema50",
-                 "ema200", "atr", "adx", "rsi", "turn", "turnmed60")
+                 "ema200", "atr", "adx", "rsi", "turn", "turnmed60",
+                 "high20", "low20", "vol20med", "sma200")
 
     def __init__(self, bars):
         self.bars = bars
@@ -349,6 +355,46 @@ class Sym:
             w = self.turn[max(0, i - 59): i + 1]
             self.turnmed60[i] = statistics.median(w) if w else 0.0
 
+        # ── PRECOMPUTED ROLLING STATS (2026-08-26) ────────────────────────────────
+        # These four were recomputed inside _component_scores / the day loop for every
+        # (symbol, day) — 6.3M times PER ARM. Sym is built once and shared across arms,
+        # so hoisting them here makes each arm dramatically cheaper. Windows are
+        # asymmetric; see the comments — they are reproduced exactly.
+        n = len(bars)
+        # rolling max/min over the last 20 bars INCLUDING j, via monotonic deques -> O(n)
+        self.high20 = [0.0] * n
+        self.low20 = [0.0] * n
+        _dqh: collections.deque = collections.deque()   # indices, decreasing h
+        _dql: collections.deque = collections.deque()   # indices, increasing l
+        for i in range(n):
+            lo_bound = max(0, i - 19)
+            while _dqh and _dqh[0] < lo_bound:
+                _dqh.popleft()
+            while _dql and _dql[0] < lo_bound:
+                _dql.popleft()
+            hi = self.h[i]
+            while _dqh and self.h[_dqh[-1]] <= hi:
+                _dqh.pop()
+            _dqh.append(i)
+            lw = self.l[i]
+            while _dql and self.l[_dql[-1]] >= lw:
+                _dql.pop()
+            _dql.append(i)
+            self.high20[i] = self.h[_dqh[0]]
+            self.low20[i] = self.l[_dql[0]]
+        # median volume over the 20 bars EXCLUDING j (0.0 when the window is empty).
+        # Left as a slice median: it is the smaller term and exactness matters more here.
+        self.vol20med = [0.0] * n
+        for i in range(n):
+            w = self.v[max(0, i - 20): i]
+            self.vol20med[i] = statistics.median(w) if w else 0.0
+        # 200-bar SMA over bars EXCLUDING j, 0.0 before warmup, via prefix sums -> O(n)
+        _pref = [0.0] * (n + 1)
+        for i in range(n):
+            _pref[i + 1] = _pref[i] + self.c[i]
+        self.sma200 = [((_pref[i] - _pref[i - 200]) / 200.0) if i >= 200 else 0.0
+                       for i in range(n)]
+
 
 def _ret(c, j, n):
     return (c[j] / c[j - n] - 1.0) if j >= n and c[j - n] > 0 else 0.0
@@ -363,9 +409,8 @@ def _component_scores(s: Sym, j, ret_mean, ret_std):
     ret60 = _ret(s.c, j, 60) or _ret(s.c, j, 20)
     z_u = (ret60 - ret_mean) / ret_std if ret_std > 1e-9 else 0.0
     rs = _norm(max(-3.0, min(3.0, z_u)), -3.0, 3.0)
-    high20 = max(s.h[max(0, j - 19): j + 1]); low20 = min(s.l[max(0, j - 19): j + 1])
-    vol20 = s.v[max(0, j - 20): j]
-    volmed = statistics.median(vol20) if vol20 else 0.0
+    high20 = s.high20[j]; low20 = s.low20[j]      # precomputed (was O(20) slice+scan)
+    volmed = s.vol20med[j]                        # precomputed (was a sorting median)
     vr = (s.v[j] / volmed) if volmed > 0 else 1.0
     ema20, ema50, ema200 = s.ema20[j], s.ema50[j], s.ema200[j]
     ema50p = s.ema50[j - 20] if j >= 20 else ema50
@@ -640,7 +685,7 @@ def run(symdata, regime: dict, market_inputs: dict,
             # Per-symbol values used in multiple setup checks
             ret60 = _ret(s.c, j, 60) or _ret(s.c, j, 20)
             rs_vs_mkt = ret60 - ret_mean
-            sma200 = sum(s.c[j - 200:j]) / 200.0 if j >= 200 else 0.0
+            sma200 = s.sma200[j]                  # precomputed (was O(200) slice+sum)
 
             # ── Fast pre-filter: component scores (cheap, pre-computed series) ──
             sc = _component_scores(s, j, ret_mean, ret_std)
@@ -898,7 +943,11 @@ def run(symdata, regime: dict, market_inputs: dict,
         if month_pnl.get(_month_key(d), 0.0) <= -DD_MONTH_HALT * _hs:
             prev_d = d; continue
 
-        cands = sorted(by_sig.get(d, []), key=lambda x: -x["wl_score"])  # T7: prod sorts by wl_score
+        if CAND_SORT == "random":
+            cands = list(by_sig.get(d, []))
+            (_CAND_RNG or _random.Random(0)).shuffle(cands)
+        else:
+            cands = sorted(by_sig.get(d, []), key=lambda x: -x["wl_score"])  # T7: prod sorts by wl_score
         entries_today = 0                           # T8: max_trades_day=5
         _setup_today = collections.defaultdict(int)  # candidate filter: same-day-per-setup cap
         # candidate filter: rank same-day cap survivors by a different key than
