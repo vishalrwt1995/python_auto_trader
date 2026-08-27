@@ -152,6 +152,48 @@ def _select_reaction_symbols(events: Sequence[tuple[str, str]],
     return out
 
 
+def _classify_reaction_drops(events: Sequence[tuple[str, str]],
+                             candles: dict[str, list[list]], reaction_target: str):
+    """PURE DIAGNOSTIC (2026-08-27) — explains WHY each event missed eligibility.
+
+    Behaviour-neutral: nothing here feeds a decision. It exists because PEAD reads a single
+    reaction session with no catch-up and, unlike pledge/insider after PR #70, logged NOTHING when
+    a session was dropped — so silent losses were unmeasurable.
+
+    Mirrors ``_select_reaction_symbols`` exactly, including its quirk that ``seen`` is populated
+    only on a MATCH (so a symbol with several filings is retried). Therefore ``on_target`` here
+    equals ``eligible`` there, and the buckets are a true partition of the same loop.
+
+    Returns ``(on_target, past, future, nobars)`` where ``past`` is the number that matters:
+    events whose reaction session is ALREADY GONE. Those are unreachable without breaking
+    backtest parity, and until now vanished without a trace.
+    """
+    import bisect
+    on_target: list[str] = []
+    past: list[tuple[str, str]] = []
+    future: list[tuple[str, str]] = []
+    nobars: list[str] = []
+    seen: set[str] = set()
+    for sym, filing in events:
+        if sym in seen:
+            continue
+        bars = candles.get(sym)
+        if not bars:
+            nobars.append(sym)
+            continue
+        dates = [b[0] for b in bars]
+        ri = bisect.bisect_right(dates, filing)
+        if ri >= len(dates):
+            future.append((sym, "beyond-bars"))
+        elif dates[ri] == reaction_target:
+            on_target.append(sym); seen.add(sym)
+        elif dates[ri] < reaction_target:
+            past.append((sym, dates[ri]))
+        else:
+            future.append((sym, dates[ri]))
+    return on_target, past, future, nobars
+
+
 def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
                        reaction_date: str | None = None) -> dict[str, Any]:
     """Live PEAD daily scan + entry (PAPER). Fail-closed at every step.
@@ -219,6 +261,26 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     # keep only names whose reaction day (first session after their filing) == target —
     # the faithful per-event reaction filter (vs naively pricing every recent reporter)
     eligible = _select_reaction_symbols(events, candles, reaction_target)
+    # Behaviour-neutral split of the SAME loop — quantifies the silent reaction-date loss that
+    # pead has always had (single session, no catch-up, no stale log). `past` is the number that
+    # matters: sessions already gone, unreachable without breaking parity.
+    _ont, _past, _fut, _nb = _classify_reaction_drops(events, candles, reaction_target)
+    logger.info("pead_reaction_split target=%s on_target=%d past=%d future=%d nobars=%d "
+                "events=%d", reaction_target, len(_ont), len(_past), len(_fut), len(_nb),
+                len(events))
+    if _past:
+        # A symbol may appear in BOTH buckets: an older filing whose session has gone, plus a
+        # newer one reacting today. The selector trades it on the newer filing, so that is NOT a
+        # loss. `unrecovered` is the honest count — past events whose symbol was never traded.
+        _ont_set = set(_ont)
+        _unrec = [(sy, rd) for sy, rd in _past if sy not in _ont_set]
+        logger.warning("pead_reaction_past n=%d unrecovered=%d — reacted BEFORE the target "
+                       "session, unreachable without breaking backtest parity. `unrecovered` is "
+                       "the true silent loss (the rest were traded on a newer filing). Until now "
+                       "this was dropped with no log at all: the pead half of the PR#70 gap "
+                       "(PROJECT_KNOWLEDGE section 7). unrecovered_syms=%s",
+                       len(_past), len(_unrec),
+                       ",".join(f"{sy}@{rd}" for sy, rd in sorted(_unrec)[:25]) or "none")
     if candles and not eligible:
         # Eligibility is an EXACT date match on `reaction_target` (set from nifty_daily[-1]).
         # State the facts and let the reader judge: if newest_bar < reaction_target it IS a
