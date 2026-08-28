@@ -229,16 +229,13 @@ def run_pead_scan_once(*, settings, upstox, state, order_service, bq=None,
     key_map = (instrument_keys.resolve_instrument_keys(ev_syms, bq, "pead")
                if bq else {})
     # STOCK-ONLY (2026-08-28): drop fund/ETF units by ISIN before any bar fetch. Name matching
-    # alone missed NSE_EQ|INF740KA1SW3 in delivery and it was stopped only by an Upstox HTTP 400 --
-    # luck, not design. NSE company equity is INE..., mutual-fund units (an ETF is one) are INF...
-    # Fail-safe: a missing key returns False, so nothing is dropped on absent data.
-    _fund_syms = [s for s, k in key_map.items() if etf_filter.is_fund_instrument_key(k)]
+    # alone missed NSE_EQ|INF740KA1SW3 and it was stopped only by an Upstox HTTP 400 -- luck, not
+    # design. NSE equity is INE..., fund units (an ETF is one) are INF... Fail-safe: an unknown
+    # key is KEPT, so a resolver outage cannot empty the book.
+    key_map, _fund_syms = etf_filter.split_fund_keys(key_map)
     if _fund_syms:
         logger.warning("pead_stock_only_dropped_funds n=%d syms=%s -- fund ISIN (INF...), "
-                       "excluded before fetch", len(_fund_syms),
-                       ",".join(sorted(_fund_syms)[:20]))
-        _drop = set(_fund_syms)
-        key_map = {s: k for s, k in key_map.items() if s not in _drop}
+                       "excluded before fetch", len(_fund_syms), ",".join(_fund_syms[:20]))
     candles: dict[str, list[list]] = {}
     ik_for: dict[str, str] = {}
     _n_nokey = _n_short = 0

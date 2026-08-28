@@ -111,3 +111,47 @@ def test_no_held_position_is_excluded():
 def test_empty_symbol_is_not_an_etf():
     for s in ("", "   ", None):
         assert etf_filter.is_etf_symbol(s) is False
+
+
+# --------------------------------------------------------------- the shared chokepoint
+def test_split_fund_keys_drops_only_the_fund():
+    """The exact live case: delivery's 08-28 key_map held one INF alongside real equities."""
+    key_map = {
+        "MEDANTA": "NSE_EQ|INE474Q01031",
+        "CYIENT": "NSE_EQ|INE136B01020",
+        "SOMEFUND": "NSE_EQ|INF740KA1SW3",   # the leak
+        "HONAUT": "NSE_EQ|INE671A01010",
+    }
+    equity, funds = etf_filter.split_fund_keys(key_map)
+    assert funds == ["SOMEFUND"]
+    assert set(equity) == {"MEDANTA", "CYIENT", "HONAUT"}
+    assert equity["CYIENT"] == "NSE_EQ|INE136B01020"   # keys preserved, not just symbols
+
+
+def test_split_fund_keys_is_a_noop_when_all_equity():
+    key_map = {"RELIANCE": "NSE_EQ|INE002A01018", "TCS": "NSE_EQ|INE467B01029"}
+    equity, funds = etf_filter.split_fund_keys(key_map)
+    assert funds == []
+    assert equity == key_map
+
+
+def test_split_fund_keys_keeps_symbols_with_unknown_keys():
+    """FAIL-SAFE: an unresolved key must be KEPT. Dropping on missing data would let a resolver
+    outage silently empty a channel's book — the opposite of the desired failure direction."""
+    key_map = {"GOOD": "NSE_EQ|INE002A01018", "NOKEY": "", "ALSONOKEY": None}
+    equity, funds = etf_filter.split_fund_keys(key_map)
+    assert funds == []
+    assert set(equity) == {"GOOD", "NOKEY", "ALSONOKEY"}
+
+
+def test_split_fund_keys_handles_empty_and_none():
+    for km in ({}, None):
+        equity, funds = etf_filter.split_fund_keys(km)
+        assert equity == {} and funds == []
+
+
+def test_split_fund_keys_does_not_mutate_the_input():
+    key_map = {"A": "NSE_EQ|INE002A01018", "F": "NSE_EQ|INF740KA1SW3"}
+    before = dict(key_map)
+    etf_filter.split_fund_keys(key_map)
+    assert key_map == before, "caller's dict was mutated"

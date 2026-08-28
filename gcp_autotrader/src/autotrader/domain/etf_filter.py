@@ -75,3 +75,22 @@ def is_non_equity(symbol: str, instrument_key: str | None = None) -> bool:
     bars) — that is the layer that catches funds whose ticker looks like an ordinary stock.
     """
     return is_etf_symbol(symbol) or is_fund_instrument_key(instrument_key)
+
+def split_fund_keys(key_map: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    """PURE: split a resolved ``{symbol: instrument_key}`` into (equity_only, fund_symbols).
+
+    The STOCK-ONLY chokepoint every channel shares. Called immediately after
+    ``resolve_instrument_keys`` — the first moment an ISIN is known and before any bar fetch.
+
+    Exists as one function rather than five inline copies because that duplication is exactly
+    what let `is_etf` drift across three modules and left insider/pledge missing 20 exclusions
+    for three weeks. Being a function also makes it unit-testable, which an inline block is not.
+
+    Fail-safe: a symbol whose key is missing or unparseable is KEPT (treated as equity), so a
+    resolver outage can never silently empty a channel's book.
+    """
+    funds = [s for s, k in (key_map or {}).items() if is_fund_instrument_key(k)]
+    if not funds:
+        return dict(key_map or {}), []
+    drop = set(funds)
+    return ({s: k for s, k in key_map.items() if s not in drop}, sorted(funds))
