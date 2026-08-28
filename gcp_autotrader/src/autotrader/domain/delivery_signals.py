@@ -13,6 +13,8 @@ Sizing / daily-breaker reuse domain/pead_book (generic). Costs/exit reuse the sh
 """
 from __future__ import annotations
 
+from autotrader.domain import etf_filter
+
 from typing import Any, Sequence
 
 # ── validated thresholds (env-overridable in settings; these are the defaults) ──
@@ -30,19 +32,23 @@ MIN_BARS = 22                          # need 20d turnover + ATR + a prior close
 # the backtest they were 13% of trades but a −6% net DRAG. Name filter catches them
 # (BEES suffix / ETF substring / curated pure-name ETFs). The trading service adds a
 # belt-and-suspenders check: intersect candidates with the equity instrument master.
-_ETF_CURATED = frozenset({
-    "MON100", "MOM100", "MOM50", "MOM30", "ICICIB22", "LIQUID", "LIQUIDCASE", "LIQUIDADD",
-    "NASDAQ", "N100", "MASPTOP50", "MAFANG", "SETFNIF50", "SETFNIFBK", "SETFNIFTY", "SETFGOLD",
-    "QGOLDHALF", "QNIFTY", "GOLDSHARE", "HDFCLIQUID", "KOTAKNIFTY", "KOTAKGOLD", "AXISNIFTY",
-    "AXISGOLD", "UTINIFTETF", "TATAGOLD", "GROWWGOLD", "CPSEETF", "PSUBANK",
-})
+# Superseded 2026-08-28 by domain/etf_filter.ETF_CURATED (the union of the three
+# drifted copies). Kept as an alias so nothing that referenced it breaks.
+_ETF_CURATED = etf_filter.ETF_CURATED
 
 
 def is_etf(symbol: str) -> bool:
-    """True for NSE ETFs (excluded from the delivery stock universe)."""
-    s = str(symbol).strip().upper()
-    return s.endswith("BEES") or "ETF" in s or "IETF" in s or s in _ETF_CURATED
+    """True for an NSE ETF / fund unit. Delegates to the shared STOCK-ONLY filter.
 
+    Was a local copy with its own curated list until 2026-08-28, when the three copies were found
+    to have DRIFTED: this module's list and insider/pledge's differed by 20 names, so insider and
+    pledge were missing GOLDSHARE / LIQUIDCASE / LIQUIDADD and 14 others — none of which match any
+    name pattern. See ``domain/etf_filter`` for the consolidation and the ISIN layer.
+
+    Prefer ``etf_filter.is_non_equity(symbol, instrument_key)`` at any call site that has the
+    instrument key: names alone cannot catch a fund whose ticker looks like an ordinary stock.
+    """
+    return etf_filter.is_etf_symbol(symbol)
 
 def atr14(bars: Sequence[Sequence[float]]) -> list[float | None]:
     """SMA-of-TR over 14 bars, aligned to ``bars`` (o[i] set for i≥13). EXACTLY matches the

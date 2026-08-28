@@ -24,6 +24,8 @@ The macro double-gate is CHANNEL-LEVEL (evaluated once per scan) — bad regime 
 """
 from __future__ import annotations
 
+from autotrader.domain import etf_filter
+
 from typing import Any, Sequence
 
 # ── validated thresholds (env-overridable in settings; these are the defaults) ──
@@ -46,16 +48,23 @@ NIFTY_MA_DAYS = 100                  # Nifty must be above its 100-day SMA
 _INFORMED = ("promoter", "director", "key managerial", "immediate relative", "promoter group")
 
 # ETF guard (belt-and-suspenders; PIT disclosures are company-only so ETFs shouldn't appear).
-_ETF_CURATED = frozenset({
-    "MON100", "MOM100", "MOM50", "ICICIB22", "LIQUIDBEES", "NASDAQ", "SETFNIF50", "SETFGOLD",
-    "CPSEETF", "PSUBANK", "GOLDBEES", "NIFTYBEES", "BANKBEES",
-})
+# Superseded 2026-08-28 by domain/etf_filter.ETF_CURATED (the union of the three
+# drifted copies). Kept as an alias so nothing that referenced it breaks.
+_ETF_CURATED = etf_filter.ETF_CURATED
 
 
 def is_etf(symbol: str) -> bool:
-    s = str(symbol).strip().upper()
-    return s.endswith("BEES") or "ETF" in s or s in _ETF_CURATED
+    """True for an NSE ETF / fund unit. Delegates to the shared STOCK-ONLY filter.
 
+    Was a local copy with its own curated list until 2026-08-28, when the three copies were found
+    to have DRIFTED: this module's list and insider/pledge's differed by 20 names, so insider and
+    pledge were missing GOLDSHARE / LIQUIDCASE / LIQUIDADD and 14 others — none of which match any
+    name pattern. See ``domain/etf_filter`` for the consolidation and the ISIN layer.
+
+    Prefer ``etf_filter.is_non_equity(symbol, instrument_key)`` at any call site that has the
+    instrument key: names alone cannot catch a fund whose ticker looks like an ordinary stock.
+    """
+    return etf_filter.is_etf_symbol(symbol)
 
 def is_informed(category: str) -> bool:
     """True for the informed personCategory set (promoter/director/KMP/relative)."""
