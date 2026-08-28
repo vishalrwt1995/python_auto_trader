@@ -76,6 +76,7 @@ def is_non_equity(symbol: str, instrument_key: str | None = None) -> bool:
     """
     return is_etf_symbol(symbol) or is_fund_instrument_key(instrument_key)
 
+
 def split_fund_keys(key_map: dict[str, str]) -> tuple[dict[str, str], list[str]]:
     """PURE: split a resolved ``{symbol: instrument_key}`` into (equity_only, fund_symbols).
 

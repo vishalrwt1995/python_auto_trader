@@ -50,6 +50,7 @@ def is_etf(symbol: str) -> bool:
     """
     return etf_filter.is_etf_symbol(symbol)
 
+
 def atr14(bars: Sequence[Sequence[float]]) -> list[float | None]:
     """SMA-of-TR over 14 bars, aligned to ``bars`` (o[i] set for i≥13). EXACTLY matches the
     validated backtest's ATR (scripts/redesign/delivery_lock.py:atr14). bars = [date,o,h,l,c,v]."""

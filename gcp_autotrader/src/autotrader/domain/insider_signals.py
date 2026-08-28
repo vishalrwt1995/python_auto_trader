@@ -66,6 +66,7 @@ def is_etf(symbol: str) -> bool:
     """
     return etf_filter.is_etf_symbol(symbol)
 
+
 def is_informed(category: str) -> bool:
     """True for the informed personCategory set (promoter/director/KMP/relative)."""
     c = str(category or "").lower()

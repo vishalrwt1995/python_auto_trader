@@ -66,6 +66,7 @@ def is_etf(symbol: str) -> bool:
     """
     return etf_filter.is_etf_symbol(symbol)
 
+
 def is_promoter(category: str) -> bool:
     """True for a promoter / promoter-group filer. The 'any-promoter' set is the validated one —
     promoters-only was much weaker OOS, promoter-group-only slightly weaker; the union wins."""
