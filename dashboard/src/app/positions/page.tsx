@@ -10,7 +10,7 @@ import { cn, formatCurrency, formatPercent } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type { Channel, Position, PendingOrder } from "@/lib/types";
 import { CHANNEL_META, CHANNEL_ORDER } from "@/lib/constants";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, X } from "lucide-react";
 
 const LTP_STALE_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -33,6 +33,7 @@ export default function PositionsPage() {
   const [showToggleConfirm, setShowToggleConfirm] = useState(false);
   const [exitingTag, setExitingTag] = useState<string | null>(null);
   const [showExitConfirm, setShowExitConfirm] = useState<Position | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Fetch current paper mode on mount
   useEffect(() => {
@@ -41,11 +42,13 @@ export default function PositionsPage() {
 
   const handleTogglePaperMode = useCallback(async () => {
     setPaperLoading(true);
+    setActionError(null);
     try {
       const res = await api.togglePaperMode(!paperMode);
       setPaperMode(res.paper_trade);
-    } catch {
-      // failed — stays as-is
+    } catch (err) {
+      // failed — stays as-is, but the user must be told (this flips PAPER/LIVE)
+      setActionError(err instanceof Error ? err.message : "Failed to toggle paper mode");
     } finally {
       setPaperLoading(false);
       setShowToggleConfirm(false);
@@ -54,10 +57,14 @@ export default function PositionsPage() {
 
   const handleExitPosition = useCallback(async (position: Position) => {
     setExitingTag(position.position_tag);
+    setActionError(null);
     try {
       await api.exitPosition(position.position_tag);
-    } catch {
-      // error — position stays open
+    } catch (err) {
+      // error — position stays open, but a silent failure here looks like
+      // the click did nothing (found 2026-08-31: a real backend bug read as
+      // "nothing happened" for exactly this reason)
+      setActionError(err instanceof Error ? err.message : `Failed to exit ${position.symbol}`);
     } finally {
       setExitingTag(null);
       setShowExitConfirm(null);
@@ -457,6 +464,22 @@ export default function PositionsPage() {
           )}
         </div>
       </div>
+
+      {/* Action failure — exit / paper-mode toggle. Must be visible: a swallowed
+          error here looks identical to the click doing nothing. */}
+      {actionError && (
+        <div className="flex items-center gap-2 text-xs text-loss bg-loss/10 border border-loss/20 rounded px-3 py-2">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span className="flex-1">{actionError}</span>
+          <button
+            onClick={() => setActionError(null)}
+            aria-label="Dismiss"
+            className="shrink-0 hover:opacity-70"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* LTP Staleness Warning */}
       {isLtpStale && (
