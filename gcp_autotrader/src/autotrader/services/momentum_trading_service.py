@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Sequence
 
+from autotrader.domain import etf_filter
 from autotrader.domain import momentum_signals as ms
 from autotrader.services import momentum_signal_service as mss
 
@@ -106,6 +107,16 @@ def run_momentum_rebalance_once(*, settings, upstox, state, order_service, bq=No
         return {"skipped": "momentum_disabled", "asof": asof}
 
     keymap = mss.fetch_universe(state)                       # broad NSE universe + NSE_EQ keys
+    # STOCK-ONLY (2026-08-31): drop fund/ETF units by ISIN before they reach the universe. The
+    # in-basket is_etf() name check (momentum_signal_service.py, since 08-04) catches every
+    # CURATED name, but a fund whose ticker matches no name/pattern would still slip through it --
+    # the same gap Friday's fix closed for the other 5 channels (delivery/insider/pledge/pead/
+    # corp_action). MON100 itself is already blocked by name; this closes the class of bug.
+    # Fail-safe: an unknown key is KEPT, so a resolver outage cannot empty the universe.
+    keymap, _fund_syms = etf_filter.split_fund_keys(keymap)
+    if _fund_syms:
+        logger.warning("momentum_stock_only_dropped_funds n=%d syms=%s -- fund ISIN (INF...), "
+                       "excluded before fetch", len(_fund_syms), ",".join(_fund_syms[:20]))
     if not keymap:
         return {"skipped": "no_universe", "asof": asof}
 

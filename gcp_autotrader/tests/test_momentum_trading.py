@@ -131,6 +131,29 @@ def test_run_once_hold_regime_does_fetch(monkeypatch):
     assert out["regime_ok"] is True
 
 
+def test_run_once_drops_fund_isin_before_history_fetch(monkeypatch):
+    """STOCK-ONLY (2026-08-31): a fund whose ticker matches no name/pattern (only its ISIN gives
+    it away) must never reach fetch_universe_history. MON100 itself is already caught by name in
+    build_target_basket; this is the ISIN fail-safe layer momentum was missing (the other 5
+    channels got it 2026-08-28) -- a NOT-yet-curated fund is the case it exists for."""
+    from autotrader.services import momentum_trading_service as mts
+    from autotrader.services import momentum_signal_service as mss
+    seen_keymap = {}
+    monkeypatch.setattr(mss, "fetch_universe", lambda state, **k: {
+        "GOODSTOCK": "NSE_EQ|INE002A01018", "SOMEFUND": "NSE_EQ|INF740KA1SW3",
+    })
+    monkeypatch.setattr(mss, "fetch_nifty_regime", lambda *a, **k: True)       # HOLD -> fetch runs
+    def _fetch(symbols, keymap, *a, **k):
+        seen_keymap.update(keymap)
+        return {}
+    monkeypatch.setattr(mss, "fetch_universe_history", _fetch)
+    monkeypatch.setattr(mss, "build_target_basket", lambda *a, **k: [])
+    mts.run_momentum_rebalance_once(settings=_RunSettings(), upstox=None, state=_RunState(),
+                                    order_service=_RunOrder(), asof="2026-07-10")
+    assert "SOMEFUND" not in seen_keymap                # fund dropped before the fetch
+    assert seen_keymap == {"GOODSTOCK": "NSE_EQ|INE002A01018"}   # equity untouched
+
+
 def test_build_target_basket_excludes_etf_even_when_top_ranked():
     """Stock-only: an ETF is dropped from the basket even with the STRONGEST momentum +
     lowest vol (it would otherwise rank #1). 20 plain stocks fill exactly the top-20; MON100
