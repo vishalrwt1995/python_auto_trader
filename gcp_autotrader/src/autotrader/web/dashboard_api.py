@@ -2012,7 +2012,7 @@ def post_admin_exit_position(
         if not instrument_key:
             raise HTTPException(status_code=400, detail=f"No instrument_key for {symbol}")
 
-        result = c.order_service.place_exit_order(
+        result = c.order_service().place_exit_order(
             position_tag=position_tag,
             instrument_key=instrument_key,
             exit_reason="MANUAL_EXIT",
