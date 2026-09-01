@@ -170,5 +170,36 @@ broader SAST/results feeds — voluminous ≠ better.** Only *real-but-sub-bar* 
 0.43, OFS bull-only) remain as diversifiers-in-waiting if the bar/capital ever changes. **NOTHING from Phase-2
 is implementable. Next needle-mover is NOT more data — it's live forward-validation of the 8 shipped channels.**
 
+**GRIND #4 — Sector-relative RS (RANGE regime revival attempt) — ❌ KILLED 2026-09-01.** Ran the
+already-built-but-never-recorded `swing_sector_rs_diag.py` (73,296 real scored signals via the
+prod pipeline). In the dark RANGE+b200<70 population, sector-leader buckets get MONOTONICALLY
+WORSE OOS (IS −0.066R → OOS **−0.136R**) — matches the "flat/negative" failure pattern of the
+other 3 RANGE-regime attempts. Not just untested-and-skipped; now the 4th confirmed dead end.
+
+**GRIND #5 — Calendar seasonality (Nifty daily, 2015–26) — ❌ KILLED 2026-09-01.** No weekday or
+month shows a robust, materially-sized, both-halves-consistent effect — nearly every bucket
+flips sign IS→OOS. Feb is the one mild exception (−0.068%/−0.086% IS/OOS, plausibly Union
+Budget uncertainty) but too small/lonely to trust alone. Script `diag_seasonality_relval.py`.
+
+**GRIND #6 — Sector-relative-value (5d spread reversion, long-only) — ❌ KILLED 2026-09-01
+(diagnostic looked real, full grind didn't survive).** Cheap bucket-average diagnostic showed a
+clean monotonic gradient (laggard +0.65–0.77%/5d fwd vs leader flat-to-negative, both halves) —
+and it survived the obvious confound check (correlation vs plain unadjusted 5d return only 0.826,
+not ~1.0, so this is NOT just single-stock MR relabeled). But the REAL portfolio-level grind
+(Top-10 laggards by sector-adj spread, equal-weight ~₹20k/name, full Upstox cost,
+lookback/hold/topn plateau check) went negative in all 4 configs: base Calmar −0.03 (IS 0.06 /
+OOS −0.27), topn=15 −0.04 (OOS −0.41), hold=7d −0.12, lookback=8d −0.14. 2025 alone lost
+₹100k+ in every config. Lesson: concentrating on the TOP-N most-extreme laggards (not a broad
+bucket average) plus real round-trip cost erases a real-looking bucket signal — same shape as
+the FII/DII kill (§A). Script `grind_relval.py`. True stock-vs-stock pairs (correlation-selected,
+not sector-average) judged low-expected-value and not built — same underlying economic bet,
+already failed decisively not marginally.
+
+**★ Session verdict (2026-09-01):** re-opened the search 2 months after the 07-24 catalog
+completion, specifically for ALGORITHMIC approaches rather than new data — sector rotation,
+calendar seasonality, relative-value/pairs. Zero survivors, 3-for-3 killed. Two independent
+searches 6 weeks apart, same conclusion: nothing new is monetizable in this system's reachable
+data with current techniques.
+
 ## D. Per-item bar (every candidate must clear before build)
 Survivorship-safe (incl. delisted) · IS + OOS both positive · not one-year-carried · additive/low-overlap with the 7 live channels · full Upstox cost · plateau not peak · realistic fills. Kill honestly if it doesn't. Thin-but-real event channels (pead/corp tier) are acceptable as diversifiers; needle-movers are rare.
