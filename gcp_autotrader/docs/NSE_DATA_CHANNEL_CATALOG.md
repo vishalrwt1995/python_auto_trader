@@ -103,6 +103,41 @@ warranted.** All files in `scratchpad/*.json`. → proceed to grind (§C queue).
 
 ---
 
+## C0. Audit of prior kills — 2026-09-01 (fresh POV, not a re-grind)
+
+Prompted by the user: rather than re-testing the same hypotheses, audit whether the *prior kills
+themselves* were sound — this project's own history (swing scorer grind) already found a real
+harness bug and mis-specified verdict checks by exactly this kind of second look.
+
+**OFS (item #10 below) — RE-VERIFIED, kill CONFIRMED correct.** Original scratchpad cache
+(`ofs_past.json`) was gone (session-ephemeral); re-fetched fresh from the same documented NSE
+endpoint (`live-ofs-past-issues`, 465 rows now vs 459 in July — 6 new events since). Re-ran
+`ofs_faithful.py` clean: the `px>200DMA` plateau (9 neighboring hold×slot configs) shows OOS
+Calmar 1.89–4.21 (genuinely robust, not one lucky cell) but **IS Calmar −0.13 to +0.10 across
+every single one of those same 9 cells** — flat/dead, not marginal. Textbook "one era carried
+it," exactly the pattern the both-halves bar exists to catch. Mechanically: the earlier
+positive-looking pass (`ofs_maxedge.py`) used a **no-stop, close-to-close, flat-cost walk**;
+`ofs_faithful.py` correctly replaced it with `insider_engine.walk` — the same proven engine
+validating the live insider channel (real open entry, real 2.5×ATR stop, real cost, risk sizing).
+The correction was sound, not a bug.
+
+**FII/DII as a per-channel entry filter — considered, not built.** Checked `fii_grind3.py`
+directly: the prior "cash-threshold"/"exposure-tilt" sweep operates on **Nifty/market exposure**,
+not on gating individual channels' stock-picks — so this specific angle is technically untested.
+But the composite is a market-wide positioning/crowding gauge (Pro/retail/DII/FII in *index*
+derivatives); there's no strong mechanism linking that to whether one specific insider
+cluster-buy is good, and wiring it into each channel's entry path is real new engineering, not a
+re-run. Weak rationale + real cost → not pursued.
+
+**Own 2026-09-01 relative-value grind — considered, not re-run.** The kill was decisive (Calmar
+−0.03 to −0.41 across 4 varied configs, OOS collapsing in all four, 2025 alone −₹100k+ in every
+config) — unlike OFS, IS wasn't sitting at a plausible ≈0 tipping point. Better position sizing /
+overlapping cohorts improve efficiency at capturing an edge that exists; they don't manufacture
+one from a signal that's consistently losing. Low expected value.
+
+**Audit verdict: the catalog's kills hold up.** One genuine near-miss re-verified with fresh data
+and the same conclusion; two candidates considered and reasoned out rather than blindly re-run.
+
 ## C. Build queue (grind → build → deploy, one at a time)
 
 **GRIND #1 — SAST Reg 29 deep — ❌ KILLED 2026-07-24 (fully evidenced, not premature).** Promoter open-market
