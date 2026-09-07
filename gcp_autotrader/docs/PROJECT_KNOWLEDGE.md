@@ -3,22 +3,43 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last verified live state:** **2026-09-02 ~12:30 IST (Wed)** revision/position numbers below ·
-> **⚠️ NO gcloud re-check since then — this session is closing at 2026-09-07 14:59 IST (Mon) with
-> 5 trading days (09-03..09-07) COMPLETELY UNAUDITED.** Revision may have drifted from what's below
-> if anyone deployed since. **First task next session: re-run the live-state bootstrap (top of this
-> file) before trusting anything here, then e2e-check 09-03 through 09-07 in one pass** (errors,
-> per-channel scan/reconcile summaries, ISIN audit, position diff vs the 09-02 snapshot below).
+> **Last verified live state:** **2026-09-07 ~15:15 IST (Mon)** — every value below re-read from
+> live `gcloud`/Firestore/Cloud Logging at that moment, closing the 09-03..09-07 gap flagged above.
 >
-> **`autotrader-00322-42s`** · `autotrader-ws-monitor-00048-b9g` · `autotrader-dashboard-00085-2wh` ·
-> **PAPER** · 60 open positions as of 09-02 (core 30 · momentum 19 · insider 5 · delivery 4 · pledge 2)
-> — delivery dropped from 5 CYIENT closing `SL_HIT` +₹13,398.88, its best win yet ·
-> schedulers **41 ENABLED / 3 PAUSED** (2 intraday + 1 gapfade, all intentional, unchanged) ·
-> `autotrader-insider-ingest-1930` = `30 19 * * *` · tests 1136 passed / 5 skipped (as of 08-31) ·
-> forward test **2 closed, +₹575.19** (unchanged — 0 entries and 0 closes on 08-26).
-> ⚠️ `origin/main` = `85ad41c` but the **main checkout is at `1d9036e`, one commit behind** —
-> docs-only, so deploying is still safe, but Rule 1 wants a `git merge --ff-only origin/main`
-> there. This drift recurs after every worktree commit.
+> **`autotrader-00322-42s`** · `autotrader-ws-monitor-00048-b9g` · `autotrader-dashboard-00085-2wh`
+> (unchanged autotrader/ws-monitor since 08-31; dashboard moved 00084-pgl→00085-2wh some time
+> 09-02..09-03 — this is commit `07e878a`, the exit-position/paper-toggle silent-`catch{}` fix, 0
+> errors observed since) · **PAPER** · **60 open positions** (core 30 · momentum 19 · **insider 4**
+> · **delivery 5** · pledge 2 — composition shifted, count unchanged: delivery +1 (TATACOMM entered
+> 09-03, clean INE-equity, sized ₹2,552 max_loss) offsetting insider −1 (**HEG exited 09-07, see ★
+> below**) · schedulers **41 ENABLED / 3 PAUSED** (2 intraday + 1 gapfade, unchanged) ·
+> `autotrader-insider-ingest-1930` = `30 19 * * *` (confirmed still weekend-enabled) · main checkout
+> **fast-forwarded to `origin/main` (`286252b`)** — was 3 commits behind (2 read-only backtest-grind
+> scripts + the handoff doc itself), now clean, safe to deploy from.
+>
+> **★ 09-03..09-07 AUDIT — HEADLINE: insider/HEG stop-loss blown through by ~4.8R, root cause
+> undetermined.** Across all 5 days, Firestore shows exactly **two** position-level events system-wide
+> (TATACOMM entry above + HEG exit below) — every other channel (swing, pledge, pead, corp_action,
+> core, momentum-scan) correctly found nothing, corroborated by **zero** ERROR-severity autotrader
+> logs across the whole window. **HEG** (insider, entered 08-05 @₹679.63×29, `sl_price=607.49`,
+> budgeted `max_loss=₹2,092`) exited 09-07 09:43:51 IST at `ltp=260.00`/`exit_price=259.48` —
+> `net_pnl −₹12,286.33`, **5.87× its budgeted risk**, and `max_adverse_excursion_price=260` (its
+> all-time worst mark equals the exit print, to the rupee). The `exit_fsm` itself fired correctly and
+> fast (`fsm_transition INITIAL→TERMINAL` within ~1s of the LTP read that saw the breach), and the
+> REST LTP poll that feeds it was confirmed running every ~15-30s all week, unbroken by a benign
+> Upstox-WS-401 reconnect storm on 09-04 (247 log lines, self-healing `ws_connected` every ~1-1.5h,
+> **REST poll never interrupted** — ruled out as the cause). insider's *other* closed trade (TRUALT,
+> exited 08-31) stopped out almost exactly at its SL price (−0.98R) the same week, proving the
+> mechanism works normally — **HEG is the outlier, not the pattern.** Leading hypothesis: a genuine
+> large, fast adverse move that gapped through the 607.49 stop zone between two ~15-30s checks
+> (India's circuit-filter bands make a single-tick 62% move unlikely; more likely multiple
+> lower-circuit sessions the PAPER fill model may not be simulating realistically) — **unconfirmed,
+> needs HEG's actual daily price history to settle single-day-crash vs multi-day-slide-through-circuit,
+> which needs a BQ query (see §7, needs the standing GCP-cost go-ahead).** Portfolio impact: this one
+> trade is most of insider's realized **−₹14,407.78** (2 closed, 0W/2L) and offsets roughly two-thirds
+> of delivery's **+₹20,737.81** (12 closed, 8W/4L) — post-paper-era (≥07-09) total realized across all
+> channels is **+₹6,064.09**. Also re-ran the ㊱-style ISIN/ETF audit on the full current book: clean
+> (only the already-closed historical MON100 flagged, expected).
 >
 > **08-26 audit (read-only, no deploy) — the one notable result:**
 > `delivery_resolve_keys asked=18 deep=17 fresh=12 merged=18 **fresh_only=1**` — **delivery hit its
@@ -283,13 +304,42 @@ Each gate's rejection writes a `blocked_reason` to `scan_decisions`.
 
 ## 7. Open items — under collaborative review
 
-### ★ NEW 2026-09-07 — 09-03..09-07 (5 trading days) UNAUDITED, session closed on context size
-Prior session ran long (context watchdog fired at 742k resident tokens); closed out rather than
-starting a 5-day e2e audit in an already-heavy window. Last real check was 09-02 ~12:30 IST (see
-header). **User asked for exactly this audit ("today's run e2e + full audit of valid trades and
-channels till 7th sept") and it was deferred, not done** — first task for a fresh session. Also
-deferred from the same thread: the capital-allocation question (3 of 8 funded channels idle,
-delivery carrying the forward-test result) — raised twice by Claude, not yet discussed by the user.
+### ~~2026-09-07 — 09-03..09-07 (5 trading days) UNAUDITED~~ — **DONE same day, see header ★**
+Re-ran the live-state bootstrap + e2e-checked 09-03 through 09-07 in one pass: errors (0 across
+autotrader/dashboard, ws-monitor's only errors were the benign 09-04 WS-401 storm), per-channel
+diff (exactly 2 position events, both identified), ISIN audit (clean), scheduler/git-sync (clean).
+Surfaced one real problem in the process — see the new HEG item directly below — so "done" means
+audited, not "everything is fine."
+
+### ★ NEW 2026-09-07 — HEG (insider) stop-loss blown through by 5.87× budgeted risk — root cause undetermined
+Full detail in the header ★ block. Compressed: entered 08-05 @₹679.63, `sl_price=607.49`,
+`max_loss` budgeted at ₹2,092; exited 09-07 at ltp=260.00, realized −₹12,286.33. The exit_fsm and
+its feeding REST-poll loop both checked out as working correctly and continuously all week (ruled
+out as the cause, with evidence, not assumed) — so this reads as a real market move, not a
+monitoring gap, but that is a hypothesis, not a proven finding.
+
+**What would settle it:** HEG's actual daily OHLC 08-05→09-07 from `candles_daily` or
+`nse_delivery_daily` (BQ) — a single-symbol, ~35-day-filtered query, i.e. tiny, but still a `bq
+query` and therefore needs the standing per-query GCP-cost go-ahead ([[feedback_gcp_cost_permission]])
+before running, not assumed pre-approved by size. Distinguishes: (a) one fast gap/crash the system
+genuinely could not have caught between checks (real market risk, no code defect) vs (b) a slower
+multi-day slide, plausibly through lower-circuit sessions the PAPER fill model filled optimistically
+at a single clean LTP rather than the partial/no-fill a real CNC sell might have gotten (a paper-model
+fidelity question, not an exit-logic bug). Either way the exit_fsm/poll mechanism itself is not
+implicated — narrower than it first looked.
+
+**Also worth deciding, not yet discussed:** whether ATR×2.5 stops on illiquid/thin informed-buying
+names (the exact profile insider targets) need a gap-risk overlay of some kind, given this is a
+structural exposure of *any* periodic-check stop on cash equity, not an insider-specific bug — one
+data point, not yet a pattern (TRUALT's clean −0.98R stop-out the same week argues against
+over-reacting to n=1).
+
+### ★ STILL OPEN — capital-allocation question (raised twice, undiscussed)
+3 of 8 funded channels have been structurally idle for weeks (pledge dormant since 08-24, pead
+gated off since ~07 by the Nifty drawdown gate, corp_action 0 events for the whole window) while
+delivery carries essentially all of the post-paper-era realized edge. Filed 09-07 in the prior
+session's handoff and not yet brought back to the user for a decision — carrying forward rather
+than letting it quietly drop a second time.
 
 ### ★ NEW 2026-09-01/02 — algorithmic edge search + audit-of-kills, full detail in the catalog doc
 Not duplicated here to keep this file lean — see `docs/NSE_DATA_CHANNEL_CATALOG.md` §C0 and the
@@ -661,6 +711,66 @@ Shipped + ENABLED (§8 ⑰, PR #59, rev `autotrader-00289-ftq` + ws-monitor `000
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### ㊳ 2026-09-07 · 5-day gap audit (09-03..09-07) — clean except one real stop-loss anomaly
+No deploy this session (git-sync only: main checkout fast-forwarded `07e878a`→`286252b`, 3
+commits — 2 read-only backtest-grind scripts + the prior session's handoff doc — no conflicts).
+Picked up exactly where the 09-07 14:59 handoff left off: live-state bootstrap re-run, then the
+09-03..09-07 window e2e-checked in one pass, closing the §7 item filed for it.
+
+**Method, so it's reproducible:** Firestore `positions` pulled in full (280 docs) and diffed by
+`updated_at`/`entry_ts`/`exit_ts` against the 09-02 snapshot rather than trusting relative log
+windows (the ㉝-session lesson about stale "now" assumptions) — cross-referenced against Cloud
+Logging `severity>=ERROR` for autotrader/ws-monitor/dashboard over the same absolute UTC range.
+
+**Findings:**
+1. **Revisions:** autotrader/ws-monitor unchanged since 08-31. Dashboard is now `00085-2wh` (was
+   `00084-pgl`) — traced to commit `07e878a` (exit-position + paper-mode-toggle silent-`catch{}`
+   fix, written 08-31, marked "not deployed" in its own message) actually reaching prod sometime
+   09-02/09-03; nobody had written down that it shipped. 0 dashboard errors since.
+2. **Exactly two position-level events system-wide across 5 trading days:** delivery/TATACOMM
+   entered 09-03 (`INE151A01013` — real equity, sized to ₹2,552 max_loss, unremarkable) and
+   insider/HEG exited 09-07 (see below). Every other channel — swing, pledge, pead, corp_action,
+   core, momentum — correctly did nothing, corroborated by **zero** ERROR-severity autotrader logs
+   across all 5 days (nothing crashed silently).
+3. **Scheduler + ISIN audit:** 41 ENABLED / 3 PAUSED unchanged (intraday×2 + gapfade, all
+   intentional); weekend `autotrader-insider-ingest-1930` cron still `30 19 * * *`. Re-ran the
+   ㊱-style ISIN cross-check (`instrument_key` vs the `INF`-fund-unit pattern) against the full
+   current 60-position book — clean, only the already-closed historical MON100 flagged.
+4. **ws-monitor 09-04: a 247-entry WS-401 error burst**, all `Upstox market-data-feed 401
+   Unauthorized` → reconnect tracebacks, self-healing via periodic `ws_connected` (roughly hourly
+   through the day). Checked whether this broke position monitoring: **no** — the REST LTP poll
+   (`positions_refreshed`, ~15-30s cadence, the same loop that feeds `exit_fsm`) kept running
+   throughout, confirmed via log timestamps spanning the same window. Same shape as the previously-
+   documented 08-20/08-21/08-24 WS-401 episodes; treated as cosmetic on the same evidence standard.
+5. **★ The one real finding — HEG (insider) stop-loss breached by 5.87× its budgeted risk.**
+   Entered 08-05 @₹679.63×29, `sl_price=607.49` (2.5×ATR, `max_loss` budgeted ₹2,092). Exited
+   09-07 09:43:51 IST: `fsm_transition tag=...INITIAL→TERMINAL events=['sl_hit_from_initial']`
+   immediately followed by `fsm_exit reason=SL_HIT ltp=260.00 sl=607.49`, i.e. the FSM fired the
+   instant it saw the breach, comparing against the correct stop. Realized `net_pnl −₹12,286.33`.
+   `max_adverse_excursion_price=260` (the position's all-time-worst mark) equals the exit print to
+   the rupee — its FSM had never transitioned before this moment (no breakeven arm, no trail; MFE
+   only ever reached +1.02R), so there is no earlier log line to show whether price approached 607
+   gradually or arrived there in one move. Ruled out as *not* a monitoring gap: the feeding REST
+   poll was confirmed running every cycle, every day, all week (see #4), and the FSM's own logic is
+   proven correct on the very same book — insider's other closed trade this window, **TRUALT**,
+   stopped out 08-31 almost exactly at its SL price (−0.98R), a clean, boring, correct exit. So the
+   mechanism works; HEG's outcome is the anomaly, not the norm. Leading hypothesis, unconfirmed: a
+   genuine large adverse move that gapped past the stop zone between checks — India's circuit bands
+   make a single-tick 62% move unlikely, so more likely multiple lower-circuit sessions, which the
+   PAPER fill model may be simulating too optimistically (a single clean fill at LTP, not the
+   partial/no-fill a real CNC sell could face mid-circuit). **Settling this needs HEG's actual daily
+   price history — a small, single-symbol BQ query, not run pending the standing per-query cost
+   go-ahead.** Filed as a new §7 item (root cause + a broader gap-risk-on-ATR-stops question).
+6. **Scorecard, for context:** post-paper-era (≥07-09) realized P&L across all channels is
+   **+₹6,064.09** — delivery **+₹20,737.81** (12 closed, 8W/4L) carries it, insider **−₹14,407.78**
+   (2 closed, 0W/2L, HEG dominant) is the biggest drag, momentum roughly flat (**−₹265.94**, 5
+   closed). Consistent with the standing capital-allocation open item (delivery carrying the edge).
+
+**Also surfaced, not re-litigated:** the 09-01/02 algorithmic-edge-search + kill-audit session
+(commits `f1b08d3`, `7765141`, full detail in `NSE_DATA_CHANNEL_CATALOG.md`) — read-only, zero GCP
+cost, no live impact, already merged to main; and the still-undiscussed capital-allocation question
+from the prior handoff, carried forward rather than dropped (§7).
 
 ### ㊱ 2026-08-31 · momentum's ETF ISIN gap closed + a never-worked admin endpoint fixed (2 unrelated bugs, 1 session, both from trying to exit one position)
 Deployed **`autotrader-00321-vlt`** then **`autotrader-00322-42s`** · commits `5d7d21e` (momentum
