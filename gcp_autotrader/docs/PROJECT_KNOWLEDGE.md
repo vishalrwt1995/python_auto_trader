@@ -3,12 +3,18 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
-> **Last verified live state:** **2026-08-31 15:43 IST (Mon)** — every value below re-read from
-> live `gcloud` at that moment, not carried forward:
-> **`autotrader-00322-42s`** · `autotrader-ws-monitor-00048-b9g` · `autotrader-dashboard-00084-pgl` ·
-> **PAPER** · 61 open positions (core 30 · momentum 19 · delivery 5 · insider 5 · pledge 2) ·
+> **Last verified live state:** **2026-09-02 ~12:30 IST (Wed)** revision/position numbers below ·
+> **⚠️ NO gcloud re-check since then — this session is closing at 2026-09-07 14:59 IST (Mon) with
+> 5 trading days (09-03..09-07) COMPLETELY UNAUDITED.** Revision may have drifted from what's below
+> if anyone deployed since. **First task next session: re-run the live-state bootstrap (top of this
+> file) before trusting anything here, then e2e-check 09-03 through 09-07 in one pass** (errors,
+> per-channel scan/reconcile summaries, ISIN audit, position diff vs the 09-02 snapshot below).
+>
+> **`autotrader-00322-42s`** · `autotrader-ws-monitor-00048-b9g` · `autotrader-dashboard-00085-2wh` ·
+> **PAPER** · 60 open positions as of 09-02 (core 30 · momentum 19 · insider 5 · delivery 4 · pledge 2)
+> — delivery dropped from 5 CYIENT closing `SL_HIT` +₹13,398.88, its best win yet ·
 > schedulers **41 ENABLED / 3 PAUSED** (2 intraday + 1 gapfade, all intentional, unchanged) ·
-> `autotrader-insider-ingest-1930` = `30 19 * * *` · tests 1136 passed / 5 skipped ·
+> `autotrader-insider-ingest-1930` = `30 19 * * *` · tests 1136 passed / 5 skipped (as of 08-31) ·
 > forward test **2 closed, +₹575.19** (unchanged — 0 entries and 0 closes on 08-26).
 > ⚠️ `origin/main` = `85ad41c` but the **main checkout is at `1d9036e`, one commit behind** —
 > docs-only, so deploying is still safe, but Rule 1 wants a `git merge --ff-only origin/main`
@@ -276,6 +282,21 @@ Each gate's rejection writes a `blocked_reason` to `scan_decisions`.
 ---
 
 ## 7. Open items — under collaborative review
+
+### ★ NEW 2026-09-07 — 09-03..09-07 (5 trading days) UNAUDITED, session closed on context size
+Prior session ran long (context watchdog fired at 742k resident tokens); closed out rather than
+starting a 5-day e2e audit in an already-heavy window. Last real check was 09-02 ~12:30 IST (see
+header). **User asked for exactly this audit ("today's run e2e + full audit of valid trades and
+channels till 7th sept") and it was deferred, not done** — first task for a fresh session. Also
+deferred from the same thread: the capital-allocation question (3 of 8 funded channels idle,
+delivery carrying the forward-test result) — raised twice by Claude, not yet discussed by the user.
+
+### ★ NEW 2026-09-01/02 — algorithmic edge search + audit-of-kills, full detail in the catalog doc
+Not duplicated here to keep this file lean — see `docs/NSE_DATA_CHANNEL_CATALOG.md` §C0 and the
+new GRIND #4-6 entries. One-line summary: sector rotation, calendar seasonality, and sector-relative
+value all killed (3-for-3) on top of the existing 18-for-18 NSE alt-data kill rate; then specifically
+audited (not re-tested) whether the *kills themselves* were sound — OFS re-verified correct with
+fresh data, two other candidates reasoned out rather than re-run. Commits `f1b08d3`, `7765141`.
 
 ### ~~2026-08-24 — extract the identical `_resolve_instrument_keys` copies into one helper~~ — **DONE same day (§8 ㉛, PR #73, rev `autotrader-00318-ws6`)**
 Shipped as `adapters/instrument_keys.resolve_instrument_keys`; net −179 lines, 14 mutation-tested tests, equivalence proven against the then-serving revision. Turned out to be **five** call sites, not four — `corp_action` was importing pead's private copy, which no test covered.
