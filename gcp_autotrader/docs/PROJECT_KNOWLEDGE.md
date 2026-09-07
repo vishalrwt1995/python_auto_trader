@@ -31,11 +31,22 @@
 > **REST poll never interrupted** — ruled out as the cause). insider's *other* closed trade (TRUALT,
 > exited 08-31) stopped out almost exactly at its SL price (−0.98R) the same week, proving the
 > mechanism works normally — **HEG is the outlier, not the pattern.** Leading hypothesis: a genuine
-> large, fast adverse move that gapped through the 607.49 stop zone between two ~15-30s checks
-> (India's circuit-filter bands make a single-tick 62% move unlikely; more likely multiple
-> lower-circuit sessions the PAPER fill model may not be simulating realistically) — **unconfirmed,
-> needs HEG's actual daily price history to settle single-day-crash vs multi-day-slide-through-circuit,
-> which needs a BQ query (see §7, needs the standing GCP-cost go-ahead).** Portfolio impact: this one
+> large, fast adverse move that gapped through the 607.49 stop zone — **CONFIRMED, same session, via
+> BQ `nse_delivery_daily` (Fri 09-04 close ₹728.25, completely normal) + live Upstox `HistoryV3Api`
+> intraday candles (user-approved lookups): HEG gapped down ~64% at Monday's open, printed real
+> volume (65,110 shares) at exactly ₹260.00 in the 09:40 IST bar, then FROZE (O=H=L=C=260.00, zero
+> volume) for three straight 5-min bars (09:45-09:55) — the textbook signature of a lower-circuit
+> halt — before NSE's price-discovery mechanism reopened it at 10:00 with a 448K-share range-250-273
+> print and it traded actively 250-273 for the rest of the day (LTP ₹273.00 as of this check).** The
+> exit fired at 09:43:51, i.e. *during* the freeze, at what real volume proves was a genuinely
+> tradeable price that session — not a phantom quote, not a paper-model artifact. This is a real,
+> extreme, company-specific shock (cause unknown — would need a news lookup, not attempted), and the
+> system responded about as well as a periodic-check stop realistically could: it did not prevent a
+> gap through the stop (nothing could — a real broker GTT stop has the identical limitation once
+> price gaps past it), but it caught the position within 28 minutes of open, during the very freeze,
+> not after further deterioration. **Verdict: not a monitoring gap (ruled out, §8 ㊳), not an
+> exit-logic bug (ruled out, §8 ㊳), not a paper-fill-fidelity artifact (ruled out here) — a real
+> market event the risk budget could not have priced in.** Portfolio impact: this one
 > trade is most of insider's realized **−₹14,407.78** (2 closed, 0W/2L) and offsets roughly two-thirds
 > of delivery's **+₹20,737.81** (12 closed, 8W/4L) — post-paper-era (≥07-09) total realized across all
 > channels is **+₹6,064.09**. Also re-ran the ㊱-style ISIN/ETF audit on the full current book: clean
@@ -311,28 +322,23 @@ diff (exactly 2 position events, both identified), ISIN audit (clean), scheduler
 Surfaced one real problem in the process — see the new HEG item directly below — so "done" means
 audited, not "everything is fine."
 
-### ★ NEW 2026-09-07 — HEG (insider) stop-loss blown through by 5.87× budgeted risk — root cause undetermined
-Full detail in the header ★ block. Compressed: entered 08-05 @₹679.63, `sl_price=607.49`,
-`max_loss` budgeted at ₹2,092; exited 09-07 at ltp=260.00, realized −₹12,286.33. The exit_fsm and
-its feeding REST-poll loop both checked out as working correctly and continuously all week (ruled
-out as the cause, with evidence, not assumed) — so this reads as a real market move, not a
-monitoring gap, but that is a hypothesis, not a proven finding.
+### ~~2026-09-07 — HEG (insider) stop-loss blown through by 5.87× budgeted risk — root cause~~ — **CONFIRMED same day: real lower-circuit gap-down, not a defect**
+Full detail in the header ★ block. User approved two read-only lookups to settle it: a BQ
+`nse_delivery_daily` query (confirmed Fri 09-04 close ₹728.25, totally normal) and live Upstox
+`HistoryV3Api` intraday candles for 09-07 (confirmed the ~64% gap-down at open, a real 65,110-share
+print at exactly ₹260.00, then a textbook lower-circuit freeze — O=H=L=C=260.00, zero volume,
+09:45-09:55 — before NSE reopened price discovery at 10:00). The exit fired during the freeze, at a
+price real volume proves was genuinely tradeable that session. Not a monitoring gap, not an
+exit-logic bug, not an optimistic paper-fill assumption — all three explicitly ruled out with
+evidence, not assumed. A periodic-check stop (or a real broker GTT) has no defense against a gap
+through its trigger price; this is that failure mode occurring for real, once, on one name.
 
-**What would settle it:** HEG's actual daily OHLC 08-05→09-07 from `candles_daily` or
-`nse_delivery_daily` (BQ) — a single-symbol, ~35-day-filtered query, i.e. tiny, but still a `bq
-query` and therefore needs the standing per-query GCP-cost go-ahead ([[feedback_gcp_cost_permission]])
-before running, not assumed pre-approved by size. Distinguishes: (a) one fast gap/crash the system
-genuinely could not have caught between checks (real market risk, no code defect) vs (b) a slower
-multi-day slide, plausibly through lower-circuit sessions the PAPER fill model filled optimistically
-at a single clean LTP rather than the partial/no-fill a real CNC sell might have gotten (a paper-model
-fidelity question, not an exit-logic bug). Either way the exit_fsm/poll mechanism itself is not
-implicated — narrower than it first looked.
-
-**Also worth deciding, not yet discussed:** whether ATR×2.5 stops on illiquid/thin informed-buying
-names (the exact profile insider targets) need a gap-risk overlay of some kind, given this is a
-structural exposure of *any* periodic-check stop on cash equity, not an insider-specific bug — one
-data point, not yet a pattern (TRUALT's clean −0.98R stop-out the same week argues against
-over-reacting to n=1).
+**Still worth deciding, not yet discussed:** whether ATR×2.5 stops on illiquid/thin informed-buying
+names (the exact profile insider targets) warrant a gap-risk overlay of some kind — a structural
+exposure of *any* periodic-check stop on cash equity, not an insider-specific bug. One data point,
+not yet a pattern: TRUALT's clean −0.98R stop-out the same week argues against over-reacting to n=1,
+and a single company-specific shock isn't evidence the *sizing* is wrong, only that gap risk exists
+and isn't currently hedged (nothing cheap would hedge it for a long-only cash-equity book anyway).
 
 ### ★ STILL OPEN — capital-allocation question (raised twice, undiscussed)
 3 of 8 funded channels have been structurally idle for weeks (pledge dormant since 08-24, pead
@@ -755,13 +761,17 @@ Logging `severity>=ERROR` for autotrader/ws-monitor/dashboard over the same abso
    poll was confirmed running every cycle, every day, all week (see #4), and the FSM's own logic is
    proven correct on the very same book — insider's other closed trade this window, **TRUALT**,
    stopped out 08-31 almost exactly at its SL price (−0.98R), a clean, boring, correct exit. So the
-   mechanism works; HEG's outcome is the anomaly, not the norm. Leading hypothesis, unconfirmed: a
-   genuine large adverse move that gapped past the stop zone between checks — India's circuit bands
-   make a single-tick 62% move unlikely, so more likely multiple lower-circuit sessions, which the
-   PAPER fill model may be simulating too optimistically (a single clean fill at LTP, not the
-   partial/no-fill a real CNC sell could face mid-circuit). **Settling this needs HEG's actual daily
-   price history — a small, single-symbol BQ query, not run pending the standing per-query cost
-   go-ahead.** Filed as a new §7 item (root cause + a broader gap-risk-on-ATR-stops question).
+   mechanism works; HEG's outcome is the anomaly, not the norm. **Root cause CONFIRMED same session**
+   (user approved a BQ `nse_delivery_daily` lookup + live Upstox `HistoryV3Api` intraday candles):
+   Friday 09-04 close was a normal ₹728.25; Monday 09-07 it gapped down ~64% at the open, printed
+   real volume (65,110 shares) at exactly ₹260.00 in the 09:40 bar, then froze — O=H=L=C=260.00,
+   zero volume, 09:45-09:55, the textbook lower-circuit signature — before NSE reopened price
+   discovery at 10:00 (448K-share range-250-273 print) and it traded actively 250-273 the rest of the
+   day. The exit fired at 09:43:51, *inside* the freeze, at a price real volume proves was genuinely
+   tradeable. Not a monitoring gap, not an exit-logic bug, not an optimistic paper-fill assumption —
+   a real, extreme, company-specific shock (cause unknown; no news lookup attempted) that gapped
+   straight through the stop, the one failure mode no periodic-check stop (or real broker GTT) can
+   defend against. Filed in §7 (resolved) with the residual gap-risk-overlay question left open.
 6. **Scorecard, for context:** post-paper-era (≥07-09) realized P&L across all channels is
    **+₹6,064.09** — delivery **+₹20,737.81** (12 closed, 8W/4L) carries it, insider **−₹14,407.78**
    (2 closed, 0W/2L, HEG dominant) is the biggest drag, momentum roughly flat (**−₹265.94**, 5
