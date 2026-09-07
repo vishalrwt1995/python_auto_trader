@@ -339,6 +339,24 @@ exposure of *any* periodic-check stop on cash equity, not an insider-specific bu
 not yet a pattern: TRUALT's clean −0.98R stop-out the same week argues against over-reacting to n=1,
 and a single company-specific shock isn't evidence the *sizing* is wrong, only that gap risk exists
 and isn't currently hedged (nothing cheap would hedge it for a long-only cash-equity book anyway).
+Also note: **HEG was not even a thin/illiquid name** (₹40-400cr/day turnover throughout) — this was
+pure idiosyncratic single-name event risk, unrelated to insider's usual thin-float profile.
+
+**2026-09-07 follow-up, verified not assumed:** checked whether insider actually lacks a notional
+cap pledge has (the obvious-looking fix) — **it doesn't lack one.** `insider_trading_service.py:74-75`
+already applies `INSIDER_NOTIONAL_CAP_PCT=0.10`, byte-identical mechanism to pledge, via the shared
+`domain/pead_book.position_size() = min(risk/sl_dist, notional_cap/entry)`. Core/momentum (1.5×
+target-weight cap) and swing/intraday (hardcoded 20%/15% in `domain/risk.py`) have analogous caps
+too — nothing is uncapped. The 5.87× multiple is just arithmetic: HEG's stop distance was ~10.6% of
+entry, a 64% gap against that is inherently a ~6× overshoot, independent of which cap bound the
+qty (both landed at ~29 shares here, near-coincidentally). The one real lever, if wanted: insider's
+`notional_cap_pct ÷ risk_pct` ratio is **6.67×** (10%/1.5%) — the theoretical max overshoot in a
+to-zero scenario; delivery/pead sit at **13.3×** (20%/1.5%), untested by a real event yet, structurally
+more exposed. Lowering `*_NOTIONAL_CAP_PCT` only helps on positions where the notional cap — not the
+risk calc — actually binds; needs a backtest of how often that is before touching it (Rule 6), not a
+reactive flip. **Portfolio-level context:** ₹12,286 against the ~₹19L funded roster is ~0.65% of
+total capital — real, but not the crisis the 5.87× framing suggests in isolation. **Recommendation
+if asked again: bundle with the capital-allocation conversation rather than react to n=1.**
 
 ### ★ STILL OPEN — capital-allocation question (raised twice, undiscussed)
 3 of 8 funded channels have been structurally idle for weeks (pledge dormant since 08-24, pead
