@@ -6,10 +6,21 @@
 > **Last verified live state:** **2026-09-07 ~15:15 IST (Mon)** — every value below re-read from
 > live `gcloud`/Firestore/Cloud Logging at that moment, closing the 09-03..09-07 gap flagged above.
 >
-> **`autotrader-00322-42s`** · `autotrader-ws-monitor-00048-b9g` · `autotrader-dashboard-00085-2wh`
-> (unchanged autotrader/ws-monitor since 08-31; dashboard moved 00084-pgl→00085-2wh some time
-> 09-02..09-03 — this is commit `07e878a`, the exit-position/paper-toggle silent-`catch{}` fix, 0
-> errors observed since) · **PAPER** · **60 open positions** (core 30 · momentum 19 · **insider 4**
+> **09-08 UPDATE — corp-action guard SHIPPED + LIVE, both services redeployed:**
+> **`autotrader-00323-87g`** · **`autotrader-ws-monitor-00049-v7q`** (PR #74, merged; dual-deploy per
+> Rule 8 since `order_service.py` is shared). 0 errors on either service post-deploy. New scheduler
+> job `autotrader-corp-calendar-ingest-1905` (`5 19 * * 1-5` IST) created and manually triggered once
+> — confirmed live: `corp_calendar_ingest_summary rows=142 symbols=142`, and HEG's exact demerger row
+> (`subject=Demerger, rec_date=2026-09-07`) verified present in both BQ `nse_corp_actions_live` and
+> the Firestore cache `corp_action_calendar/current` that `order_service.place_exit_order` reads on
+> every SL-type exit. 37 new tests (guard/ingest-parser/order_service-integration), full suite 1199
+> passed/5 skipped pre-deploy. Scheduler now 42 ENABLED/3 PAUSED (+1). See §8 for the full incident
+> and design writeup. Dashboard unchanged this session.
+>
+> **`autotrader-dashboard-00085-2wh`**
+> (dashboard moved 00084-pgl→00085-2wh some time 09-02..09-03 — this is commit `07e878a`, the
+> exit-position/paper-toggle silent-`catch{}` fix, 0 errors observed since) · **PAPER** ·
+> **60 open positions** (core 30 · momentum 19 · **insider 4**
 > · **delivery 5** · pledge 2 — composition shifted, count unchanged: delivery +1 (TATACOMM entered
 > 09-03, clean INE-equity, sized ₹2,552 max_loss) offsetting insider −1 (**HEG exited 09-07, see ★
 > below**) · schedulers **41 ENABLED / 3 PAUSED** (2 intraday + 1 gapfade, unchanged) ·
@@ -735,6 +746,21 @@ Shipped + ENABLED (§8 ⑰, PR #59, rev `autotrader-00289-ftq` + ws-monitor `000
 ## 8. Recent history (newest first)
 
 > Append-only log. Each entry: date · revision/commit · what shipped · live evidence.
+
+### ㊴ 2026-09-08 · corp-action guard SHIPPED + LIVE (all channels) — PR #74
+Full incident + design in the header update above and PR #74's description (`domain/corp_action_
+guard.py`, `services/corp_calendar_ingest_service.py`, `order_service.place_exit_order` gated on
+SL-type `exit_reason` only, fail-open on any lookup error). Dual-deployed (Rule 8): `autotrader-
+00323-87g` + `autotrader-ws-monitor-00049-v7q`, 0 errors either service post-deploy. New table
+`nse_corp_actions_live` + scheduler `autotrader-corp-calendar-ingest-1905`. **E2E-verified live,
+not just deployed**: triggered the new job manually, `corp_calendar_ingest_summary rows=142
+symbols=142`, HEG's actual demerger row confirmed present in both BQ and the Firestore cache the
+guard reads. 37 new tests, 1199 passed/5 skipped pre-deploy, zero regressions. Data source (NSE's
+`corporates-corporateActions` endpoint) was validated live against the real HEG incident before any
+code was built on it, per this project's rule against guessing external APIs.
+**Not yet watched live**: no corp-action-affected SL exit has occurred since deploy (nothing to
+suppress yet) — first real test is whenever the next held symbol has a demerger/split/bonus near
+its record date. Watch `corp_action_guard_suppressed_exit` in logs.
 
 ### ㊳ 2026-09-07 · 5-day gap audit (09-03..09-07) — clean except one real stop-loss anomaly
 No deploy this session (git-sync only: main checkout fast-forwarded `07e878a`→`286252b`, 3
