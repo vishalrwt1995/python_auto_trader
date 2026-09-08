@@ -224,6 +224,13 @@ class AppContainer:
         from autotrader.services.delivery_ingest_service import DeliveryIngestService
         return DeliveryIngestService(bq=self.bq).run(asof=asof)
 
+    def run_corp_calendar_ingest(self, asof: str | None = None) -> dict:
+        """Fetch NSE's corporate-actions calendar (demerger/split/bonus/etc.) → BQ
+        nse_corp_actions_live + a Firestore mirror the corp-action guard reads on every
+        SL-type exit (see domain/corp_action_guard.py). Fail-closed."""
+        from autotrader.services.corp_calendar_ingest_service import CorpCalendarIngestService
+        return CorpCalendarIngestService(bq=self.bq, state=self.state).run(asof=asof)
+
     def insider_reconciliation_service(self) -> InsiderReconciliationService:
         if self._insider_reconciliation_service is None:
             self._insider_reconciliation_service = InsiderReconciliationService(
