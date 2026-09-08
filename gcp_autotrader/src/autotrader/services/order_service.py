@@ -13,6 +13,11 @@ from autotrader.adapters.firestore_state import FirestoreStateStore
 from autotrader.adapters.pubsub_client import PubSubClient
 from autotrader.adapters.upstox_client import UpstoxClient
 from autotrader.domain.attribution import build_row_from_position
+from autotrader.domain import corp_action_guard
+from autotrader.services.corp_calendar_ingest_service import (
+    CORP_ACTION_CALENDAR_COLLECTION,
+    CORP_ACTION_CALENDAR_KEY,
+)
 from autotrader.backtest.costs import CostConfig, compute_round_trip_cost
 from autotrader.settings import AppSettings
 from autotrader.time_utils import now_ist_str, now_utc_iso, parse_any_ts, today_ist
@@ -25,6 +30,16 @@ logger = logging.getLogger(__name__)
 # vs the real ~0.24-0.58% round-trip. Compounding amplified that error, so realized
 # net_pnl now uses costs.py (verified ₹115.24 on a ₹20K swing RT = documented Upstox).
 _UPSTOX_COST = CostConfig.upstox()
+
+# Exit reasons the corp-action guard applies to. Deliberately narrow: TARGET_HIT, MAX_HOLD,
+# EOD_CLOSE, MANUAL_EXIT and friends are legitimate exits a corporate action has no bearing
+# on and must never be blocked by this guard.
+_SL_EXIT_REASON_MARKERS = ("SL_HIT", "SL_BREACH", "PROTECTIVE_SL")
+
+
+def _is_sl_exit_reason(exit_reason: str) -> bool:
+    reason = str(exit_reason or "").upper()
+    return any(marker in reason for marker in _SL_EXIT_REASON_MARKERS)
 
 
 def _realized_round_trip_cost(product: str, qty: int, entry_price: float, exit_price: float) -> float:
@@ -880,6 +895,32 @@ class OrderService:
         side = str(pos.get("side") or "BUY").upper()
         qty = int(pos.get("qty") or 0)
         exit_side = "SELL" if side == "BUY" else "BUY"
+
+        # Corp-action guard (2026-09-08): suppress SL-type exits for a symbol inside the
+        # blast radius of a known corporate action (see domain/corp_action_guard.py — built
+        # after HEG was stopped out for a "loss" that was actually a demerger price
+        # adjustment). Checked here because every one of this system's ten independent
+        # SL-detection paths funnels through this one function before an exit executes.
+        # Fail-OPEN on any lookup problem: a broken guard must never become a new way to
+        # hold a genuine crash too long — allowing the exit is the safe default here, the
+        # opposite of this codebase's usual fail-closed convention, and deliberately so.
+        if self.settings.strategy.corp_action_guard_enabled and _is_sl_exit_reason(exit_reason):
+            try:
+                cached = self.state.get_json(CORP_ACTION_CALENDAR_COLLECTION, CORP_ACTION_CALENDAR_KEY)
+                actions = (cached or {}).get("rows") or []
+                guard = corp_action_guard.is_guard_active(symbol, today_ist(), actions)
+            except Exception:
+                logger.warning("corp_action_guard_lookup_failed tag=%s symbol=%s — allowing exit",
+                                position_tag, symbol, exc_info=True)
+                guard = corp_action_guard.GuardResult(active=False)
+            if guard.active:
+                action = guard.action or {}
+                logger.warning(
+                    "corp_action_guard_suppressed_exit tag=%s symbol=%s exit_reason=%s subject=%s rec_date=%s",
+                    position_tag, symbol, exit_reason, action.get("subject"), action.get("rec_date"),
+                )
+                return {"skipped": "corp_action_guard", "tag": position_tag, "action": dict(action)}
+
         # Mode stickiness: use the position's recorded mode, falling back to
         # the runtime flag for legacy positions that predate the field.
         paper = bool(pos.get("paper", self.settings.runtime.paper_trade))

@@ -1909,6 +1909,37 @@ def run_delivery_ingest(
         raise
 
 
+@app.post("/jobs/corp-calendar-ingest")
+def run_corp_calendar_ingest(
+    x_job_token: str | None = Header(default=None),
+    x_cloudscheduler_jobname: str | None = Header(default=None, alias="X-CloudScheduler-JobName"),
+    x_cloudscheduler_scheduletime: str | None = Header(default=None, alias="X-CloudScheduler-ScheduleTime"),
+) -> dict[str, Any]:
+    """Corp-action guard's daily data feed: fetch NSE's corporate-actions calendar
+    (demerger/split/bonus/etc.) → BQ nse_corp_actions_live + the Firestore mirror
+    order_service.place_exit_order reads on every SL-type exit. Built after HEG (insider)
+    was stopped out for a phantom "loss" that was actually a demerger price adjustment —
+    see domain/corp_action_guard.py. Job: autotrader-corp-calendar-ingest.
+    """
+    c = get_container()
+    _auth(c.settings.runtime.job_trigger_token, x_job_token)
+    sink = LogSink()
+    sched_ctx = _scheduler_ctx(x_cloudscheduler_jobname, x_cloudscheduler_scheduletime)
+    started_perf = time.perf_counter()
+    try:
+        sink.action("CorpCalendarIngestService", "corp_calendar_ingest", "START", "", sched_ctx)
+        out = c.run_corp_calendar_ingest()
+        sink.action("CorpCalendarIngestService", "corp_calendar_ingest", "DONE", "corp calendar ingest complete",
+                    {**sched_ctx, **_duration_ctx(started_perf), **out})
+        sink.flush_all()
+        return out
+    except Exception as e:
+        sink.action("CorpCalendarIngestService", "corp_calendar_ingest", "ERROR", f"{type(e).__name__}: {e}",
+                    {**sched_ctx, **_duration_ctx(started_perf), "errorType": type(e).__name__})
+        sink.flush_all()
+        raise
+
+
 @app.post("/jobs/delivery-reconcile")
 def run_delivery_reconcile(
     x_job_token: str | None = Header(default=None),

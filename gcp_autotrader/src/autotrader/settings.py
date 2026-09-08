@@ -56,6 +56,13 @@ class StrategySettings:
     daily_loss_pct: float = 0.03
     daily_profit_pct: float = 0.06
 
+    # Corp-action guard (2026-09-08): suspends automatic stop-loss exits for a
+    # symbol around a known corporate-action record date (demerger/split/bonus),
+    # across ALL channels — see domain/corp_action_guard.py. Built after HEG
+    # (insider) was stopped out for a "loss" that was actually a demerger price
+    # adjustment, not a real market move. Kill-switch; default on.
+    corp_action_guard_enabled: bool = True
+
     # ── Forward-test epoch (fixed 2026-08-07; env FORWARD_TEST_START) ──────────────
     # THE canonical start of the honest PAPER forward test. The user's ground truth is
     # that the last wrong-logic trades executed 2026-07-24 (a Friday), so the first clean
@@ -528,6 +535,7 @@ class AppSettings:
             capital_pledge=_env_float("CAPITAL_PLEDGE", 0.0),
             daily_loss_pct=_env_float("DAILY_LOSS_PCT", 0.03),
             daily_profit_pct=_env_float("DAILY_PROFIT_PCT", 0.06),
+            corp_action_guard_enabled=_env_bool("CORP_ACTION_GUARD_ENABLED", True),
             forward_test_start=_env("FORWARD_TEST_START", "2026-07-27"),
             risk_per_trade=_env_float("RISK_PER_TRADE", 125),
             max_daily_loss=_env_float("MAX_DAILY_LOSS", 300),
