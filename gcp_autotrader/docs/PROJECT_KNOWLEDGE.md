@@ -3,6 +3,19 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
+> **09-15 — corp_action's "call site unexercised in prod" question is CLOSED, resolved genuinely
+> working.** That worry runs through this doc's older history (search "HONEST GAP" / "STILL
+> UNEXERCISED") — as of 09-15 it's settled: traced the live call chain end-to-end
+> (`web/api.py:2147` → `corp_action_trading_service.py:178` →
+> `corp_action_signal_service.fetch_corp_events()`) and confirmed it fires daily, hits real NSE
+> data, and has run on 6 of the last 7 weekdays (09-07/09/10/11/14/15) — the one miss, 09-08, was a
+> Cloud Run "no available instance" scaling abort that hit every channel's scan that day, not a
+> corp_action-specific defect. Zero bonus/split events found all 6 runs, which is now a *verified*
+> empty result, not an unverified one. Full per-channel gate check same day: insider/pledge shut
+> (Nifty below 100DMA, breadth fine at 57.49), pead shut (nifty_dd −11.1%), swing still breadth-gated
+> at 57.49 (weeks running now — the capital-allocation conversation's most idle piece, ₹5L), core/
+> momentum correctly idle pre-Oct-1, intraday/gap_fade correctly off. Nothing anomalous.
+>
 > **Last verified live state:** **2026-09-07 ~15:15 IST (Mon)** — every value below re-read from
 > live `gcloud`/Firestore/Cloud Logging at that moment, closing the 09-03..09-07 gap flagged above.
 >
