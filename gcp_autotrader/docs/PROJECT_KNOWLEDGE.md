@@ -3,6 +3,17 @@
 > **Purpose:** Single source of truth for any Claude session, started at any time.
 > **Read this file first** in every new chat. It is committed to the repo and updated continuously.
 >
+> **09-17 — regime flipped RANGE→PANIC ~09-16 08:30 IST, still held 09-17.** `risk_mode=DEFENSIVE`,
+> `size_multiplier`/`max_positions_multiplier`=0.5, `swing_permission=REDUCED`. `breadth_ema200_pct`
+> 57.49 (09-15) → 52.26 (09-16) → 53.56 (09-17) — dipped further, still nowhere near swing's 70 gate.
+> Nifty close 23217.6, below EMA20/50/200, `regimeDaily=RISK_OFF`. **Caveat, not yet resolved: VIX
+> is only 12.45 (calm) and 09-17 is flagged `EXPIRY_SESSION`/`EVENT_DISTORTION`** — reads more like
+> breadth/structure weakness on an options-expiry day than a genuine vol panic. Zero downstream
+> effect so far (insider/pledge/pead were already gated shut for unrelated reasons; delivery's book
+> was already full) — flagged for continuity, not yet actionable. Otherwise 09-15→09-17: zero infra
+> drift, zero position/P&L change, errors all known-benign ws-monitor reconnect churn. Every channel
+> gate re-confirmed correct (see 09-15 entry above for detail).
+>
 > **09-15 — corp_action's "call site unexercised in prod" question is CLOSED, resolved genuinely
 > working.** That worry runs through this doc's older history (search "HONEST GAP" / "STILL
 > UNEXERCISED") — as of 09-15 it's settled: traced the live call chain end-to-end
